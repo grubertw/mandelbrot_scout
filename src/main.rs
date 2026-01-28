@@ -103,12 +103,13 @@ impl ApplicationHandler for Runner {
                         .await
                         .expect("Create adapter");
 
-                    let adapter_features = adapter.features();
+                    let adapter_features = 
+                        adapter.features() & wgpu::Features::default();
                     let capabilities = surface.get_capabilities(&adapter);
 
                     let (device, queue) = adapter
                         .request_device(&wgpu::DeviceDescriptor {label: None,
-                            required_features: adapter_features &wgpu::Features::default(),
+                            required_features: adapter_features,
                             required_limits: wgpu::Limits::default()}, None)
                         .await
                         .expect("Request device");
@@ -199,28 +200,27 @@ impl ApplicationHandler for Runner {
 
                 match surface.get_current_texture() {
                     Ok(frame) => {
-                        let mut encoder = device.create_command_encoder(
-                            &wgpu::CommandEncoderDescriptor { label: None });
-
                         let view = frame.texture.create_view(
                             &wgpu::TextureViewDescriptor::default());
 
                         {
                             let mut s = scene.borrow_mut();
 
-                            // Clear the frame
-                            let mut render_pass = Scene::clear(&view, &mut encoder);
-                            s.stamp_frame();
-
                             // Ask ScoutEngine for it's current tile orbits and push to the GPU
                             s.query_tile_orbits(queue);
 
-                            // Draw the scene
-                            s.draw(&queue, &mut render_pass);
+                            // Draw the scene (contains both fragment render and compute passes)
+                            s.draw(&device, &queue, &view);
 
-                            //s.read_gpu_feedback(&device, &queue);
+                            s.stamp_frame();
                             s.read_debug(&device, &queue);
+                            //s.read_gpu_feedback(&device, &queue);
+                            s.read_orbit_feedback(&device, &queue);
+                            //s.read_gpu_texture_feedback(&device, &queue);
                         }
+
+                        let mut encoder = device.create_command_encoder(
+                            &wgpu::CommandEncoderDescriptor { label: None });
 
                         // Draw Iced on top
                         renderer.present(engine, &device, &queue, &mut encoder, 

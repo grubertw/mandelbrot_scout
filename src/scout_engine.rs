@@ -11,14 +11,14 @@ use futures::future::{join_all, RemoteHandle};
 use futures::executor::{ThreadPool};
 
 use rug::{Float, Complex};
-use log::{debug, info};
+use log::{trace, debug, info};
 
 use std::collections::HashMap;
 use std::time;
 use std::sync::{Arc, Mutex, Weak};
 
 // Maximum size the orbit pool can be before we begin to trim the lowest ranked ones
-const MAX_ORBIT_POOL_SIZE: usize = 25;
+const MAX_ORBIT_POOL_SIZE: usize = 500;
 
 // Common types used throughout the module - mainly between async functions and accross the
 // sync/async barrier
@@ -98,6 +98,7 @@ struct ReferenceOrbit {
     gpu_payload: OrbitGpuPayload,
     escape_index: Option<u32>,
     max_lambda: Float,
+    max_valid_perturb_index: u32,
     weights: HeuristicWeights,
     current_score: i64,
     creation_time: time::Instant,
@@ -254,58 +255,60 @@ impl ScoutEngine {
         self.gpu_feedback_tx.try_send(feedback).ok();
     }
 
-    // Determine which tiles lie 'underneath' the current viewport, then return
-    // a list of tiles that has been translated/packed for consumption via the GPU.
-    // NOTE: GPU packing of orbits is paid up-front during orbit creation, which means 
-    // this call should be relativly cheap to make, where it's only job is to map pixel
-    // space to the complex plane and retriving the tiles anchored to these complex 
-    // cordinates. 
-    // NOTE: There is no guarantee that tile views have any orbits in lists at the 
-    // moment of this query. ScoutEngine itself will request redraws however, which 
-    // should trigger the Scene to invoke this method again.
-    pub fn query_tiles_under_viewport(&self, center: &Complex, scale: &Float, 
-            viewport_aspect: f64) -> Vec<signals::TileOrbitViewDf> {
-        let mut vp_w = scale.clone() * viewport_aspect;
-        let mut vp_h = scale.clone();
+    // Determine which complex tiles lie within a bounding box, based on a complex
+    // top left point and complex bottom right point. Bounding itself is driven by
+    // the integer lattice calculation of TileId(s), based on tile_size, and is the 
+    // same mechinizm for determining the base tile for any complex C.
+    // 
+    // It is very important to remember here that ScoutEngine is ONLY aware of 
+    // complex-space tiles, and NOT screen-space tiles, whos geometry is derived 
+    // from a rug::Float tile_size, rather than an integer pixel count (i.e. 16 or 32)
+    // It is up to the scene to map these complex tiles to corresponding screen tiles.
+    //
+    // It is also important to remember that TileOrbitView(s) hold WEAK reference to 
+    // orbits, which means there is a possibility that no LiveOrbit(s) are found - 
+    // and hence no converted ReferenceOrbitDf(s). Concerning this reference orbit 
+    // conversion, the cost is relativly cheap, as the LiveOrbit(s) themselves hold
+    // the GPU-packed arrays (i.e. x4 per orbit)
+    pub fn query_tiles_in_bounding_box(&self, 
+        top_left: &Complex, bot_rght: &Complex
+    )-> Vec<signals::TileOrbitViewDf> {
+        //trace!("Query tiles in bounding box [{:?} {:?}]", top_left, bot_rght);
+        let mut tl_tiles = Vec::<TileId>::new();
+        let mut br_tiles = Vec::<TileId>::new();
 
-        let mut tile_size = self.config.tile_levels[0].tile_size.clone();
-        tile_size /= 2;
-        vp_w += &tile_size;
-        vp_h += &tile_size;
+        for level in self.config.tile_levels.iter() {
+            let t_tl = TileId::from_point(top_left, &level.tile_size);
+            let t_br = TileId::from_point(bot_rght, &level.tile_size);
 
-        let mut bot_left = center.clone();
-        let (bl_re, bl_im) = bot_left.as_mut_real_imag();
-        *bl_re -= &vp_w;
-        *bl_im -= &vp_h;
+            //trace!("Query Tile BBox at level {} is: [{:?} {:?}]", level.level, &t_tl, &t_br);
+            tl_tiles.push(t_tl);
+            br_tiles.push(t_br);
+        }
 
-        let mut top_right = center.clone();
-        let (tr_re, tr_im) = top_right.as_mut_real_imag();
-        *tr_re += &vp_w;
-        *tr_im += &vp_h;
-
-        debug!("Query tiles under viewport. bounding box is \n\t\t\t\t\t[({:?} {:?})\n\t\t\t\t\t ({:?} {:?})]", 
-                bl_re, tr_re, bl_im, tr_im);
-
-        let mut level_0_tile_count: u32 = 0;
-        let mut level_1_tile_count: u32 = 0;
         let mut num_tiles_in_bounds: u32 = 0;
+        let mut num_orbits_found: u32 = 0;
 
         let mut df_tiles = Vec::<signals::TileOrbitViewDf>::new();
         let reg = self.tile_registry.lock().unwrap();
         for ((t_level, tile_id), view) in reg.iter() {
-            let tile_re = view.geometry.center.real();
-            let tile_im = view.geometry.center.imag();
+            let t_lev = *t_level as usize;
+            let t_tl_x = tl_tiles[t_lev].tx;
+            let t_tl_y = tl_tiles[t_lev].ty; 
+            let t_br_x = br_tiles[t_lev].tx;
+            let t_br_y = br_tiles[t_lev].ty;
 
-            if   tile_re > bl_re && tile_re < tr_re  
-              && tile_im > bl_im && tile_im < tr_im && *t_level > 0 {
+            if tile_id.tx >= t_tl_x && tile_id.tx <= t_br_x &&
+               tile_id.ty >= t_tl_y && tile_id.ty <= t_br_y {
                 let mut live_orbits = Vec::<LiveOrbit>::new();
                 for weak_orb in &view.weak_orbits {
                     if let Some(orb) = weak_orb.upgrade() {
                         live_orbits.push(orb);
                     }
                 }
-                let df_orbits = live_orbits.iter().map(|s_orb| {
-                    let orb = s_orb.lock().unwrap();
+                let df_orbits: Vec<signals::ReferenceOrbitDf> = live_orbits.iter().map(|orb_g| {
+                    let orb = orb_g.lock().unwrap();
+                    num_orbits_found += 1;
                     signals::ReferenceOrbitDf {
                         orbit_id: orb.orbit_id,
                         c_ref: orb.c_ref_df,
@@ -314,27 +317,29 @@ impl ScoutEngine {
                         orbit_im_hi: orb.gpu_payload.im_hi.clone(),
                         orbit_im_lo: orb.gpu_payload.im_lo.clone(),
                         escape_index: orb.escape_index,
+                        max_valid_perturb_index: orb.max_valid_perturb_index,
                         creation_time: orb.creation_time,
                     }
                 }).collect();
+
+                let orb_id_log: Vec<u64> = df_orbits.iter().map(|orb| orb.orbit_id).collect();
+                if orb_id_log.len() > 0 {
+                    trace!("Query Tiles in BBox found {:?} with {} orbits.\tIDs: {:?}",
+                        &tile_id, &df_orbits.len(), orb_id_log);
+                }
 
                 df_tiles.push(signals::TileOrbitViewDf {
                     tile: tile_id.clone(),
                     geometry: view.geometry.clone(),
                     orbits: df_orbits,
                 });
-
-                debug!("Found tile {:?} with {} orbits",
-                    tile_id, view.weak_orbits.len());
                 num_tiles_in_bounds += 1;
             }
-
-            if *t_level == 0 {level_0_tile_count += 1;}
-            if *t_level == 1 {level_1_tile_count += 1;} 
         }
-
-        debug!("Level 0 tile count is {}.\tLevel 1 tile count is {}. Total number of tiles found in-bounds {}", 
-            level_0_tile_count, level_1_tile_count, num_tiles_in_bounds);
+        if num_orbits_found > 0 {
+            trace!("Total number of tiles found in-bounds: {}. Total number of orbits found: {}", 
+                num_tiles_in_bounds, num_orbits_found);
+        }
         df_tiles
     }
 
@@ -490,6 +495,7 @@ impl ScoutEngine {
             orbit: orbit_result.orbit, gpu_payload,
             escape_index: orbit_result.escape_index,
             max_lambda: Float::with_val(prec, 0.0),
+            max_valid_perturb_index: orbit_result.escape_index.unwrap_or(max_iter),
             weights: HeuristicWeights{ w_dist: 0.0, w_depth: 0.0, w_age: 0.0 },
             current_score: 0,
             creation_time,
@@ -593,7 +599,6 @@ impl ScoutEngine {
             for orbit in new_orbits {
                 let orbit_guard = orbit.lock().unwrap();
                 let c_ref = orbit_guard.c_ref.clone();
-                let orbit_id = orbit_guard.orbit_id;
                 drop(orbit_guard);
 
                 // Enumerate candidate tiles
@@ -638,7 +643,7 @@ impl ScoutEngine {
             }
             view.weak_orbits.clear();
             live_orbits.sort_by_key(|orb| score_tile_view_orbit(orb.clone()));
-            //live_orbits.truncate(view.max_orbits_per_tile);
+            live_orbits.truncate(view.max_orbits_per_tile);
             // Ensure only live orbits are kept, even if we revert them
             // back to weak references
             for orb in live_orbits {

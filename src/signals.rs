@@ -55,6 +55,7 @@ pub struct ReferenceOrbitDf {
     pub orbit_im_hi: Vec<f32>,
     pub orbit_im_lo: Vec<f32>,
     pub escape_index: Option<u32>,
+    pub max_valid_perturb_index: u32,
     pub creation_time: time::Instant,
 }
 
