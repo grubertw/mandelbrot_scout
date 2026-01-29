@@ -292,7 +292,7 @@ fn mandelbrot_df_from_z(z: ComplexDf, c: ComplexDf) -> u32 {
 
 const K = 0.25;
 const validity_radius2 = 0.01; // or 0.001 to be stricter
-const PERTURB_DELTA_C_LIMIT = 1e-3;
+const PERTURB_DELTA_C_PIXELS = 0.05; // 0.25=very aggressive | 0.001=ultra-safe
 
 // OrbitMeta Flags From CPU
 const ORBIT_USABLE: u32 = 0x00000010u;   // Derived orbit meta flag
@@ -442,18 +442,22 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
 
         orb_meta = orbit_meta[orbit_idx];
         if ((orb_meta.flags & ORBIT_USABLE) != 0u) {
-            let delta_c_mag = df_mag2_upper(delta_c.r, delta_c.i);
+            let delta_c_mag2 = df_mag2_upper(delta_c.r, delta_c.i);
             let scale2 = uni.scale_hi * uni.scale_hi;
 
-            let delta_c_ok =
-                delta_c_mag < PERTURB_DELTA_C_LIMIT * scale2;
+            // Δc allowed as a fraction of pixel 'footprint'
+            // i.e. fractions of a pixel on the complex plane
+            let delta_c_pix = PERTURB_DELTA_C_PIXELS;
 
-            let orbit_len_ok =
-                orb_meta.ref_len >= (uni.max_iter >> 1u);
+            // Give a bias to log reference orbits.
+            let len_factor =
+                f32(orb_meta.ref_len) / f32(uni.max_iter);
 
-            if (delta_c_ok && orbit_len_ok) {
-                use_perturbation = true;
-            }
+            // And clamp so it never explodes
+            let len_boost = clamp(len_factor, 0.25, 1.0);
+
+            use_perturbation =
+                delta_c_mag2 < (delta_c_pix * delta_c_pix) * scale2 * len_boost;
         }
     }
 

@@ -1,5 +1,5 @@
 use super::numerics::{Df, ComplexDf};
-use super::scout_engine::{TileId, TileGeometry};
+use super::scout_engine::tile::{TileId, TileGeometry};
 
 use std::hash::{Hash, Hasher};
 use std::time;

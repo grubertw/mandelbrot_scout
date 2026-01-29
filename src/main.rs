@@ -1,5 +1,6 @@
 mod controls;
 mod scene;
+mod gpu_pipeline;
 
 #[allow(dead_code)]
 mod numerics;
