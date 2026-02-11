@@ -5,8 +5,8 @@ pub mod policy;
 use crate::scene::policy::*;
 use crate::gpu_pipeline::builder::*;
 use crate::gpu_pipeline::structs::*;
-use crate::numerics::{Df, ComplexDf};
-use crate::signals::{FrameStamp, CameraSnapshot, GpuFeedback, TileOrbitViewDf, ReferenceOrbitDf};
+use crate::numerics::*;
+use crate::signals::*;
 use crate::scout_engine::{ScoutConfig, HeuristicConfig, ScoutEngine};
 use crate::scout_engine::tile::{TileId, TileLevel};
 
@@ -17,8 +17,9 @@ use iced_wgpu::wgpu::BufferAsyncError;
 use iced_winit::winit::window::Window;
 
 use rug::{Float, Complex};
-use log::{trace, debug, info};
+use log::{trace, debug, info, warn};
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hasher};
 use std::sync::Arc;
 use std::mem::size_of;
 use std::time;
@@ -36,6 +37,7 @@ pub struct Scene {
     pix_dy: Float,
     scout_engine: ScoutEngine,
     loaded_orbits: Vec<(TileId, u64)>,
+    feedback_hash: u64, // Hash of loaded orbits, used to send feedback to scout engine only when it's changed.
     uniform: SceneUniform,
     pipeline: PipelineBundle,
 }
@@ -60,24 +62,18 @@ impl Scene {
         let scout_config = ScoutConfig {
             max_live_orbits: MAX_LIVE_ORBITS,
             max_orbit_iters: MAX_REF_ORBIT,
-            rug_precision: INIT_RUG_PRECISION,
             heuristic_config: HeuristicConfig {
-                weight_1: 0.0
+                frame_decay_increment: FRAME_DECAY_INCREMENT,
+                tile_deficiency_threshold: TILE_DEFICIENCY_THRESHOLD,
             },
-            tile_levels: vec![
-                //TileLevel {
-                //    level: 0,
-                //    tile_size: Float::with_val(INIT_RUG_PRECISION, K),
-                //    max_orbits_per_tile: 3
-                //},
-                TileLevel {
-                    level: 0,
-                    tile_size: Float::with_val(INIT_RUG_PRECISION, 5.0 * PERTURB_THRESHOLD),
-                    influence_radius_factor: 1.25,
-                    max_orbits_per_tile: 3,
-                },
-            ],
-            exploration_budget: 5.0,
+            orbit_rng_seed: ORBIT_RNG_SEED,
+            init_rug_precision: INIT_RUG_PRECISION,
+            base_tile_size: BASE_COMPLEX_TILE_SIZE,
+            tile_level_addition_increment: STARTING_NUM_TILE_LEVELS,
+            ideal_tile_pix_width: IDEAL_TILE_PIX_WIDTH,
+            num_orbits_to_spawn_per_tile: NUM_ORBITS_PER_TILE_SPAWN,
+            initial_max_orbits_per_tile: MAX_ORBITS_PER_TILE,
+            exploration_budget: EXPLORATION_BUDGET,
         };
 
         let scout_engine = ScoutEngine::new(window, scout_config);
@@ -101,7 +97,8 @@ impl Scene {
         Scene { 
             frame_id: 0, frame_timestamp: time::Instant::now(), 
             scale, scale_factor: Float::with_val(80, 1.04),
-            center, width, height, pix_dx, pix_dy, scout_engine, loaded_orbits,
+            center, width, height, pix_dx, pix_dy, scout_engine, 
+            loaded_orbits, feedback_hash: 0,
             uniform, pipeline
         }
     }
@@ -217,11 +214,15 @@ impl Scene {
     }
 
     pub fn read_orbit_feedback(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Vec<OrbitFeedbackOut> {
+    ) {
         let byte_size = self.uniform.ref_orb_count as u64 * std::mem::size_of::<OrbitFeedbackOut>() as u64;
+        if byte_size == 0 {
+            warn!("This frame had no orbit feedback. RefOrb count was zero!");
+            return;
+        }
 
         let mut encoder = device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
@@ -271,15 +272,45 @@ impl Scene {
             }
         });
 
-        debug!("FROM GPU: (Valid OrbitFeedback, by slot #/orbit_idx)");
-
-        for (i, fb) in feedback.iter().enumerate() {
-            if fb.perturb_attempted_count > 0 {
-                debug!("  Orbit Slot #{} feedback={:?}", i, fb);
-            }
+        // Determine if the GPU orbit-slot configuration has changed.
+        let mut hasher = DefaultHasher::new();
+        for o in &self.loaded_orbits {
+            hasher.write_i64(o.0.tx);
+            hasher.write_i64(o.0.ty);
+            hasher.write_u64(o.1);
         }
+        let orbit_slot_config_hash = hasher.finish();
 
-        feedback
+        // Only send orbit observactiosn of the GPU orbit-slot config has changed.
+        if orbit_slot_config_hash != self.feedback_hash && 
+           self.loaded_orbits.len() == self.uniform.ref_orb_count as usize {
+            debug!("FROM GPU: (Valid OrbitFeedback, by slot #/orbit_idx)");
+            for (i, fb) in feedback.iter().enumerate() {
+                if fb.perturb_attempted_count > 0 {
+                    debug!("  Orbit Slot #{} feedback={:?}", i, fb);
+                }
+            }
+
+            let observations: Vec<OrbitObservation> = feedback
+                .iter()
+                .enumerate()
+                .map(|(i, v)| OrbitObservation{
+                    frame_stamp: FrameStamp {
+                        frame_id: self.frame_id,
+                        timestamp: self.frame_timestamp
+                    },
+                    tile_id: self.loaded_orbits[i].0,
+                    orbit_id: self.loaded_orbits[i].1,
+                    feedback: *v
+                })
+                .collect(); 
+
+            self.scout_engine.submit_orbit_observations(observations);
+            self.feedback_hash = orbit_slot_config_hash;
+        } else {
+            trace!("Orbit Slot config unchanged. Will not send observations this frame. num loaded orbits is {}",
+                self.loaded_orbits.len());
+        }
     }
 
     pub fn read_debug<'a>(&'a self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -415,35 +446,42 @@ impl Scene {
                 timestamp: self.frame_timestamp
             },
             center: self.center.clone(),
-            scale: self.scale.clone(),
+            // ScoutEngine needs pixel scale, not viewport scale.
+            // Pick the bigger one, so the other dimension has some 
+            // overlap, which is desireable! 
+            scale: self.pix_dx.clone().max(&self.pix_dy),
+            screen_extent_multiplier: self.width.max(self.height) / 2.0
         };
 
         self.scout_engine.submit_camera_snapshot(cam_snap);
     }
 
     pub fn query_tile_orbits(&mut self, queue: &wgpu::Queue) {
-        // First query for all complex tiles that fall within the viewport
-        let mapper = PixelToComplexMapper::new(self.width, self.height, self.center.clone(), self.scale.clone());
-        let vp_c_min = mapper.pixel_to_complex(0.0, 0.0);
-        let vp_c_max = mapper.pixel_to_complex(self.width, self.height);
-        let tiles = self.scout_engine.query_tiles_in_bounding_box(&vp_c_min, &vp_c_max);
+        // First check if ScoutEngine's context has changed. 
+        if self.scout_engine.context_changed() {
+            // Query for all complex tiles that fall within the viewport
+            let mapper = PixelToComplexMapper::new(self.width, self.height, self.center.clone(), self.scale.clone());
+            let vp_c_min = mapper.pixel_to_complex(0.0, 0.0);
+            let vp_c_max = mapper.pixel_to_complex(self.width, self.height);
+            let tiles = self.scout_engine.query_tiles_in_bounding_box(&vp_c_min, &vp_c_max);
 
-        // Flatten complex tiles into orbit slots for the orbit (atlas) texture
-        let slots = build_gpu_orbit_slots_from_tiles(tiles, self.uniform.scale_hi as f64);
+            // Flatten complex tiles into orbit slots for the orbit (atlas) texture
+            let slots = build_gpu_orbit_slots_from_tiles(tiles, self.uniform.scale_hi as f64);
 
-        // Upload orbit atlas and orbit meta to GPU
-        self.upload_reference_orbits(&slots, queue);
-        self.upload_reference_orbit_meta(&slots, queue);
+            // Upload orbit atlas and orbit meta to GPU
+            self.upload_reference_orbits(&slots, queue);
+            self.upload_reference_orbit_meta(&slots, queue);
 
-        // Shader needs a way to index into the orbit atlas, which is done based 
-        // on screen-space tile locations.
-        self.upload_tile_orbit_index(&slots, queue);
+            // Shader needs a way to index into the orbit atlas, which is done based 
+            // on screen-space tile locations.
+            self.upload_tile_orbit_index(&slots, queue);
+        }
     }
 
     fn upload_reference_orbits(&mut self, orbit_slots: &Vec<GpuOrbitSlot>, queue: &wgpu::Queue) {
         self.loaded_orbits.clear();
         if orbit_slots.len() == 0 {
-            debug!("Upload reference orbits found no orbit slots for this frame update!");
+            warn!("Upload reference orbits found no orbit slots for this frame update!");
             return;
         }
 
@@ -556,7 +594,7 @@ impl Scene {
                 trace_str.push_str("\n\t");
                 curr_row = tworb.0;
             }
-            trace_str.push_str(format!("{:?} ", tworb ).as_str());
+            trace_str.push_str(format!("{:>3?} ", tworb ).as_str());
         }
         trace!("{}", trace_str);
 

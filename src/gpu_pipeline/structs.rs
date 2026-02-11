@@ -89,7 +89,7 @@ unsafe impl bytemuck::Zeroable for DebugOut {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuOrbitMeta {
-    pub ref_len: u32,
+    pub stability: f32,
     pub escape_index: u32,
     pub flags: u32,
     pub pad: u32,
@@ -106,9 +106,9 @@ bitmask! {
 }
 
 impl GpuOrbitMeta {
-    pub fn new(ref_len: u32, escape_index: Option<u32>, orbit_meta_mask: OrbitMetaMask) -> Self {
+    pub fn new(stability: f32, escape_index: Option<u32>, orbit_meta_mask: OrbitMetaMask) -> Self {
         Self {
-            ref_len,
+            stability,
             escape_index: escape_index.unwrap_or(u32::MAX),
             flags: *orbit_meta_mask,
             pad: 0

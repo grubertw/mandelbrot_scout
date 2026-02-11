@@ -183,7 +183,7 @@ fn load_ref_orbit(orbit_idx: u32, iter: u32) -> ComplexDf {
 }
 
 struct OrbitMeta {
-    ref_len: u32,        // how many Z_n are valid
+    stability: f32,      // how many Z_n are valid
     escape_index: u32,   // or 0xFFFFFFFF if None
     flags: u32,          // bitmask (future use)
     pad: u32,            // 16-byte alignment
@@ -430,7 +430,7 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
     // lookup an orbit index for use with orbit reference atlas texture,
     // by way of determining the screen-space tile for this pixel
     let orbit_idx = load_tile_orbit_index(pix);
-    var orb_meta = OrbitMeta(0u, 0u, 0u, 0u);
+    var orb_meta = OrbitMeta(0.0, 0u, 0u, 0u);
     var use_perturbation = false;
 
     // If the orbit index is out-of-bounds with our current atlas, then 
@@ -451,7 +451,7 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
 
             // Give a bias to log reference orbits.
             let len_factor =
-                f32(orb_meta.ref_len) / f32(uni.max_iter);
+                f32(orb_meta.stability) / f32(uni.max_iter);
 
             // And clamp so it never explodes
             let len_boost = clamp(len_factor, 0.25, 1.0);
@@ -481,7 +481,7 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
             debug_out.delta_c_im_hi = delta_c.i.hi;
             debug_out.delta_c_im_lo = delta_c.i.lo;
             debug_out.orbit_idx = orbit_idx;
-            debug_out.orbit_meta_ref_len = orb_meta.ref_len;
+            debug_out.orbit_meta_ref_len = u32(orb_meta.stability);
         }
     } else {
         var z = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));

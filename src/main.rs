@@ -36,8 +36,11 @@ use winit::{
     window::{Window, WindowId, WindowAttributes},
 };
 
-use log::{debug, error, info, trace};
+use log::{debug, error, info};
+use chrono::Local;
+use anstyle::Style;
 
+use std::io::Write;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -170,7 +173,7 @@ impl ApplicationHandler for Runner {
         else {
             return;
         };
-        trace!("Runner.window_event - {:?} {:?}", _window_id, event);
+        //trace!("Runner.window_event - {:?} {:?}", _window_id, event);
         
         match event {
             WindowEvent::RedrawRequested => {
@@ -375,7 +378,32 @@ impl ApplicationHandler for Runner {
 }
 
 pub fn main() -> Result<(), winit::error::EventLoopError> {
-    env_logger::init();
+    // Define a better log format!
+    env_logger::builder()
+        .format(|buf, record| {
+            // Color the level
+            let level_style = buf.default_level_style(record.level()).bold();
+            let bold = Style::new().bold();
+
+            // Time: local, with microseconds
+            let ts = Local::now().format("%y-%m-%d %H:%M:%S:%6f");
+
+            // Thread ID/truncated name
+            let thread = std::thread::current();
+            let thread_id = format!("{:?}", thread.id());
+
+            // Level, module (target)
+            writeln!(
+                buf,
+                "{bold}[{} {{{}}}{bold:#} {level_style}{}{level_style:#} {bold}{}]{bold:#} {}",
+                ts,
+                thread_id,
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .init();
 
     // Initialize winit
     let event_loop = EventLoop::new().expect("Opening winit Event Loop");
