@@ -1,19 +1,20 @@
 use crate::scout_engine::orbit::*;
-use crate::signals::{FrameStamp};
+use crate::scout_engine::utils::*;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
 
 use rug::{Float, Complex};
+use log::{trace, debug, info};
 
 pub type TileLevels = Arc<RwLock<Vec<TileLevel>>>;
 pub type TileView = Arc<RwLock<TileOrbitView>>;
 pub type TileRegistry = Arc<RwLock<HashMap<TileId, TileView>>>;
 
-const INIT_INFLUENCE_RADIUS_FAC: f64 = 1.0;
-const INIT_MAX_ORBITS_PER_TILE: usize = 3;
-pub const STARTING_LOCAL_SCORE: f64 = 100.0; // A 'bad' score, but not the worst!
+pub const BASE_TILE_SIZE: f64 = 1e-1;
+
+const TILE_LEVEL_ADDITION_INCREMENT: u32 = 9;
 
 #[derive(Clone, Debug)]
 pub struct TileLevel {
@@ -22,40 +23,17 @@ pub struct TileLevel {
     /// Size of one tile in complex-plane units
     /// (e.g. 0.25, 2.5e-6, ...)
     pub tile_size: Float,
-    /// Influence that an orbit in the "resident" tile has on surrounding
-    /// tiles in the grid. 1=no influence, 1.2=includes the cross, 
-    /// 1.5=inclueds all 8 surrounding tiles
-    pub influence_radius_factor: f64, // between 1 & 2 (usually 1.5)
-    /// The ideal scale the camera should be to fit the ideal #'of pixels
-    /// for a tile level.
-    pub ideal_scale: Float,
-    /// Preferred minimum scale threshold
-    pub preferred_scale_min: Float,
-    /// preferred maximum scale threshold
-    pub preferred_scale_max: Float,
 }
 
 impl TileLevel {
-    // Good starting base is 1e-1, with ideal pixel width of 32.
-    // This maps approximately to the starting conditions for level 0 
-    // to begin at a viewport scale that contains the entire mandelbrot
-    // from -2 to 1. (i.e. vieport scale ~3). Scout engine deals with pixel
-    // widths however, and hence why the tile_size is devided by pixels 
-    // rather than multiplied.
     pub fn new(
-        level: u32, base_tile_size: &Float, 
-        ideal_tile_pix_width: &Float,
+        level: u32, rug_precision: u32, 
     ) -> Self {
-        let tile_size = base_tile_size.clone() / (2.0_f64).powi(level as i32);
-        let ideal_scale = tile_size.clone() / ideal_tile_pix_width;
-        let preferred_scale_min = ideal_scale.clone() / (10.0_f64).sqrt();
-        let preferred_scale_max = ideal_scale.clone() * (10.0_f64).sqrt();
+        let base_size = Float::with_val(rug_precision, BASE_TILE_SIZE);
+        let tile_size = base_size.clone() / (2.0_f64).powi(level as i32);
 
         Self {
             level, tile_size, 
-            influence_radius_factor: INIT_INFLUENCE_RADIUS_FAC,
-            ideal_scale,
-            preferred_scale_min, preferred_scale_max,
         }
     }
 }
@@ -63,15 +41,14 @@ impl TileLevel {
 // TileId's are our way to create a deterministic 'integer lattice' atop
 // the complex co-orditate space. Think graph paper. And like graph paper, 
 // it remains stationary, and the viewport camera behaves like a 'lens' or
-// magnifying glass. Tile levels come into play as we zoom, offering a 
-// new set of grid-lines for us to define boundires as scale changes - mainly
-// with an incrementing level number as we decrease our scale and zoom into
-// the fractal. 
+// magnifying glass. 
+// Integers should always be derived from a 'known' tile_size, i.e. 
+// From a TileLevel assigned to a TileView, or the 'master list' inside the 
+// TileFactory
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct TileId {
     pub tx: i64, // floor(re / tile_size)
     pub ty: i64, // floor(im / tile_size)
-    pub level: u32 // level of the integer lattice constraints above
 }
 
 impl TileId {
@@ -88,16 +65,18 @@ impl TileId {
 
         let tx = re.floor().to_f64() as i64;
         let ty = im.floor().to_f64() as i64;
-        Self { tx, ty, level: level.level }
+        Self { tx, ty }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct TileGeometry {
     /// Center of the tile in the complex plane
-    pub center: Complex,
+    center: Complex,
     // C-Tiles are always square 
-    pub radius: Float,
+    radius: Float,
+    // Cache half-diagnal, as it's used heavily
+    half_diagonal: Float,
 }
 
 impl TileGeometry {
@@ -105,15 +84,23 @@ impl TileGeometry {
         let mut center_re = tile_size.clone() * tile_id.tx;
         let mut center_im = tile_size.clone() * tile_id.ty;
 
-        center_re += tile_size.clone() / 2;
-        center_im += tile_size.clone() / 2;
+        let mut radius = tile_size.clone();
+        radius /= 2;
+
+        center_re += radius.clone();
+        center_im += radius.clone();
+
+        let mut diag = radius.clone();
+        diag *= &radius;
+        diag *= 2;
+        let half_diagonal = Float::sqrt(diag);
 
         Self {
             center: Complex::with_val(
                 tile_size.prec(),
                 (center_re, center_im)
             ),
-            radius: tile_size.clone() / 2,
+            radius, half_diagonal
         }
     }
 
@@ -121,11 +108,12 @@ impl TileGeometry {
         &self.center
     }
 
-    pub fn half_diagonal(&self) -> Float {
-        let mut rad = self.radius.clone();
-        rad *= &self.radius;
-        rad *= 2;
-        Float::sqrt(rad)
+    pub fn radius(&self) -> &Float {
+        &self.radius
+    }
+
+    pub fn half_diagonal(&self) -> &Float {
+        &self.half_diagonal
     }
 }
 
@@ -140,83 +128,138 @@ pub enum OrbitSeedStrategy {
 #[derive(Clone, Debug)]
 pub struct TileOrbitView {
     /// Tile identity (stable)
-    pub tile: TileId,
+    pub id: TileId,
+    /// Tile's level on the descending 1/2^lv heirarchy 
+    pub level: TileLevel,
     /// Geometry of this tile
     pub geometry: TileGeometry,
-    /// Per-orbit local statistics
-    pub orbit_stats: HashMap<OrbitId, TileOrbitStats>,
-    /// Weak refs into the global LivingOrbits pool
-    pub weak_orbits: Vec<(f64, WeakOrbit)>,
-    /// Tile-level aggregate signal
-    pub local_score: f64,
+    /// Our orbit anchor, who's r_valid fills the square bounds
+    /// i.e. the half-diagnal of the tile's geometry 
+    pub anchor_orbit: Option<LiveOrbit>,
+    /// Direct children the level below this tile view
+    /// Should never exceed 4.
+    pub children: Vec<TileView>,
+    /// A collection of weak refs to orbits that fall within the tile
+    /// but have an insufficient r_valid to cover the tile.
+    /// NOTE: These are the first orbits that should be tested when 
+    /// the tile is split, and are worth keeping as references (weakly)
+    /// in the parent tile.
+    pub failed_orbits: Vec<WeakOrbit>,
     /// Number of orbits to create per spawn operation
     pub num_orbits_per_spawn: u32,
-    /// Adjustible capicity of orbits for this tile
-    pub curr_max_orbits: usize,
-    /// Timestamp for decay / aging heuristics
-    pub last_updated: FrameStamp
+    /// Maximum number of times a 'ligitimate' attempt was made to anchor
+    /// a tile and resulted in failure
+    pub max_tile_anchor_failure_attempts: u32,
 }
 
 impl TileOrbitView {
-    pub fn new(tile_id: &TileId, tile_size: &Float, 
-               num_orbits_per_spawn: u32, curr_max_orbits: usize,
-               frame_st: FrameStamp) -> Self {
-        Self {
-            tile: tile_id.clone(), 
-            geometry: TileGeometry::from_id(
-                tile_id, tile_size),
-            orbit_stats: HashMap::new(),
-            weak_orbits: Vec::new(),
-            local_score: STARTING_LOCAL_SCORE,
-            num_orbits_per_spawn, curr_max_orbits,
-            last_updated: frame_st,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct TileOrbitStats {
-    pub orbit_id: OrbitId,
-
-    // Orbit is native/falls within the geometry of this tile.
-    pub is_native: bool, 
-
-    // --- Stability envelope ---
-    pub min_last_valid_i: u32,
-    pub max_last_valid_i: u32,
-
-    // --- Running counters (decayed or windowed) ---
-    pub perturb_attempted: u64,
-    pub perturb_valid: u64,
-    pub perturb_collapsed: u64,
-    pub perturb_escaped: u64,
-
-    pub absolute_fallback: u64,
-    pub absolute_escaped: u64,
-
-    // --- derived ---
-    pub cached_score: f64,
-
-    // --- Temporal ---
-    pub last_updated: FrameStamp,
-}
-
-impl TileOrbitStats {
     pub fn new(
-        orbit_id: OrbitId, is_native: bool, min_last_valid_i: u32,
-        frame_st: FrameStamp
+        tile_id: &TileId, level: &TileLevel, 
+        num_orbits_per_spawn: u32,
+        max_tile_anchor_failure_attempts: u32,
     ) -> Self {
         Self {
-            orbit_id, is_native, min_last_valid_i,
-            max_last_valid_i: 0,
-            perturb_attempted: 0,
-            perturb_valid: 0,
-            perturb_collapsed: 0,
-            perturb_escaped: 0,
-            absolute_fallback: 0,
-            absolute_escaped: 0,
-            cached_score: STARTING_LOCAL_SCORE,
-            last_updated: frame_st
+            id: tile_id.clone(), 
+            level: level.clone(),
+            geometry: TileGeometry::from_id(
+                tile_id, &level.tile_size),
+            anchor_orbit: None,
+            children: Vec::new(),
+            failed_orbits: Vec::new(),
+            num_orbits_per_spawn,
+            max_tile_anchor_failure_attempts,
         }
+    }
+
+    // Test if the orbit can be used as an anchor. 
+    // if not, then place the orbit in the failed orbit
+    // list (as a weak ref).
+    // When the orbit is anchored, also calculate it's distance
+    // from the tile's center. This is needed by the renderer and
+    // is performant to calculate here, only once.
+    pub fn try_anchor_orbit(
+        &mut self, orbit: LiveOrbit,
+        seeded_from_tile: bool,
+    ) -> bool {
+        let mut orb_g = orbit.write();
+        if seeded_from_tile {
+            trace!("{:>4?} spawned orbit {:>4} c_ref={:?} with quality metrics: \n\t{:?}",
+                self.id, orb_g.orbit_id, orb_g.c_ref(), orb_g.qualiy_metrics);
+        }
+        if orb_g.is_interior() {
+            let distance = complex_distance(orb_g.c_ref(), self.geometry.center());
+            let needed = distance.clone() + self.geometry.half_diagonal();
+            if needed <= *orb_g.r_valid() {
+                self.anchor_orbit = Some(orbit.clone());
+                orb_g.delta_from_tile_center = Some(
+                    complex_delta(orb_g.c_ref(), self.geometry.center())
+                );
+
+                info!("{:?} {:?} promoting orbit {} c_ref={:?} with r_valid={:?} as an anchor! tile.center={:?} delta_from_tile_center={:?}", 
+                    self.id, self.level, orb_g.orbit_id, orb_g.c_ref(), orb_g.r_valid(), 
+                    self.geometry.center(), orb_g.delta_from_tile_center.clone().unwrap());
+            } else if seeded_from_tile {
+                self.failed_orbits.push(Arc::downgrade(&orbit));
+
+                debug!("{:?} {:?} failed orbit {} with r_valid={:?}. Needed={:?} failed_orbits_len={}",
+                    self.id, self.level, orb_g.orbit_id, orb_g.r_valid(), needed, self.failed_orbits.len());
+            }
+        }
+
+        self.anchor_orbit.is_some()
+    }
+
+    pub fn should_split(&self) -> bool {
+           self.failed_orbits.len() >= self.max_tile_anchor_failure_attempts as usize
+        && self.children.len() == 0 && self.anchor_orbit.is_none()
+    }
+
+    pub fn split(&mut self) {
+        let child_level = TileLevel::new(
+            self.level.level + 1, self.geometry.radius().prec()
+        );
+        // Deterministic creation of TileId(s) from parent!
+        let child_tx = self.id.tx * 2;
+        let child_ty = self.id.ty * 2;
+        let child_ids = vec![
+            TileId { tx: child_tx,     ty: child_ty     },
+            TileId { tx: child_tx + 1, ty: child_ty     },
+            TileId { tx: child_tx,     ty: child_ty + 1 },
+            TileId { tx: child_tx + 1, ty: child_ty + 1 },
+        ];
+
+        debug!("Splitting {:?} into {:?} @ level={:?}", 
+            self.id, child_ids, child_level);
+
+        let new_tiles: Vec<TileOrbitView> = child_ids
+            .iter()
+            .map(|tile_id| TileOrbitView::new(
+                tile_id, &child_level, 
+                self.num_orbits_per_spawn, 
+                self.max_tile_anchor_failure_attempts
+            ))
+            .collect();
+        
+        let mut orbits_anchored_count = 0;
+
+        for mut child in new_tiles {
+            // Check if any failed orbits of parent fit around children
+            let parent_orbits: Vec<LiveOrbit> = self.failed_orbits
+                .iter()
+                .filter_map(|w| w.upgrade())
+                .collect();
+            for orb in parent_orbits {
+                if child.try_anchor_orbit(orb, false) {
+                    orbits_anchored_count += 1;
+                }
+            }
+
+            self.children.push(Arc::new(RwLock::new(child)));
+        }
+        debug!("Child tiles promoted {} orbits from parent {:?} as anchors after split!", 
+            orbits_anchored_count, self.id);
+
+        // Parent to stop spawning orbits, in favor of children!
+        self.num_orbits_per_spawn = 0;
     }
 }

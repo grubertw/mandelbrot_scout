@@ -1,27 +1,16 @@
-
 @group(0) @binding(0)
-var last_valid_i_tex : texture_storage_2d<r32uint, write>;
-
-@group(0) @binding(1)
-var orbit_idx_tex : texture_storage_2d<r32uint, write>;
-
-@group(0) @binding(2)
 var flags_tex : texture_storage_2d<r32uint, write>;
 
-struct OrbitFeedback {
-    min_last_valid_i : atomic<u32>,
-    max_last_valid_i : atomic<u32>,
-    perturb_attempted_count : atomic<u32>,
-    perturb_valid_count : atomic<u32>,
-    perturb_collapsed_count : atomic<u32>,
-    perturb_escaped_count : atomic<u32>,
-    max_iter_reached_count : atomic<u32>,
-    absolute_fallback_count : atomic<u32>,
-    absolute_escaped_count : atomic<u32>,
+struct TileFeedback {
+    min_iter_count : atomic<u32>,
+    max_iter_count : atomic<u32>,
+    escaped_count : atomic<u32>,
+    pertub_used_count : atomic<u32>,
+    max_iter_reached_count: atomic<u32>,
 };
 
-@group(0) @binding(3)
-var<storage, read_write> orbit_feedback : array<OrbitFeedback>;
+@group(0) @binding(1)
+var<storage, read_write> tile_feedback : array<TileFeedback>;
 
 const MAX_U32 : u32 = 0xFFFFFFFFu;
 
@@ -31,21 +20,15 @@ fn cs_main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let y = i32(gid.y);
 
     // Clear per-pixel textures
-    textureStore(last_valid_i_tex, vec2<i32>(x, y), vec4<u32>(MAX_U32, 0u, 0u, 0u));
-    textureStore(orbit_idx_tex,    vec2<i32>(x, y), vec4<u32>(MAX_U32, 0u, 0u, 0u));
-    textureStore(flags_tex,        vec2<i32>(x, y), vec4<u32>(0u,      0u, 0u, 0u));
+    textureStore(flags_tex, vec2<i32>(x, y), vec4<u32>(0u, 0u, 0u, 0u));
 
     // Clear per-orbit feedback (1D mapping)
-    let orbit_idx = gid.y * 65536u + gid.x;
-    if (orbit_idx < arrayLength(&orbit_feedback)) {
-        atomicStore(&orbit_feedback[orbit_idx].min_last_valid_i, MAX_U32);
-        atomicStore(&orbit_feedback[orbit_idx].max_last_valid_i, 0u);
-        atomicStore(&orbit_feedback[orbit_idx].perturb_attempted_count, 0u);
-        atomicStore(&orbit_feedback[orbit_idx].perturb_valid_count, 0u);
-        atomicStore(&orbit_feedback[orbit_idx].perturb_collapsed_count, 0u);
-        atomicStore(&orbit_feedback[orbit_idx].perturb_escaped_count, 0u);
-        atomicStore(&orbit_feedback[orbit_idx].max_iter_reached_count, 0u);
-        atomicStore(&orbit_feedback[orbit_idx].absolute_fallback_count, 0u);
-        atomicStore(&orbit_feedback[orbit_idx].absolute_escaped_count, 0u);
+    let tile_idx = gid.y * 65536u + gid.x;
+    if (tile_idx < arrayLength(&tile_feedback)) {
+        atomicStore(&tile_feedback[tile_idx].min_iter_count, MAX_U32);
+        atomicStore(&tile_feedback[tile_idx].max_iter_count, 0u);
+        atomicStore(&tile_feedback[tile_idx].escaped_count, 0u);
+        atomicStore(&tile_feedback[tile_idx].pertub_used_count, 0u);
+        atomicStore(&tile_feedback[tile_idx].max_iter_reached_count, 0u);
     }
 }

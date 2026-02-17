@@ -1,6 +1,6 @@
-use crate::gpu_pipeline::structs::{OrbitFeedbackOut};
+use crate::gpu_pipeline::structs::{TileFeedbackOut};
 use crate::numerics::{Df, ComplexDf};
-use crate::scout_engine::orbit::{OrbitId};
+use crate::scout_engine::orbit::OrbitId;
 use crate::scout_engine::tile::{TileId, TileGeometry};
 
 use std::hash::{Hash, Hasher};
@@ -19,26 +19,52 @@ pub struct FrameStamp {
 
 #[derive(Clone, Debug)]
 pub struct CameraSnapshot {
-    pub frame_stamp: FrameStamp,
-    pub center: Complex,
-    pub scale: Float, // pixel scale, pix_dx.max(pix_dy)
+    frame_stamp: FrameStamp,
+    center: Complex,
+    scale: Float, // pixel scale, pix_dx.max(pix_dy)
+    half_extent: Float, // scale * extent
+
     pub screen_extent_multiplier: f64, // width.max(height)
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct GpuFeedback {
-    pub frame_stamp: FrameStamp,
-    pub max_lambda: Df,
-    pub max_delta_z: Df,
-    pub escape_ratio: f32,
+impl CameraSnapshot {
+    pub fn new(
+        frame_stamp: FrameStamp,
+        center: Complex,
+        scale: Float,
+        screen_extent_multiplier: f64
+    ) -> Self {
+        let half_extent = scale.clone() * screen_extent_multiplier;
+
+        Self {
+            frame_stamp, center, scale, 
+            screen_extent_multiplier, half_extent,
+        }
+    }
+
+    pub fn frame_stamp(&self) -> &FrameStamp {
+        &self.frame_stamp
+    }
+
+    pub fn center(&self) -> &Complex {
+        &self.center
+    }
+
+    pub fn scale(&self) -> &Float {
+        &self.scale
+    }
+
+    pub fn half_extent(&self) -> &Float {
+        &self.half_extent
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct OrbitObservation {
+pub struct TileObservation {
     pub frame_stamp: FrameStamp,
     pub tile_id: TileId,
-    pub orbit_id: OrbitId,      
-    pub feedback: OrbitFeedbackOut,
+    pub orbit_id: OrbitId,
+    pub feedback: TileFeedbackOut,
 }
 
 #[derive(Clone, Debug)]
@@ -52,22 +78,24 @@ pub struct FrameDiagnostics {
 ///////////////////////////////////////////////////////////
 #[derive(Clone, Debug)]
 pub struct TileOrbitViewDf {
-    pub tile: TileId,
+    pub id: TileId,
     pub geometry: TileGeometry,
-    pub orbits: Vec<ReferenceOrbitDf>,
+    pub delta_from_center: Complex,
+    pub delta_from_anchor: ComplexDf,
+    pub orbit: ReferenceOrbitDf,
 }
 
 #[derive(Clone, Debug)]
 pub struct ReferenceOrbitDf {
-    pub orbit_id: u64,
+    pub orbit_id: OrbitId,
     pub c_ref: ComplexDf,
     pub orbit_re_hi: Vec<f32>,
     pub orbit_re_lo: Vec<f32>,
     pub orbit_im_hi: Vec<f32>,
     pub orbit_im_lo: Vec<f32>,
     pub escape_index: Option<u32>,
-    pub min_valid_perturb_index: u32,
-    pub max_valid_perturb_index: u32,
+    pub r_valid: Df,
+    pub contraction: Df,
     pub created_at: FrameStamp,
 }
 
@@ -89,18 +117,6 @@ impl Eq for ReferenceOrbitDf {}
 pub struct ScoutDiagnostics {
     pub timestamp: time::SystemTime,
     pub message: String,
-}
-
-impl CameraSnapshot {
-    // Snapshots with MAX frame_id signify they are invalid and should NOT be used.
-    pub fn new() -> Self {
-        Self {
-            frame_stamp: FrameStamp::new(),
-            center: Complex::new(80),
-            scale: Float::new(80),
-            screen_extent_multiplier: 0.0,
-        }
-    }
 }
 
 impl FrameStamp {
