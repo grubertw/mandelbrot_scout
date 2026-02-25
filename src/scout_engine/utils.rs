@@ -1,9 +1,8 @@
-use crate::scout_engine::orbit::*;
 use crate::scout_engine::tile::*;
 
 use crate::signals::CameraSnapshot;
 
-use rug::{Float, Complex};
+use rug::{Float, Complex, Assign};
 
 // I.e. distance as a vector
 pub fn complex_delta(a: &Complex, b: &Complex) -> Complex {
@@ -25,11 +24,8 @@ pub fn complex_distance(a: &Complex, b: &Complex) -> Float {
 
 pub fn find_tile_ids_under_camera(
     current_camera: &CameraSnapshot,
+    level: &TileLevel,
 ) -> Vec<TileId> {
-    // Search for tile views always starts at level-0, where the grid is 'even'
-    // i.e. there are always a uniform number of l-0 tiles accorss the complex plane.
-    let level_zero = TileLevel::new(0, current_camera.scale().prec());
-
     let center = current_camera.center().clone();
     let half_extent = current_camera.half_extent();
 
@@ -43,12 +39,16 @@ pub fn find_tile_ids_under_camera(
     *c_br_real += half_extent;
     *c_br_imag -= half_extent;
 
-    let t_tl = TileId::from_point(&c_tl, &level_zero);
-    let t_br = TileId::from_point(&c_br, &level_zero);
+    let t_tl = TileId::from_point(&c_tl, level);
+    let t_br = TileId::from_point(&c_br, level);
 
     let (min_x, max_x) = if t_tl.tx <= t_br.tx { (t_tl.tx, t_br.tx) } else { (t_br.tx, t_tl.tx) };
     let (min_y, max_y) = if t_tl.ty <= t_br.ty { (t_tl.ty, t_br.ty) } else { (t_br.ty, t_tl.ty) };
 
+    let mut num_tiles = half_extent.clone();
+    num_tiles *= 2.0;
+    num_tiles /= &level.tile_size;
+    
     (min_x..=max_x)
         .flat_map(|tx| (min_y..=max_y)
             .map(move |ty| TileId { tx, ty })
@@ -56,12 +56,10 @@ pub fn find_tile_ids_under_camera(
         .collect()
 }
 
-pub fn find_top_tiles_under_camera(
-    current_camera: &CameraSnapshot,
+pub fn find_tiles_in_registry(
     tile_registry: TileRegistry,
+    tile_ids: &[TileId],
 ) -> Vec<TileView> {
-    let tile_ids = find_tile_ids_under_camera(current_camera);
-
     let tile_reg_g = tile_registry.read();
 
     tile_ids
@@ -95,23 +93,21 @@ fn tile_overlaps_camera(tile: &TileGeometry, cam: &CameraSnapshot) -> bool {
     dx <= sum_hw_x && dy <= sum_hw_y
 }
 
-pub fn find_anchor_orbits_in_tile_tree(
-    tile: TileView, 
+pub fn find_anchor_orbits(
+    tiles: &[TileView],
     current_camera: &CameraSnapshot,
-    collected_orbits: &mut Vec<(TileId, TileGeometry, LiveOrbit)>
+    collected_orbits: &mut Vec<TileView>
 ) {
-    let tile_g = tile.read();
-    // Only collect anchors if the tile overlaps the camera
-    let tile_in_viewport = tile_overlaps_camera(&tile_g.geometry, current_camera);
+    for tile in tiles {
+        let tile_g = tile.read();
+        // Only collect anchors if the tile overlaps the camera
+        let tile_in_viewport = tile_overlaps_camera(&tile_g.geometry, current_camera);
 
-    if let Some(orb) = &tile_g.anchor_orbit && tile_in_viewport {
-        collected_orbits.push(
-            (tile_g.id.clone(), tile_g.geometry.clone(), orb.clone())
-        );
-    }
+        if tile_g.anchor_orbit.is_some() && tile_in_viewport {
+            collected_orbits.push(tile.clone());
+        }
 
-    for child in &tile_g.children {
-        find_anchor_orbits_in_tile_tree(child.clone(), current_camera, collected_orbits);
+        find_anchor_orbits(&tile_g.children, current_camera, collected_orbits);
     }
 }
 
@@ -131,4 +127,71 @@ pub fn find_tiles_needing_anchors(
 
         find_tiles_needing_anchors(&tile_g.children, current_camera, tiles_to_seed);
     }
+}
+
+pub fn find_smallest_tile_size(
+    tiles: &[TileView],
+    smallest_tile_size: &mut Float,
+) {
+    for tile in tiles {
+        let tile_g = tile.read();
+        if tile_g.level.tile_size.to_f64() < smallest_tile_size.to_f64() {
+            smallest_tile_size.assign(&tile_g.level.tile_size);
+        }
+
+        find_smallest_tile_size(&tile_g.children, smallest_tile_size);
+    }
+}
+
+pub fn find_tile_with_best_coverage(
+    tiles: &[TileView],
+    best_tile: &mut (f64, TileView),
+) {
+    for tile in tiles {
+        let tile_g = tile.read();
+        if tile_g.anchor_orbit.is_none()
+            && let Some(can) = tile_g.candidate_orbits.first() {
+
+             if can.score.coverage > best_tile.0 {
+                 *best_tile = (can.score.coverage, tile.clone());
+             }
+        }
+
+        find_tile_with_best_coverage(&tile_g.children, best_tile);
+    }
+}
+
+pub fn find_tile_with_worst_coverage(
+    tiles: &[TileView],
+    worst_tile: &mut (f64, TileView),
+) {
+    for tile in tiles {
+        let tile_g = tile.read();
+        if tile_g.anchor_orbit.is_none()
+            && let Some(can) = tile_g.candidate_orbits.first() {
+
+            if can.score.coverage < worst_tile.0 {
+                *worst_tile = (can.score.coverage, tile.clone());
+            }
+        }
+
+        find_tile_with_worst_coverage(&tile_g.children, worst_tile);
+    }
+}
+
+pub fn count_tiles_that_reached_min_size_for_current_viewport_and_should_split(
+    tiles: &[TileView],
+    current_camera: &CameraSnapshot,
+) -> usize {
+    let mut min_size_count = 0;
+    for tile in tiles {
+        let mut tile_g = tile.write();
+        if tile_g.min_size_reached_for_current_viewport(&current_camera) && tile_g.should_split() {
+            min_size_count += 1;
+        }
+        
+        min_size_count += count_tiles_that_reached_min_size_for_current_viewport_and_should_split(
+            &tile_g.children, current_camera);
+    }
+    min_size_count
 }

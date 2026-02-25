@@ -3,6 +3,7 @@ use crate::signals::{FrameStamp};
 
 use std::sync::{Arc, Weak};
 
+use log::warn;
 use rug::{Float, Complex};
 use parking_lot::{Mutex, RwLock};
 
@@ -11,18 +12,16 @@ use parking_lot::{Mutex, RwLock};
 /// globally, and on a (complex)-tile-by-tile basis.
 pub type LiveOrbit      = Arc<RwLock<ReferenceOrbit>>;
 /// Tiles ONLY keep weak references to orbits, which means when they are 
-/// deleted globally, they have effecivly been culled from ALL tiles
+/// deleted globally, they have effectively been culled from ALL tiles
 pub type WeakOrbit      = Weak<RwLock<ReferenceOrbit>>;
-/// Our singular/globl pool of 'live' ref orbits on the system
-/// Orbit scores are kept BESIDE rather than inside the orbit,
-/// for more convient scoring & ranking
+/// Our singular/global pool of 'live' ref orbits on the system
 pub type LivingOrbits   = Arc<Mutex<Vec<LiveOrbit>>>;
 /// UniqueID for the ref orbit
 pub type OrbitId        = u64;
-/// Concurrently guarentees creation of unique orbit IDs.
+/// Concurrently guarantees creation of unique orbit IDs.
 pub type OrbitIdFactory = Arc<Mutex<IdFactory>>;
 
-/// Multipler against the derivitive computation of r_valid
+/// Multiplier against the derivative computation of r_valid
 /// Should be made adaptive in the future!
 pub const ALPHA: f64 = 0.05;
 /// Used during mandelbrot iteration to avoid log(0) and also
@@ -41,6 +40,8 @@ const STRONG_CONTRACTION: f64 = -0.01;
 const STIFFNESS_CHECK: f64 = 1e20;
 /// Checked against z_min
 const NEAR_CRITICAL: f64 = 1e-10;
+/// Ref orbits must go past user max to be useful for perturbation
+const REF_ORBIT_USER_EXTENSION: f64 = 1.1;
 
 #[derive(Clone, Debug)]
 pub struct IdFactory {
@@ -62,70 +63,188 @@ pub struct ReferenceOrbit {
     pub orbit_id: OrbitId,
     /// The starting co-ordinate of the orbit
     pub c_ref: Complex,
-    /// Same as above, but for consumption on the GPU
-    pub c_ref_df: ComplexDf,
-    /// The complete orbit
+    /// May not be complete until anchored
     pub orbit: Vec<Complex>,
-    /// Escape, set interrior/exterrior distance, r_valid
-    pub qualiy_metrics: OrbitQuality,
-    /// orbit list is pre-transformed for GPU consuption
+    /// Escape, set interior/exterior distance, r_valid
+    pub quality_metrics: OrbitQuality,
+    /// Set to true when the orbit is anchored 
+    pub is_anchored: bool,
+    /// orbit list is pre-transformed for GPU consumption
+    /// Only set when this orbit is anchored
     pub gpu_payload: OrbitGpuPayload,
-    /// Delta of the seed from tile-center
-    /// Only set when this orbit is an anchor 
-    pub delta_from_tile_center: Option<Complex>,
+    /// Used to finish the orbit, if it is used as an anchor
+    pub max_ref_orbit_iters: u32,
+    /// Private variables below mutate in-place during compute_to()
+    curr_z: Complex,
+    curr_a: Complex,
+    curr_log_sum: Float,
+    log_count: u32,
 }
 
 impl ReferenceOrbit {
     pub fn new(
-        id_fac: OrbitIdFactory, c_ref: Complex, orbit: Vec<Complex>,
-        qualiy_metrics: OrbitQuality, gpu_payload: OrbitGpuPayload, 
+        id_fac: OrbitIdFactory, c_ref: Complex, 
+        frame_stamp: FrameStamp,
+        // ONLY used to set the capacity
+        max_ref_orbit_iters: u32
     ) -> Self {
         let orbit_id = id_fac.lock().next_id();
+        let prec = *&c_ref.prec().0;
         let c_ref_df = ComplexDf::from_complex(&c_ref);
         
         Self {
-            orbit_id, c_ref, c_ref_df,
-            orbit, qualiy_metrics, 
-            gpu_payload, delta_from_tile_center: None
+            orbit_id, c_ref, 
+            orbit: Vec::with_capacity(max_ref_orbit_iters as usize),
+            quality_metrics: OrbitQuality{
+                escape_index: None,
+                r_valid: Float::with_val(prec, f64::INFINITY),
+                contraction: Float::with_val(prec, 0),
+                period: None,
+                z_min: Float::with_val(prec, f64::INFINITY),
+                a_max: Float::with_val(prec, 0),
+                created_at: frame_stamp
+            }, 
+            is_anchored: false,
+            gpu_payload: OrbitGpuPayload::new(c_ref_df), 
+            max_ref_orbit_iters,
+            // Private variables that mutate in-place during mandelbrot computation
+            curr_z: Complex::with_val(prec, (0.0, 0.0)),
+            curr_a: Complex::with_val(prec, (0.0, 0.0)),
+            curr_log_sum: Float::with_val(prec, 0),
+            log_count: 0,
         }
     }
 
     pub fn is_interior(&self) -> bool {
-        self.qualiy_metrics.contraction < INTERIOR_THRESHOLD 
-            && self.qualiy_metrics.escape_index.is_none()
+        self.quality_metrics.contraction < INTERIOR_THRESHOLD 
+            && self.quality_metrics.escape_index.is_none()
     }
 
     pub fn is_strongly_interior(&self) -> bool {
-        self.qualiy_metrics.contraction < STRONG_CONTRACTION
-            && self.qualiy_metrics.escape_index.is_none()
+        self.quality_metrics.contraction < STRONG_CONTRACTION
+            && self.quality_metrics.escape_index.is_none()
     }
 
     pub fn is_boundary_like(&self) -> bool {
-        self.qualiy_metrics.contraction < BOUNDARY_THRESHOLD
+        self.quality_metrics.contraction < BOUNDARY_THRESHOLD
     }
 
     pub fn is_exterior(&self) -> bool {
-        self.qualiy_metrics.escape_index.is_some()
+        self.quality_metrics.escape_index.is_some()
     }
 
     pub fn is_stiff(&self) -> bool {
-        self.qualiy_metrics.a_max > STIFFNESS_CHECK
+        self.quality_metrics.a_max > STIFFNESS_CHECK
     }
 
     pub fn is_near_critical(&self) -> bool {
-        self.qualiy_metrics.z_min < NEAR_CRITICAL
+        self.quality_metrics.z_min < NEAR_CRITICAL
     }
 
     pub fn c_ref(&self) -> &Complex {
         &self.c_ref
     }
 
+    pub fn escape_index(&self) -> Option<u32> {
+        self.quality_metrics.escape_index
+    }
+
     pub fn r_valid(&self) -> &Float {
-        &self.qualiy_metrics.r_valid
+        &self.quality_metrics.r_valid
     }
 
     pub fn contraction(&self) -> &Float {
-        &self.qualiy_metrics.contraction
+        &self.quality_metrics.contraction
+    }
+    
+    /// Try computing the orbit to max_iter, which should ALWAYS be max_user_iter
+    /// Internally, we will compute past this for perturbation
+    /// Later, if this orbit is chosen as an anchor, but max_user_iter changes
+    /// the orbit must be 'invalidated' (i.e. un-anchored), and then continued
+    /// which will change the value of r_valid.
+    pub fn compute_to(&mut self, max_user_iter: u32) {
+        let max_iter = (max_user_iter as f64 * REF_ORBIT_USER_EXTENSION) as u32;
+        
+        let curr_iter = self.orbit.len() as u32;
+        if max_iter < curr_iter {
+            warn!("For Orbit {}, curr_iter={} is already at (or past) max_iter={}", 
+                self.orbit_id, curr_iter, max_iter);
+            return;
+        }
+        
+        // Loop constants
+        let prec = self.c_ref.prec();
+        let alpha = Float::with_val(prec.0, ALPHA);
+        let two = Float::with_val(prec.0, 2);
+
+        for i in curr_iter..max_iter {
+            self.orbit.push(self.curr_z.clone());
+            let two_z = self.curr_z.clone() * &two;
+
+            // Compute ratio for r_valid, but only after first iteration
+            // Also, stop r_valid computation once escape is reached.
+            // Same logic applies for log-sum contraction
+            if i > 0 && self.quality_metrics.escape_index.is_none() {
+                let z_abs = self.curr_z.clone().abs().real().clone();
+                let a_abs = self.curr_a.clone().abs().real().clone();
+                let mag_two_z = two_z.clone().abs().real().clone();
+
+                if a_abs > Float::with_val(prec.0, 0.0) {
+                    let candidate = alpha.clone() * &z_abs / &a_abs;
+                    if candidate < self.quality_metrics.r_valid {
+                        // Final r_valid = min_n(alpha*(|Zn|/|An|))
+                        self.quality_metrics.r_valid = candidate;
+                    }
+                }
+                // Avoid log(0)
+                if mag_two_z > NEAR_ZERO_THRESHOLD {
+                    let log_val = mag_two_z.clone().ln();
+                    self.curr_log_sum += &log_val;
+                    self.log_count += 1;
+                }
+                // Grab min_z and max_a - they are super cheap and somewhat useful, 
+                // so why not!
+                if z_abs < self.quality_metrics.z_min {
+                    self.quality_metrics.z_min = z_abs.clone();
+                }
+                if a_abs > self.quality_metrics.a_max {
+                    self.quality_metrics.a_max = a_abs.clone();
+                }
+            }
+            // Period detection logic
+            if self.quality_metrics.period.is_none() && i > BURN_IN {
+                for p in 1..=MAX_PERIOD_CHECK {
+                    if i >= p {
+                        let prev_z = &self.orbit[(i - p) as usize];
+                        let diff = self.curr_z.clone() - prev_z;
+                        let abs_diff = diff.abs().real().clone();
+
+                        if abs_diff < NEAR_ZERO_THRESHOLD {
+                            self.quality_metrics.period = Some(p);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Core Mandelbrot recurrence, using rug::Complex arbitrary precision
+            // Z_{n+1} = Z^2 * C
+            self.curr_z = self.curr_z.clone() * &self.curr_z + self.c_ref();
+
+            // Derivative recurrence for r_valid
+            // A_{n+1} = 2 * z_n * A_n + 1
+            self.curr_a = self.curr_a.clone() * &two_z + Complex::with_val(prec, (1.0, 0.0));
+            
+            if self.curr_z.clone().abs().real().to_f64() >= 2.0 && self.quality_metrics.escape_index.is_none() {
+                self.quality_metrics.escape_index = Some(i);
+            }
+            
+            // Early escape orbits are trash. Stop early and ensure r_valid check fails
+            if self.quality_metrics.escape_index.is_some() && i < BURN_IN {
+                self.quality_metrics.r_valid = Float::with_val(prec.0, 0);
+                break;
+            }
+        }
     }
 }
 
@@ -137,33 +256,21 @@ impl PartialEq for ReferenceOrbit {
 
 impl Eq for ReferenceOrbit {}
 
-// Helper struct for gathering initial orbit computation results
-#[derive(Debug)]
-pub struct OrbitResult {
-    pub orbit: Vec<Complex>,
-    pub escape_index: Option<u32>,
-    pub r_valid: Float,
-    pub contraction: Float,
-    pub period: Option<u32>,
-    pub z_min: Float,
-    pub a_max: Float,
-}
-
 // Global orbit scoring/ranking metrics
 #[derive(Clone, Debug)]
 pub struct OrbitQuality {
     /// Is None of the orbit does not escape
     /// in this case, the len of the orbit vec can be checked
     pub escape_index: Option<u32>,
-    /// The radious in the complex plane this orbit is valid
-    /// for perturation.
+    /// The radios in the complex plane this orbit is valid
+    /// for perturbation.
     pub r_valid: Float,
-    /// < 0 orbit is contracting, i.e. interrior
-    /// ~ 0 near boundry
+    /// < 0 orbit is contracting, i.e. interior
+    /// ~ 0 near boundary
     /// > 0 expanding, i.e. exterior 
     pub contraction: Float,
     /// Orbit period - hyperbolic structure 
-    /// strong indication of interrior
+    /// strong indication of interior
     pub period: Option<u32>,
     /// critical proximity
     pub z_min: Float,
@@ -171,21 +278,6 @@ pub struct OrbitQuality {
     pub a_max: Float,
     /// Creation timestamp
     pub created_at: FrameStamp,
-}
-
-impl OrbitQuality {
-    pub fn new(
-        escape_index: Option<u32>, r_valid: Float, 
-        contraction: Float, period: Option<u32>,
-        z_min: Float, a_max: Float,
-        created_at: FrameStamp
-    ) -> Self {
-        Self {
-            escape_index, r_valid, 
-            contraction, period, z_min, a_max,
-            created_at
-        }
-    }
 }
 
 // Used for scoring, ranking/sorting!
@@ -200,6 +292,7 @@ pub struct OrbitSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct OrbitGpuPayload {
+    pub c_ref: ComplexDf,
     pub re_hi: Vec<f32>,
     pub re_lo: Vec<f32>,
     pub im_hi: Vec<f32>,
@@ -207,8 +300,9 @@ pub struct OrbitGpuPayload {
 }
 
 impl OrbitGpuPayload {
-    pub fn new() -> Self {
+    pub fn new(c_ref: ComplexDf) -> Self {
         Self {
+            c_ref,
             re_hi: Vec::<f32>::new(), 
             re_lo: Vec::<f32>::new(), 
             im_hi: Vec::<f32>::new(), 

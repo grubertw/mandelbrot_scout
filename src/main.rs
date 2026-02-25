@@ -183,9 +183,6 @@ impl ApplicationHandler for Runner {
                         size.width.into(), 
                         size.height.into());
 
-                    state.queue_message(Message::UpdateDebugText(
-                        format!("Window Resized ---> w={} h={}", size.width, size.height)));
-
                     *viewport = Viewport::with_physical_size(Size::new(size.width, size.height),
                         window.scale_factor() as f64);
 
@@ -212,6 +209,13 @@ impl ApplicationHandler for Runner {
 
                             // Ask ScoutEngine for it's current tile orbits and push to the GPU
                             s.query_tile_orbits(queue);
+
+                            let scout_diags = s.read_scout_diagnostics();
+                            let mut scout_diags_g = scout_diags.lock();
+                            if !scout_diags_g.consumed {
+                                state.queue_message(Message::UpdateDebugText(scout_diags_g.message.clone()));
+                                scout_diags_g.consumed = true;
+                            }
 
                             // Draw the scene (contains both fragment render and compute passes)
                             s.draw(&device, &queue, &view);
@@ -261,15 +265,15 @@ impl ApplicationHandler for Runner {
                             debug!("CursorMoved & ElementState::Pressed prev_pos={:?} new_pos={:?} diff={:?}", 
                                 prev_pos, position, diff);
 
-                            let new_c = scene.borrow_mut().set_center(diff);
-                            state.queue_message(Message::UpdateDebugText(
-                                format!("Complex center Updated ---> {}", new_c)));
+                            scene.borrow_mut().change_center(diff);
                         } else {
                             debug!("CursorMoved & ElementState::Pressed starting pos={:?}", position);
                         }
 
                         prev_pos.0 = position.x;
                         prev_pos.1 = position.y;
+                        
+                        window.request_redraw();
                     }
                     ElementState::Released => {
                         if prev_pos.0 > 0.0 {
@@ -287,8 +291,6 @@ impl ApplicationHandler for Runner {
 
                     debug!("MouseWheel & MouseScrollDelta::LineDelta ---> h={} scale={}", 
                         h, new_scale);
-                    state.queue_message(Message::UpdateDebugText(
-                        format!("Scale Updated ---> {}", new_scale)));
                 }
             }
             WindowEvent::MouseInput { state, button, ..} => {
@@ -324,8 +326,6 @@ impl ApplicationHandler for Runner {
                 }
 
                 debug!("Arrow Key Pressed! new scale={}", new_scale);
-                    state.queue_message(Message::UpdateDebugText(
-                        format!("Scale Updated ---> {}", new_scale)));
             }
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 *modifiers = new_modifiers.state();

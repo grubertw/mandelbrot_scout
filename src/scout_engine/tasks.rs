@@ -1,183 +1,177 @@
-use crate::scout_engine::OrbitSeedRng;
+use crate::scout_engine::{OrbitSeedRng, ScoutConfig};
 use crate::scout_engine::orbit::*;
 use crate::scout_engine::tile::*;
-use crate::scout_engine::utils::*;
 
 use crate::numerics::ComplexDf;
-use crate::signals::{CameraSnapshot, FrameStamp};
+use crate::signals::FrameStamp;
 
 use std::sync::Arc;
-
 use log::{trace, debug};
 use rand_chacha::ChaCha8Rng;
 use rand::Rng;
 use rug::{Float, Complex};
 use parking_lot::RwLock;
 
-pub async fn create_new_reference_orbit(
-    c_ref: Complex, id_fac: OrbitIdFactory, 
-    max_iter: u32, frame_st: FrameStamp
+pub async fn start_reference_orbit(
+    c_ref: Complex, 
+    id_factory: OrbitIdFactory,
+    config: ScoutConfig,
+    frame_st: FrameStamp
 ) -> LiveOrbit {
-    let orbit_result = compute_reference_orbit(&c_ref, max_iter).await;
-    let cdf_orbit: Vec<ComplexDf> = orbit_result.orbit
+    let (max_ref_orbit_iters, max_user_iters) = {
+        let config_g = config.lock();
+        (
+            config_g.max_ref_orbit_iters,
+            config_g.max_user_iters
+        )
+    };
+    
+    let mut orbit = ReferenceOrbit::new(
+        id_factory, c_ref,
+        frame_st, max_ref_orbit_iters,
+    );
+
+    // Note that we will compute 'a bit' past user_iter, for perturbation validity
+    orbit.compute_to(max_user_iters);
+
+    let cdf_orbit: Vec<ComplexDf> = orbit.orbit
         .iter()
         .map(|c| ComplexDf::from_complex(c))
         .collect();
-    
-    let qualiy_metrics = OrbitQuality::new(
-        orbit_result.escape_index, orbit_result.r_valid, 
-        orbit_result.contraction, orbit_result.period, 
-        orbit_result.z_min, orbit_result.a_max, frame_st);
 
-    let mut gpu_payload = OrbitGpuPayload::new();
     for cdf in cdf_orbit {
-        gpu_payload.re_hi.push(cdf.re.hi);
-        gpu_payload.re_lo.push(cdf.re.lo);
-        gpu_payload.im_hi.push(cdf.im.hi);
-        gpu_payload.im_lo.push(cdf.im.lo);
+        orbit.gpu_payload.re_hi.push(cdf.re.hi);
+        orbit.gpu_payload.re_lo.push(cdf.re.lo);
+        orbit.gpu_payload.im_hi.push(cdf.im.hi);
+        orbit.gpu_payload.im_lo.push(cdf.im.lo);
     }
-
-    Arc::new(RwLock::new(ReferenceOrbit::new(
-        id_fac, c_ref, orbit_result.orbit, qualiy_metrics, gpu_payload,
-    )))
+    Arc::new(RwLock::new(orbit))
 }
 
-async fn compute_reference_orbit(
-    c_ref: &Complex, max_iter: u32, 
-) -> OrbitResult {
-    // Loop constants
-    let prec = c_ref.prec();
-    let alpha = Float::with_val(prec.0, ALPHA);
-    let two = Float::with_val(prec.0, 2);
+pub async fn continue_reference_orbit(orbit: LiveOrbit, max_user_iters: u32) {
+    let mut orbit_g = orbit.write();
+    orbit_g.is_anchored = false;
 
-    // Loop output
-    let mut orbit = Vec::<Complex>::with_capacity(max_iter as usize);
-    let mut escape_index: Option<u32> = None;
-    let mut r_valid = Float::with_val(prec.0, f64::INFINITY);
+    let start_iter = orbit_g.orbit.len();
+    orbit_g.compute_to(max_user_iters);
 
-    // Mutates in-loop
-    let mut z = Complex::with_val(prec, (0.0, 0.0));
-    let mut a = Complex::with_val(prec, (0.0, 0.0)); // our Talor 'A' term.
-    let mut z_min = Float::with_val(prec.0, f64::INFINITY);
-    let mut a_max = Float::with_val(prec.0, 0);
-    let mut detected_period: Option<u32> = None;
-    let mut log_sum = Float::with_val(prec.0, 0); // for contraction
-    let mut log_count: u32 = 0;
+    debug!("Continued orbit {} to max_user_iters={}. escape={:?}",
+        orbit_g.orbit_id, max_user_iters, orbit_g.quality_metrics.escape_index);
 
-    for i in 0..max_iter {
-        orbit.push(z.clone());
-        let two_z = z.clone() * &two;
+    for i in start_iter..=orbit_g.orbit.len() {
+        let cdf = ComplexDf::from_complex(&orbit_g.orbit[i]);
 
-        // Compute ratio for r_valid, but only after first iteration
-        // Also, stop r_valid computation once escape is reached.
-        // Same logic applies for log-sum contraction
-        if i > 0 && escape_index == None {
-            let z_abs = z.clone().abs().real().clone();
-            let a_abs = a.clone().abs().real().clone();
-            let mag_two_z = two_z.clone().abs().real().clone();
+        orbit_g.gpu_payload.re_hi.push(cdf.re.hi);
+        orbit_g.gpu_payload.re_lo.push(cdf.re.lo);
+        orbit_g.gpu_payload.im_hi.push(cdf.im.hi);
+        orbit_g.gpu_payload.im_lo.push(cdf.im.lo);
+    }
+}
 
-            if a_abs > Float::with_val(prec.0, 0.0) {
-                let candidate = alpha.clone() * &z_abs / &a_abs;
-                if candidate < r_valid {
-                    // Final r_valid = min_n(alpha*(|Zn|/|An|))
-                    r_valid = candidate;
-                }
+pub  fn try_to_anchor_tiles_from_pool(
+    living_orbits: LivingOrbits,
+    tile_views: &Vec<TileView>,
+) -> u32 {
+    let mut orbits_anchored_count = 0;
+    let orb_pool_g = living_orbits.lock();
+
+    for tile in tile_views {
+        let mut tile_g = tile.write();
+
+        for orb in orb_pool_g.iter() {
+            if tile_g.try_anchor_orbit(orb.clone(), false) {
+                orbits_anchored_count += 1;
             }
-            // Avoid log(0)
-            if mag_two_z > NEAR_ZERO_THRESHOLD {
-                let log_val = mag_two_z.clone().ln();
-                log_sum += &log_val;
-                log_count += 1;
-            }
-            // Grab min_z and max_a - they are super cheap and somewhat useful, 
-            // so why not!
-            if z_abs < z_min {
-                z_min = z_abs.clone();
-            }
-            if a_abs > a_max {
-                a_max = a_abs.clone();
-            }
-        }
-        // Period detection logic
-        if detected_period.is_none() && i > BURN_IN {
-            for p in 1..=MAX_PERIOD_CHECK {
-                if i >= p {
-                    let prev_z = &orbit[(i - p) as usize];
-                    let diff = z.clone() - prev_z;
-                    let abs_diff = diff.abs().real().clone();
-
-                    if abs_diff < NEAR_ZERO_THRESHOLD {
-                        detected_period = Some(p);
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Core Mandelbrot recurrence, using rug::Complex arbitrary precicision
-        // Z_{n+1} = Z^2 * C
-        z = z.clone() * &z + c_ref;
-
-        // Derivative recurrence for r_valid
-        // A_{n+1} = 2 * z_n * A_n + 1
-        a = a.clone() * &two_z + Complex::with_val(prec, (1.0, 0.0));
-
-        // Escape index tracking. Note that we do not bailout here!
-        // Ref orbits must go past bailout for perturbance!
-        if z.clone().abs().real().to_f64() >= 2.0 && escape_index == None {
-            escape_index = Some(i);
         }
     }
 
-    // Compute contraction metric taking the orbit's period into account.
-    let contraction = if let Some(p) = detected_period {
-        let mut sum = Float::with_val(prec.0, 0);
-        let start = orbit.len() - p as usize;
+    debug!("From {} pool orbits, {} were anchored!",
+        orb_pool_g.len(), orbits_anchored_count);
 
-        for k in start..orbit.len() {
-            let two_z = orbit[k].clone() * &two;
-            let mag_two_z = two_z.clone().abs().real().clone();
-            if mag_two_z > NEAR_ZERO_THRESHOLD {
-                sum += mag_two_z.clone().ln();
-            }
-        }
-
-        sum / Float::with_val(prec.0, p)
-    } else {
-        // fallback: global average
-        log_sum / Float::with_val(prec.0, log_count)
-    };
-
-    OrbitResult {orbit, escape_index, r_valid, 
-        contraction, period: detected_period, z_min, a_max}
+    orbits_anchored_count
 }
 
- // Called at start of the scout_worker 
-pub fn initialize_tile_grid(
-    current_camera: &CameraSnapshot,
+pub fn fill_registry_with_missing_tiles(
+    tile_ids: &[TileId],
     tile_registry: TileRegistry,
-    num_orbits_to_spawn_per_tile: u32,
-    max_tile_anchor_failure_attempts: u32,
-    rug_precision: u32,
-) {
-    let level_zero = TileLevel::new(0, rug_precision);
-
-    let tile_ids = find_tile_ids_under_camera(current_camera);
-
-    debug!("Initializing top-level layout with {} tiles", tile_ids.len());
-
-    let new_tiles: Vec<TileOrbitView> = tile_ids
-        .iter()
-        .map(|tile_id| TileOrbitView::new(
-            tile_id, &level_zero, 
-            num_orbits_to_spawn_per_tile, 
-            max_tile_anchor_failure_attempts
-        ))
-        .collect();
-
+    config: ScoutConfig,
+    level: &TileLevel,
+) -> (Vec<TileView>, u32) {
     let mut tile_reg_g = tile_registry.write();
-    for tile in new_tiles {
-        tile_reg_g.insert(tile.id.clone(), Arc::new(RwLock::new(tile)));
+    let (num_orbits_to_spawn_per_tile,
+        max_tile_anchor_failure_attempts,
+        split_on_poor_coverage_check,
+        smallest_tile_pixel_span,
+        coverage_to_anchor,
+        max_user_iter) = {
+        let config_g = config.lock();
+        (
+            config_g.num_orbits_to_spawn_per_tile,
+            config_g.max_tile_anchor_failure_attempts,
+            config_g.split_tile_on_poor_coverage_check,
+            config_g.smallest_tile_pixel_span,
+            config_g.coverage_to_anchor,
+            config_g.max_user_iters
+        )
+    };
+    debug!("Fill registry with missing tiles!");
+
+    let mut creation_count = 0;
+    let tiles: Vec<TileView> = tile_ids
+        .iter()
+        .map(|tile_id| {
+            if tile_reg_g.contains_key(&tile_id) == false {
+               creation_count += 1; 
+            }
+            tile_reg_g.entry(tile_id.clone())
+                .or_insert(Arc::new(RwLock::new(TileOrbitView::new(
+                    tile_id, level,
+                    num_orbits_to_spawn_per_tile,
+                    max_tile_anchor_failure_attempts,
+                    split_on_poor_coverage_check,
+                    smallest_tile_pixel_span,
+                    coverage_to_anchor,
+                    max_user_iter
+                )))).clone()
+        })
+        .collect();
+    (tiles, creation_count)
+}
+
+// Update the tiles config params
+// If the user_max_iter changed, not only do we need to update it's internal value,
+// but we also might need to reset anchor tiles, as orbit r_valid increases
+pub  fn update_tile_config(tiles: &[TileView], config: ScoutConfig, tiles_to_reset: &mut Vec<TileView>) {
+    let (num_orbits_to_spawn_per_tile,
+        max_tile_anchor_failure_attempts,
+        split_on_poor_coverage_check,
+        smallest_tile_pixel_span,
+        coverage_to_anchor,
+        max_user_iter) = {
+        let config_g = config.lock();
+        (
+            config_g.num_orbits_to_spawn_per_tile,
+            config_g.max_tile_anchor_failure_attempts,
+            config_g.split_tile_on_poor_coverage_check,
+            config_g.smallest_tile_pixel_span,
+            config_g.coverage_to_anchor,
+            config_g.max_user_iters
+        )
+    };
+    
+    for tile in tiles {
+        let mut tile_g = tile.write();
+        if max_user_iter > tile_g.tile_iter && tile_g.anchor_orbit.is_some() {
+            tiles_to_reset.push(tile.clone());
+        }
+        tile_g.num_orbits_per_spawn = num_orbits_to_spawn_per_tile;
+        tile_g.max_tile_anchor_failure_attempts = max_tile_anchor_failure_attempts;
+        tile_g.split_on_poor_coverage_check = split_on_poor_coverage_check;
+        tile_g.smallest_tile_pixel_span = smallest_tile_pixel_span;
+        tile_g.coverage_to_anchor = coverage_to_anchor;
+        tile_g.tile_iter = max_user_iter;
+
+        update_tile_config(&tile_g.children, config.clone(), tiles_to_reset);
     }
 }
 
@@ -186,11 +180,13 @@ pub fn initialize_tile_grid(
 /// - Corners: the four corner points of the tile square (center ± radius in Re/Im)
 /// - RandomInDisk: `count` points, uniform in disk (probabilistically robust)
 /// - Center: just the center
+/// - WeightedDirection: where the real magic happens!
 pub fn generate_tile_candidate_seeds(
     tile: &TileGeometry,
     strategy: OrbitSeedStrategy,
-    count: usize, // Used for RandomInDisk, ignored for others
-    rng: OrbitSeedRng,
+    count: Option<usize>,
+    rng: Option<OrbitSeedRng>,
+    candidates: Option<&[(f64, Complex)]>
 ) -> Vec<Complex> {
     let (prec, _) = tile.center().prec(); // maintain precision
 
@@ -199,23 +195,29 @@ pub fn generate_tile_candidate_seeds(
             vec![tile.center().clone()]
         }
         OrbitSeedStrategy::RandomInDisk => {
-            let mut rng_g = rng.lock();
-            let rng: &mut ChaCha8Rng = &mut *rng_g;
-            (0..count).map(|_| {
-                // Random point uniformly in disk (normalized)
-                let theta = rng.gen_range(0.0..(2.0*std::f64::consts::PI));
-                let sqrt_r = rng.r#gen::<f64>().sqrt();
+            if count.is_none() || rng.is_none() {
+                vec![]
+            }
+            else {
+                let orbit_rng = rng.unwrap();
+                let mut rng_g = orbit_rng.lock();
+                let rng: &mut ChaCha8Rng = &mut *rng_g;
+                (0..count.unwrap()).map(|_| {
+                    // Random point uniformly in disk (normalized)
+                    let theta = rng.gen_range(0.0..(2.0 * std::f64::consts::PI));
+                    let sqrt_r = rng.r#gen::<f64>().sqrt();
 
-                // Now scale by the tile's radius
-                let r = Float::with_val(prec, sqrt_r) * tile.radius().clone();
-                let cos = Float::with_val(prec, theta).cos();
-                let sin = Float::with_val(prec, theta).sin();
+                    // Now scale by the tile's radius
+                    let r = Float::with_val(prec, sqrt_r) * tile.radius().clone();
+                    let cos = Float::with_val(prec, theta).cos();
+                    let sin = Float::with_val(prec, theta).sin();
 
-                let offset = Complex::with_val(prec, (&r * &cos, &r * &sin));
-                //trace!("RandomInDisk offset={:?} r={:?} theta={} sqrt_r={} tile.radius={:?}", 
-                //    &offset, &r, theta, sqrt_r, &tile.radius);
-                tile.center().clone() + offset
-            }).collect()
+                    let offset = Complex::with_val(prec, (&r * &cos, &r * &sin));
+                    //trace!("RandomInDisk offset={:?} r={:?} theta={} sqrt_r={} tile.radius={:?}",
+                    //    &offset, &r, theta, sqrt_r, &tile.radius);
+                    tile.center().clone() + offset
+                }).collect()
+            }
         }
         OrbitSeedStrategy::Corners => {
             // Generate all four corners of the square around center, using ±radius
@@ -265,30 +267,66 @@ pub fn generate_tile_candidate_seeds(
             }
             seeds
         }
-    }
-}
+        OrbitSeedStrategy::WeightedDirection => {
+            if candidates.is_none() {
+                vec![]
+            }
+            else {
+                let candidates = candidates.unwrap();
+                let mut accum_dir = Complex::with_val(prec, (0, 0));
+                let mut weight_sum = Float::with_val(prec, 0);
+                let mut best_dir = Complex::with_val(prec, (0, 0));
+                let mut best_coverage = 0.0;
 
-pub fn try_to_anchor_tiles_from_pool(
-    living_orbits: LivingOrbits,
-    tile_views: &Vec<TileView>,
-) -> bool {
-    let mut orbits_anchored_count = 0;
-    let orb_pool_g = living_orbits.lock();
-    
-    for tile in tile_views {
-        let mut tile_g = tile.write();
+                for (coverage, cand_c_ref) in candidates.iter() {
+                    let delta = cand_c_ref.clone() - tile.center();
+                    let mag = delta.clone().abs();
 
-        for orb in orb_pool_g.iter() {
-            if tile_g.try_anchor_orbit(orb.clone(), false) {
-                orbits_anchored_count += 1;
+                    if mag.real().to_f64() > tile.dir_epsilon {
+                        let dir = delta / mag;
+
+                        let weight = Float::with_val(prec, *coverage);
+                        let dir_weight = dir.clone() * &weight;
+                        accum_dir += &dir_weight;
+                        weight_sum += &weight;
+
+                        if *coverage > best_coverage {
+                            best_coverage = *coverage;
+                            best_dir = dir;
+                        }
+                    }
+                }
+
+                let avg_dir = if weight_sum > tile.dir_epsilon {
+                    let avg = accum_dir / &weight_sum;
+                    let mag = avg.clone().abs();
+                    if mag.real().to_f64() > tile.dir_epsilon {
+                        avg / mag
+                    } else {
+                        best_dir.clone()
+                    }
+                } else {
+                    best_dir.clone()
+                };
+
+                // Take a combination, which best avoids barycentric averaging
+                let mut final_dir = avg_dir.clone() * Float::with_val(prec, 0.7);
+                let bias_best_dir = best_dir.clone() * Float::with_val(prec, 0.3);
+                final_dir += &bias_best_dir;
+
+                let mag = final_dir.clone().abs();
+                if mag.real().to_f64() > tile.dir_epsilon {
+                    final_dir /= mag;
+                }
+
+                let mut step = tile.half_diagonal().clone();
+                step *= GRADIENT_ASCENT_STEP_SIZE;
+                let step_dir = final_dir.clone() * &step;
+                let new_seed = tile.center().clone() + &step_dir;
+                vec![new_seed]
             }
         }
     }
-
-    debug!("From {} pool orbits, {} were anchored!",
-        orb_pool_g.len(), orbits_anchored_count);
-
-    orbits_anchored_count > 0
 }
 
 pub fn upkeep_orbit_pool(
@@ -369,7 +407,7 @@ fn score_live_orbit(
     let is_exterior = orb_g.is_exterior();
 
     let age = (frame_stamp.frame_id.saturating_sub(
-                orb_g.qualiy_metrics.created_at.frame_id)) as f64 * 0.01;
+                orb_g.quality_metrics.created_at.frame_id)) as f64 * 0.01;
 
     let snap = OrbitSnapshot {
         orbit: live_orbit.clone(),

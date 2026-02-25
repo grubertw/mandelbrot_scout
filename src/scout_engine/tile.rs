@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use crate::scout_engine::orbit::*;
 use crate::scout_engine::utils::*;
 
@@ -7,14 +8,16 @@ use parking_lot::RwLock;
 
 use rug::{Float, Complex};
 use log::{trace, debug, info};
+use crate::signals::CameraSnapshot;
 
 pub type TileLevels = Arc<RwLock<Vec<TileLevel>>>;
 pub type TileView = Arc<RwLock<TileOrbitView>>;
 pub type TileRegistry = Arc<RwLock<HashMap<TileId, TileView>>>;
 
-pub const BASE_TILE_SIZE: f64 = 1e-1;
+pub const POOR_COVERAGE_THRESHOLD: f64 = 1e-3;
+pub const GRADIENT_ASCENT_STEP_SIZE: f64 = 0.4;
 
-const TILE_LEVEL_ADDITION_INCREMENT: u32 = 9;
+const EPSILON: f64 = 1e-6;
 
 #[derive(Clone, Debug)]
 pub struct TileLevel {
@@ -26,14 +29,16 @@ pub struct TileLevel {
 }
 
 impl TileLevel {
-    pub fn new(
-        level: u32, rug_precision: u32, 
-    ) -> Self {
-        let base_size = Float::with_val(rug_precision, BASE_TILE_SIZE);
-        let tile_size = base_size.clone() / (2.0_f64).powi(level as i32);
-
+    pub fn new(tile_size: Float) -> Self {
         Self {
-            level, tile_size, 
+            level: 0, tile_size,
+        }
+    }
+
+    pub fn from_parent(level: &TileLevel) -> Self {
+        Self {
+            level: level.level + 1,
+            tile_size: level.tile_size.clone() / 2.0,
         }
     }
 }
@@ -69,6 +74,8 @@ impl TileId {
     }
 }
 
+
+
 #[derive(Clone, Debug)]
 pub struct TileGeometry {
     /// Center of the tile in the complex plane
@@ -77,6 +84,8 @@ pub struct TileGeometry {
     radius: Float,
     // Cache half-diagnal, as it's used heavily
     half_diagonal: Float,
+    /// Used during weighted direction seed computation
+    pub dir_epsilon: f64
 }
 
 impl TileGeometry {
@@ -94,13 +103,15 @@ impl TileGeometry {
         diag *= &radius;
         diag *= 2;
         let half_diagonal = Float::sqrt(diag);
+        let dir_epsilon = half_diagonal.to_f64() * EPSILON;
 
         Self {
             center: Complex::with_val(
                 tile_size.prec(),
                 (center_re, center_im)
             ),
-            radius, half_diagonal
+            radius, half_diagonal,
+            dir_epsilon
         }
     }
 
@@ -123,6 +134,21 @@ pub enum OrbitSeedStrategy {
     RandomInDisk,
     Corners,
     Grid(u8, u8), // (nx, ny)
+    WeightedDirection,
+}
+
+#[derive(Clone, Debug)]
+pub struct TileOrbitScore {
+    pub coverage: f64,      // r_valid / needed
+    pub depth_score: f64,
+    pub stability_score: f64,
+    pub total_score: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TileOrbitCandidate {
+    pub score: TileOrbitScore,
+    pub orbit: WeakOrbit,
 }
 
 #[derive(Clone, Debug)]
@@ -144,12 +170,24 @@ pub struct TileOrbitView {
     /// NOTE: These are the first orbits that should be tested when 
     /// the tile is split, and are worth keeping as references (weakly)
     /// in the parent tile.
-    pub failed_orbits: Vec<WeakOrbit>,
+    pub candidate_orbits: Vec<TileOrbitCandidate>,
     /// Number of orbits to create per spawn operation
     pub num_orbits_per_spawn: u32,
     /// Maximum number of times a 'ligitimate' attempt was made to anchor
     /// a tile and resulted in failure
     pub max_tile_anchor_failure_attempts: u32,
+    /// If the orbits have bad coverage, split the tile after this many attempts
+    pub split_on_poor_coverage_check: u32,
+    /// Checked before a tile is split, and is our safeguard that prevents 
+    /// too small tiles from being created
+    pub smallest_tile_pixel_span: f64,
+    /// Required coverage to anchor a tile
+    pub coverage_to_anchor: f64,
+    /// Tile max_iter maps to user max iter
+    pub tile_iter: u32,
+    // Measure the rate coverage is increasing, per orbit spawn iteration
+    curr_best_coverage: f64,
+    plateau_counter: u32,
 }
 
 impl TileOrbitView {
@@ -157,6 +195,10 @@ impl TileOrbitView {
         tile_id: &TileId, level: &TileLevel, 
         num_orbits_per_spawn: u32,
         max_tile_anchor_failure_attempts: u32,
+        split_on_poor_coverage_check: u32,
+        smallest_tile_pixel_span: f64,
+        coverage_to_anchor: f64,
+        tile_iter: u32,
     ) -> Self {
         Self {
             id: tile_id.clone(), 
@@ -165,9 +207,15 @@ impl TileOrbitView {
                 tile_id, &level.tile_size),
             anchor_orbit: None,
             children: Vec::new(),
-            failed_orbits: Vec::new(),
+            candidate_orbits: Vec::new(),
             num_orbits_per_spawn,
             max_tile_anchor_failure_attempts,
+            split_on_poor_coverage_check,
+            smallest_tile_pixel_span,
+            coverage_to_anchor,
+            tile_iter,
+            curr_best_coverage: 0.0,
+            plateau_counter: 0
         }
     }
 
@@ -181,43 +229,101 @@ impl TileOrbitView {
         &mut self, orbit: LiveOrbit,
         seeded_from_tile: bool,
     ) -> bool {
-        let mut orb_g = orbit.write();
         if seeded_from_tile {
-            trace!("{:>4?} spawned orbit {:>4} c_ref={:?} with quality metrics: \n\t{:?}",
-                self.id, orb_g.orbit_id, orb_g.c_ref(), orb_g.qualiy_metrics);
+            let orb_g = orbit.read();
+            trace!("{:?} spawned orbit {} c_ref={}. escape_index={:?} len={} r_valid={} contraction={} period={:?} z_min={} a_max={}",
+                self.id, orb_g.orbit_id, orb_g.c_ref().to_string_radix(10, Some(6)),
+                orb_g.quality_metrics.escape_index,
+                orb_g.orbit.len(),
+                orb_g.quality_metrics.r_valid.to_string_radix(10, Some(5)),
+                orb_g.quality_metrics.contraction.to_string_radix(10, Some(3)),
+                orb_g.quality_metrics.period,
+                orb_g.quality_metrics.z_min.to_string_radix(10, Some(8)),
+                orb_g.quality_metrics.a_max.to_string_radix(10, Some(8)),
+            );
         }
-        if orb_g.is_interior() {
-            let distance = complex_distance(orb_g.c_ref(), self.geometry.center());
-            let needed = distance.clone() + self.geometry.half_diagonal();
-            if needed <= *orb_g.r_valid() {
-                self.anchor_orbit = Some(orbit.clone());
-                orb_g.delta_from_tile_center = Some(
-                    complex_delta(orb_g.c_ref(), self.geometry.center())
-                );
+        // Evaluate the orbit for potential fit as anchor
+        let score = self.evaluate_orbit(orbit.clone());
 
-                info!("{:?} {:?} promoting orbit {} c_ref={:?} with r_valid={:?} as an anchor! tile.center={:?} delta_from_tile_center={:?}", 
-                    self.id, self.level, orb_g.orbit_id, orb_g.c_ref(), orb_g.r_valid(), 
-                    self.geometry.center(), orb_g.delta_from_tile_center.clone().unwrap());
-            } else if seeded_from_tile {
-                self.failed_orbits.push(Arc::downgrade(&orbit));
+        // if Orbit has coverage, use right away anchor!
+        if score.coverage >= self.coverage_to_anchor {
+            let mut orb_g = orbit.write();
+            self.anchor_orbit = Some(orbit.clone());
+            orb_g.is_anchored = true;
 
-                debug!("{:?} {:?} failed orbit {} with r_valid={:?}. Needed={:?} failed_orbits_len={}",
-                    self.id, self.level, orb_g.orbit_id, orb_g.r_valid(), needed, self.failed_orbits.len());
-            }
+            info!("{:?} promoting orbit {}! with coverage above {:.4e} score={:?}",
+                self.id, orb_g.orbit_id, self.coverage_to_anchor, score);
+        }
+        else if seeded_from_tile {
+            let candidate = TileOrbitCandidate {
+                score, orbit: Arc::downgrade(&orbit)
+            };
+            self.candidate_orbits.push(candidate);
+            self.candidate_orbits
+                .sort_by(|a, b| b.score.total_score
+                    .partial_cmp(&a.score.total_score).unwrap_or(Ordering::Equal));
         }
 
         self.anchor_orbit.is_some()
     }
 
-    pub fn should_split(&self) -> bool {
-           self.failed_orbits.len() >= self.max_tile_anchor_failure_attempts as usize
-        && self.children.len() == 0 && self.anchor_orbit.is_none()
+    pub fn should_split(&mut self) -> bool {
+        if self.children.is_empty() && self.anchor_orbit.is_none() {
+            let attempts = self.candidate_orbits.len();
+            if attempts < self.split_on_poor_coverage_check as usize {
+                return false;
+            }
+
+            let best_coverage = self.candidate_orbits
+                .iter()
+                .map(|tc| tc.score.coverage)
+                .fold(0.0, f64::max);
+
+            // Split the tile quickly if starting coverage is bad
+            if best_coverage < POOR_COVERAGE_THRESHOLD {
+                debug!("{:?} Tile will split because coverage was poor!", self.id);
+                return true;
+            }
+
+            // Plateau detection (relative improvement)
+            let improvement = best_coverage - self.curr_best_coverage;
+            if best_coverage > 0.0 {
+                let relative_improvement = improvement / best_coverage;
+
+                if relative_improvement < 0.01 { // <1% improvement
+                    self.plateau_counter += 1;
+                } else {
+                    self.plateau_counter = 0;
+                }
+
+                if self.plateau_counter >= 3 {
+                    debug!("{:?} Tile will split because best coverage has reached a plateau! best_coverage={} relative_improvement={}",
+                        self.id, best_coverage, relative_improvement);
+                    return true;
+                }
+            }
+            self.curr_best_coverage = best_coverage;
+
+            // Hard cap
+            if attempts >= self.max_tile_anchor_failure_attempts as usize {
+                debug!("{:?} Tile will split because max anchor failure attempts has been reached!",
+                    self.id);
+                return true;
+            }
+        }
+        false
     }
 
-    pub fn split(&mut self) {
-        let child_level = TileLevel::new(
-            self.level.level + 1, self.geometry.radius().prec()
-        );
+    pub fn split(&mut self) -> u32 {
+        let scores: Vec<TileOrbitScore> = self.candidate_orbits
+            .iter()
+            .map(|tc| tc.score.clone())
+            .collect();
+
+        trace!("{:?} has {} scores: {:>2.3?}",
+                self.id, scores.len(), scores);
+
+        let child_level = TileLevel::from_parent(&self.level);
         // Deterministic creation of TileId(s) from parent!
         let child_tx = self.id.tx * 2;
         let child_ty = self.id.ty * 2;
@@ -228,15 +334,19 @@ impl TileOrbitView {
             TileId { tx: child_tx + 1, ty: child_ty + 1 },
         ];
 
-        debug!("Splitting {:?} into {:?} @ level={:?}", 
-            self.id, child_ids, child_level);
+        debug!("Splitting TILE {:?} into {} Children {:?}\t@ {:?}",
+            self.id, child_ids.len(), child_ids, child_level);
 
         let new_tiles: Vec<TileOrbitView> = child_ids
             .iter()
             .map(|tile_id| TileOrbitView::new(
                 tile_id, &child_level, 
                 self.num_orbits_per_spawn, 
-                self.max_tile_anchor_failure_attempts
+                self.max_tile_anchor_failure_attempts,
+                self.split_on_poor_coverage_check,
+                self.smallest_tile_pixel_span,
+                self.coverage_to_anchor,
+                self.tile_iter
             ))
             .collect();
         
@@ -244,9 +354,9 @@ impl TileOrbitView {
 
         for mut child in new_tiles {
             // Check if any failed orbits of parent fit around children
-            let parent_orbits: Vec<LiveOrbit> = self.failed_orbits
+            let parent_orbits: Vec<LiveOrbit> = self.candidate_orbits
                 .iter()
-                .filter_map(|w| w.upgrade())
+                .filter_map(|w| w.orbit.upgrade())
                 .collect();
             for orb in parent_orbits {
                 if child.try_anchor_orbit(orb, false) {
@@ -261,5 +371,60 @@ impl TileOrbitView {
 
         // Parent to stop spawning orbits, in favor of children!
         self.num_orbits_per_spawn = 0;
+
+        orbits_anchored_count
+    }
+
+    // If the tile's anchor has insufficient iterations
+    // Invoked when the user increases user_max_iters
+    pub fn reset(&mut self) -> Vec<LiveOrbit>  {
+        let mut orbits_to_continue: Vec<LiveOrbit> = Vec::new();
+        let old_anchor = self.anchor_orbit.clone().unwrap().clone();
+
+        orbits_to_continue.push(old_anchor);
+        self.anchor_orbit = None;
+
+        // Try continuing a few of the old candidates as well
+        self.candidate_orbits.truncate(3);
+        for can in &self.candidate_orbits {
+            if let Some(orb) = can.orbit.upgrade() {
+                orbits_to_continue.push(orb);
+            }
+        }
+        orbits_to_continue
+    }
+
+    pub fn min_size_reached_for_current_viewport(&self, current_camera: &CameraSnapshot) -> bool {
+        // Don't split further if the child's tile_size gets too close to current camera scale
+        let mut next_child_tile_size_constraint = current_camera.scale().clone();
+        next_child_tile_size_constraint *= self.smallest_tile_pixel_span;
+        if self.geometry.radius() < &next_child_tile_size_constraint {
+             true
+        } else { false }
+    }
+
+    fn evaluate_orbit(&self, orbit: LiveOrbit) -> TileOrbitScore {
+        let orb_g = orbit.read();
+
+        let distance = complex_distance(orb_g.c_ref(), self.geometry.center());
+        let needed = distance.clone() + self.geometry.half_diagonal();
+        let coverage = orb_g.r_valid().clone().to_f64() / needed.to_f64();
+
+        let depth_score = match orb_g.escape_index() {
+            Some(i) => (i as f64) / self.tile_iter as f64,
+            None => 1.0, // interior
+        };
+
+        let contraction =  orb_g.contraction().clone();
+        let stability_score = 1.0 / (1.0 + contraction.abs().to_f64());
+
+        let total_score =
+            50.0 * coverage +
+                1.0 * depth_score +
+                0.5 * stability_score;
+
+        TileOrbitScore {
+            coverage, depth_score, stability_score, total_score
+        }
     }
 }

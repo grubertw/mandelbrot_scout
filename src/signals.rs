@@ -1,5 +1,5 @@
 use crate::gpu_pipeline::structs::{TileFeedbackOut};
-use crate::numerics::{Df, ComplexDf};
+use crate::numerics::{ComplexDf, Df};
 use crate::scout_engine::orbit::OrbitId;
 use crate::scout_engine::tile::{TileId, TileGeometry};
 
@@ -81,7 +81,6 @@ pub struct TileOrbitViewDf {
     pub id: TileId,
     pub geometry: TileGeometry,
     pub delta_from_center: Complex,
-    pub delta_from_anchor: ComplexDf,
     pub orbit: ReferenceOrbitDf,
 }
 
@@ -115,8 +114,8 @@ impl Eq for ReferenceOrbitDf {}
 
 #[derive(Clone, Debug)]
 pub struct ScoutDiagnostics {
-    pub timestamp: time::SystemTime,
     pub message: String,
+    pub consumed: bool,
 }
 
 impl FrameStamp {
@@ -124,6 +123,14 @@ impl FrameStamp {
         Self {
             frame_id: u64::MAX,
             timestamp: time::Instant::now()
+        }
+    }
+}
+
+impl ScoutDiagnostics {
+    pub fn new(message: String) -> Self {
+        Self {
+            message, consumed: false
         }
     }
 }

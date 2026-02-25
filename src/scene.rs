@@ -5,7 +5,7 @@ use crate::gpu_pipeline::builder::*;
 use crate::gpu_pipeline::structs::*;
 use crate::numerics::*;
 use crate::signals::*;
-use crate::scout_engine::{ScoutConfig, ScoutEngine};
+use crate::scout_engine::{ScoutEngineConfig, ScoutEngine, ScoutConfig, ScoutSignal};
 use crate::scout_engine::orbit::OrbitId;
 use crate::scout_engine::tile::TileId;
 
@@ -20,6 +20,7 @@ use log::{trace, debug, info, warn};
 use std::hash::{DefaultHasher, Hasher};
 use std::sync::Arc;
 use std::time;
+use parking_lot::Mutex;
 
 #[derive(Debug)]
 pub struct Scene {
@@ -49,23 +50,29 @@ impl Scene {
         let scale_df = Df::from_float(&scale);
 
         // Configure ScoutEngine (our single source of truth for reference orbits)
-        let scout_config = ScoutConfig {
+        let scout_config = Arc::new(Mutex::new( ScoutEngineConfig {
             max_live_orbits: MAX_LIVE_ORBITS,
-            max_orbit_iters: MAX_REF_ORBIT,
+            max_user_iters: MAX_USER_ITER,
+            max_ref_orbit_iters: MAX_REF_ORBIT,
+            auto_start: AUTO_START,
+            starting_scale: STARTING_SCALE,
+            starting_tile_pixel_span: STARTING_TILE_PIXEL_SPAN,
+            smallest_tile_pixel_span: SMALLEST_TILE_PIXEL_SPAN,
+            coverage_to_anchor: COVERAGE_TO_ANCHOR,
             orbit_rng_seed: ORBIT_RNG_SEED,
             num_orbits_to_spawn_per_tile: NUM_ORBITS_PER_TILE_SPAWN,
             max_tile_anchor_failure_attempts: MAX_TILE_ANCHOR_FAILURE_ATTEMPTS,
-            init_rug_precision: INIT_RUG_PRECISION,
-            level_zero_tile_constraint_before_eval: LEVEL_ZERO_TILE_CONSTRAINT_BEFORE_EVAL,
+            split_tile_on_poor_coverage_check: SPLIT_TILE_ON_POOR_COVERAGE,
+            rug_precision: INIT_RUG_PRECISION,
             exploration_budget: EXPLORATION_BUDGET,
-        };
+        }));
 
         let scout_engine = ScoutEngine::new(
             window, 
             scout_config,
             CameraSnapshot::new(
                 FrameStamp::new(), center.clone(), scale.clone(),
-                width.max(height) / 2.0
+                width.max(height) / 2.0,
             ));
 
         let uniform = SceneUniform {
@@ -74,7 +81,7 @@ impl Scene {
             scale_hi:    scale_df.hi, scale_lo:    scale_df.lo,
             screen_width: width as f32, 
             screen_height: height as f32,
-            max_iter: 500, tile_count: 0,
+            max_iter: MAX_USER_ITER, tile_count: 0,
         };
 
         // Configure and initialize all WGPU resources for render passes.
@@ -281,13 +288,14 @@ impl Scene {
 
                 debug!("FROM CPU (Secne struct)");
                 debug!("  center = {:?}", self.center);
-                debug!("  width = {}\theight = {}", self.width, self.height);
+                debug!("  scale  = {:?}", self.scale);
+                debug!("  width  = {}\theight = {}", self.width, self.height);
                 debug!("FROM GPU:");
                 debug!("  center = (({},{}) ({},{}))", dbg.center_x_hi, dbg.center_x_lo, dbg.center_y_hi, dbg.center_y_lo);
                 debug!("  scale  = ({}, {})", dbg.scale_hi, dbg.scale_lo);
-                debug!("  width = {}\theight = {}", dbg.screen_width, dbg.screen_height);
+                debug!("  width  = {}\theight = {}", dbg.screen_width, dbg.screen_height);
                 debug!("  tile_count = {}", dbg.tile_count);
-                debug!("  tile_idx = {}", dbg.tile_idx);
+                debug!("  tile_idx   = {}", dbg.tile_idx);
     
                 drop(data);
                 self.pipeline.debug_readback.unmap();
@@ -295,8 +303,32 @@ impl Scene {
         });
     }
 
+    pub fn scout_config(&self) -> ScoutConfig {
+        self.scout_engine.config()
+    }
+
+    pub fn center(&self) -> &Complex {
+        &self.center
+    }
+
+    pub fn scale(&self) -> &Float {
+        &self.scale
+    }
+
+    pub fn send_scout_signal(&mut self, signal: ScoutSignal) {
+        self.scout_engine.submit_scout_signal(signal);
+    }
+
+    pub fn read_scout_diagnostics(&self) -> Arc<Mutex<ScoutDiagnostics>> {
+        self.scout_engine.read_diagnostics()
+    }
+    pub fn max_iterations(&self) -> u32 {
+        self.uniform.max_iter
+    }
+
     pub fn set_max_iterations(&mut self, max_iterations: u32) {
         self.uniform.max_iter = max_iterations;
+        self.scout_engine.set_max_user_iterations(max_iterations)
     }
 
     pub fn set_window_size(&mut self, width: f64, height: f64) {
@@ -306,6 +338,14 @@ impl Scene {
         self.uniform.screen_height = height as f32;
 
         debug!("Window size changed w={} h={}", width, height);
+    }
+
+    pub fn set_scale(&mut self, scale: Float) {
+        self.scale = scale;
+
+        let scale_df = Df::from_float(&self.scale);
+        self.uniform.scale_hi = scale_df.hi;
+        self.uniform.scale_lo = scale_df.lo;
     }
 
     pub fn change_scale(&mut self, increase: bool) -> String {
@@ -324,7 +364,17 @@ impl Scene {
         s
     }
 
-    pub fn set_center(&mut self, center_diff: (f64, f64)) -> String {
+    pub fn set_center(&mut self, new_center: Complex) {
+        self.center = new_center;
+
+        let center_df = ComplexDf::from_complex(&self.center);
+        self.uniform.center_x_hi = center_df.re.hi;
+        self.uniform.center_x_lo = center_df.re.lo;
+        self.uniform.center_y_hi = center_df.im.hi;
+        self.uniform.center_y_lo = center_df.im.lo;
+    }
+
+    pub fn change_center(&mut self, center_diff: (f64, f64)) -> String {
         let dx = self.scale.clone() * center_diff.0;
         let dy = self.scale.clone() * center_diff.1;
 
@@ -396,11 +446,10 @@ impl Scene {
             
             for (i, (tile, geo)) in zipped_for_log.iter().enumerate() {
                 trace_str.push_str(
-                    format!("#{:>2} {:>3?} {:>6}\tmin_xy=({:>3.1},{:>3.1}) max_xy=({:>3.1},{:>3.1}) anchor_c_ref=(({},{}),({},{})) tile_delta_from_anchor=(({},{}),({},{}))\n", 
+                    format!("#{:>2} {:>3?} {:>6}\tmin_xy=({:>3.1},{:>3.1}) max_xy=({:>3.1},{:>3.1}) anchor_c_ref=(({},{}),({},{}))\n",
                     i, tile.id, tile.orbit.orbit_id, 
                     geo.tile_screen_min_x, geo.tile_screen_min_y, geo.tile_screen_max_x, geo.tile_screen_max_y,
                     geo.anchor_c_ref_re_hi, geo.anchor_c_ref_re_lo, geo.anchor_c_ref_im_hi, geo.anchor_c_ref_im_lo,
-                    geo.tile_delta_from_anchor_re_hi, geo.tile_delta_from_anchor_re_lo, geo.tile_delta_from_anchor_im_hi, geo.tile_delta_from_anchor_im_lo,
                 ).as_str());
             }
             trace!("{}", trace_str);
@@ -410,28 +459,51 @@ impl Scene {
     fn upload_tile_orbits(&mut self, tiles: &Vec<TileOrbitViewDf>, queue: &wgpu::Queue) {
         self.loaded_tiles.clear();
         if tiles.len() == 0 {
-            warn!("No tile orbits were found for this frame update!");
+            self.uniform.tile_count = 0;
             return;
         }
+
+        let largest_orb_len = tiles
+            .iter()
+            .fold(0, |acc, tile| {
+                acc.max(tile.orbit.orbit_re_hi.len())
+            });
 
         let tile_count = tiles.len().min(MAX_ORBITS_PER_FRAME as usize);
 
         let row_count = tile_count * 4;
-        let orb_len = MAX_REF_ORBIT as usize;
+        let orb_len = largest_orb_len.min(MAX_REF_ORBIT as usize);
 
         let mut texture_data = Vec::<f32>::with_capacity(orb_len * row_count);
 
         for tile in tiles {
-            self.loaded_tiles.push((tile.id.clone(), tile.orbit.orbit_id));
-                       
-            texture_data.extend(tile.orbit.orbit_re_hi.iter());
-            texture_data.extend(tile.orbit.orbit_re_lo.iter());
-            texture_data.extend(tile.orbit.orbit_im_hi.iter());
-            texture_data.extend(tile.orbit.orbit_im_lo.iter());
-        }
+            // re_hi row
+            for it in 0..orb_len {
+                texture_data.push(tile.orbit.orbit_re_hi.get(it).copied().unwrap_or(0.0));
+            }
 
+            // re_lo row
+            for it in 0..orb_len {
+                texture_data.push(tile.orbit.orbit_re_lo.get(it).copied().unwrap_or(0.0));
+            }
+
+            // im_hi row
+            for it in 0..orb_len {
+                texture_data.push(tile.orbit.orbit_im_hi.get(it).copied().unwrap_or(0.0));
+            }
+
+            // im_lo row
+            for it in 0..orb_len {
+                texture_data.push(tile.orbit.orbit_im_lo.get(it).copied().unwrap_or(0.0));
+            }
+            self.loaded_tiles.push((tile.id.clone(), tile.orbit.orbit_id));
+        }
+        
         let tex_height = row_count as u32;
-        let tex_width = MAX_REF_ORBIT;
+        let tex_width = orb_len as u32;
+
+        trace!("Text height = {}, Tex width = {}, row_count = {}, largest_orb_len={} texture_data.len={}",
+            tex_height, tex_width, row_count, largest_orb_len, texture_data.len());
 
         queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -490,10 +562,8 @@ pub fn build_gpu_tile_geometry_from_tile_views(
                 anchor_c_ref_re_lo: tile.orbit.c_ref.re.lo,
                 anchor_c_ref_im_hi: tile.orbit.c_ref.im.hi,
                 anchor_c_ref_im_lo: tile.orbit.c_ref.im.lo,
-                tile_delta_from_anchor_re_hi: tile.delta_from_anchor.re.hi,
-                tile_delta_from_anchor_re_lo: tile.delta_from_anchor.re.lo,
-                tile_delta_from_anchor_im_hi: tile.delta_from_anchor.im.hi,
-                tile_delta_from_anchor_im_lo: tile.delta_from_anchor.im.lo,
+                r_valid_hi: tile.orbit.r_valid.hi,
+                r_valid_lo: tile.orbit.r_valid.lo,
                 tile_screen_min_x: (tile_x_center - r_pix) as f32,
                 tile_screen_max_x: (tile_x_center + r_pix) as f32,
                 tile_screen_min_y: (tile_y_center - r_pix) as f32,
