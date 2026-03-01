@@ -73,6 +73,12 @@ fn df_mag2_upper(zx: Df, zy: Df) -> f32 {
     return ax * ax + ay * ay;
 }
 
+fn cdf_mag2(a: ComplexDf) -> f32 {
+    let abs_r = abs(a.r.hi) + abs(a.r.lo);
+    let abs_i = abs(a.i.hi) + abs(a.i.lo);
+    return abs_r * abs_r + abs_i * abs_i;
+}
+
 // -------------------------------
 // Complex double-float operations
 // z = x + i*y
@@ -126,11 +132,11 @@ fn build_c_from_scene(pix: vec2<f32>) -> ComplexDf {
     let half_w = uni.screen_width * 0.5;
     let half_h = uni.screen_height * 0.5;
 
-    let dx = pix.x - half_w;
-    let dy = half_h - pix.y; // y-axis increases downward, so must flip!
+    let dx_i = i32(pix.x) - i32(half_w);
+    let dy_i = i32(half_h) - i32(pix.y); // y-axis increases downward, so must flip!
 
-    let dx_df = df_from_f32(dx);
-    let dy_df = df_from_f32(dy);
+    let dx_df = df_from_i32(dx_i);
+    let dy_df = df_from_i32(dy_i);
 
     // Scene scale
     let scale = Df(uni.scale_hi, uni.scale_lo);
@@ -173,7 +179,7 @@ fn mandelbrot(c: ComplexDf) -> u32 {
         z.i = imag_part;
 
         // Bailout
-        let mag2 = df_mag2_upper(z.r, z.i);
+        let mag2 = cdf_mag2(z);
         if (mag2 > 16.0) {
             break;
         }
@@ -197,8 +203,10 @@ struct GpuTileGeometry {
     anchor_c_ref_re_lo:             f32,
     anchor_c_ref_im_hi:             f32,
     anchor_c_ref_im_lo:             f32,
-    r_valid_hi:                     f32,
-    r_valid_lo:                     f32,
+    center_offset_re_hi:            f32,
+    center_offset_re_lo:            f32,
+    center_offset_im_hi:            f32,
+    center_offset_im_lo:            f32,
     tile_screen_min_x:              f32,
     tile_screen_min_y:              f32,
     tile_screen_max_x:              f32,
@@ -240,21 +248,32 @@ fn find_tile_index(pix: vec2<f32>) -> i32 {
 
 // delta_c - along with Zref-n0 - are needed to start pertubation.
 fn build_delta_c_from_tile_geometry(pix: vec2<f32>, tile_idx: u32) -> ComplexDf {
+    let half_w = uni.screen_width * 0.5;
+    let half_h = uni.screen_height * 0.5;
+    let scale = Df(uni.scale_hi, uni.scale_lo);
+
     let tile = tile_geometry[tile_idx];
 
-    let full_c = build_c_from_scene(pix);
-    let anchor = ComplexDf(
-        Df(tile.anchor_c_ref_re_hi, tile.anchor_c_ref_re_lo),
-        Df(tile.anchor_c_ref_im_hi, tile.anchor_c_ref_im_lo)
+    let dx_i = i32(pix.x) - i32(half_w);
+    let dy_i = i32(half_h) - i32(pix.y);
+
+    let dx_df = df_from_i32(dx_i);
+    let dy_df = df_from_i32(dy_i);
+
+    let off_x = df_mul(dx_df, scale);
+    let off_y = df_mul(dy_df, scale);
+
+    let delta_from_center_to_anchor = ComplexDf(
+        Df(tile.center_offset_re_hi, tile.center_offset_re_lo),
+        Df(tile.center_offset_im_hi, tile.center_offset_im_lo)
     );
 
-    let delta_c = cdf_sub(full_c, anchor);
-    return delta_c;
-}
+    let delta_c = ComplexDf(
+        df_add(delta_from_center_to_anchor.r, off_x),
+        df_add(delta_from_center_to_anchor.i, off_y)
+    );
 
-fn build_r_valid_from_tile_geometry(tile_idx: u32) -> Df {
-    let tile = tile_geometry[tile_idx];
-    return Df(tile.r_valid_hi, tile.r_valid_lo);
+    return delta_c;
 }
 
 fn load_ref_orbit(tile_idx: u32, it: u32) -> ComplexDf {
@@ -268,15 +287,15 @@ fn load_ref_orbit(tile_idx: u32, it: u32) -> ComplexDf {
     return ComplexDf(Df(z_re_hi, z_re_lo), Df(z_im_hi, z_im_lo));
 }
 
-const ITER_MASK: u32 = 0x0000FFFFu;
-const ESCAPED_BIT: u32 = 1u << 16u;
-const PERTURB_BIT: u32 = 1u << 17u;
-const MAX_ITER_BIT: u32 = 1u << 18u;
-const TILE_SHIFT: u32 = 19u;
+const ITER_MASK: u32        = 0x0000FFFFu;
+const ESCAPED_BIT: u32      = 1u << 16u;
+const PERTURB_BIT: u32      = 1u << 17u;
+const PERTURB_ERR_BIT: u32  = 1u << 18u;
+const MAX_ITER_BIT: u32     = 1u << 19u;
+const TILE_SHIFT: u32       = 20u;
 
-fn record_pix_feedback(pix: vec2<f32>, tile_idx: i32, it: u32) {
-    var flags: u32 = 0u;
-    flags = flags | (it & ITER_MASK);
+fn record_pix_feedback(pix: vec2<f32>, tile_idx: i32, it: u32, flags_in: u32) {
+    var flags = flags_in | (it & ITER_MASK);
     if (it < uni.max_iter) {
         flags = flags | ESCAPED_BIT;
     }
@@ -291,30 +310,37 @@ fn record_pix_feedback(pix: vec2<f32>, tile_idx: i32, it: u32) {
     textureStore(flags_tex, vec2<i32>(i32(pix.x), i32(pix.y)), vec4<u32>(flags, 0u, 0u, 0u));
 }
 
+const BETA = 0.1; // Used for dynamic tracking of perturbation error
+
 // -------------------------------
 // Mandelbrot Perturbance 
 // Inputs:
 // 1) orbit/tile index (into reference orbit texture)
-// 2) delta_c (constructed from tile geometry)
+// 2) delta_c (from pixel to uni.center to tile.anchor_ref_c)
 // Outputs:
 // 1) Iteration count
-// Yes. That's it! ScoutEngine's ability to provide mathmatically
-// viable anchor orbits is what makes this so clean!
 // -------------------------------
-fn mandelbrot_perturb(tile_idx: u32, delta_c: ComplexDf) -> u32 {
+fn mandelbrot_perturb(tile_idx: u32, delta_c: ComplexDf) -> vec2<u32> {
     var dz = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));
     var i: u32 = 0u;
+    var flags: u32 = 0u;
     let max_i = uni.max_iter;
 
     for (i = 0u; i < max_i; i = i + 1u) {
         // Load reference orbit Z_n
         let Z = load_ref_orbit(tile_idx, i);
 
+        // Track error dynamicly by comparing |dz_n| to |Z|
+        let mag2_dz = cdf_mag2(dz);
+        let mag2_Z = cdf_mag2(Z);
+        if (mag2_dz > BETA * mag2_Z) {
+            flags |= PERTURB_ERR_BIT;
+        }
+
         // λ_n = 2 * Z_n
         let lambda = cdf_add(Z, Z);
 
-        // dz_{n+1} = λ_n * dz_n + Δc
-        //dz = cdf_add(cdf_mul(lambda, dz), delta_c);
+        // dz_{n+1} = λ_n * dz_n + dz_n^2 + Δc
         let dz2 = cdf_mul(dz, dz);
         dz = cdf_add(
             cdf_add(cdf_mul(lambda, dz), dz2),
@@ -325,12 +351,12 @@ fn mandelbrot_perturb(tile_idx: u32, delta_c: ComplexDf) -> u32 {
         let z = cdf_add(Z, dz);
 
         // Standard bailout
-        if (df_mag2_upper(z.r, z.i) > 16.0) {
+        if (cdf_mag2(z) > 16.0) {
             break;
         }
     }
 
-    return i;
+    return vec2<u32>(i, flags);
 }
 
 // -------------------------------
@@ -355,6 +381,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
 fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
     let pix = vec2<f32>(coords.x, coords.y);
     var it: u32 = 0u;
+    var flags: u32 = 0u;
     var c = build_c_from_scene(pix);
     var r_valid_crossed = false;
 
@@ -365,18 +392,9 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
     if (tile_idx >= 0) {
         let delta_c = build_delta_c_from_tile_geometry(pix, u32(tile_idx));
 
-        // If tile coverage was set below 1.0, then r_valid needs to be checked
-        // If delta_c is greater than r_valid, the approximation breaks down
-        let r_valid = build_r_valid_from_tile_geometry(u32(tile_idx));
-        let r_valid_mag = df_mag2(r_valid);
-        let delta_c_mag = df_mag2_upper(delta_c.r, delta_c.i);
-        if (delta_c_mag < r_valid_mag) {
-            it = mandelbrot_perturb(u32(tile_idx), delta_c);
-        }
-        else {
-            it = mandelbrot(c);
-            r_valid_crossed = true;
-        }
+        let p_res = mandelbrot_perturb(u32(tile_idx), delta_c);
+        it = p_res.x;
+        flags = p_res.y;
         c = delta_c;
     }
     else {
@@ -396,13 +414,9 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
         let tile_c = f32(tile_idx) / f32(uni.tile_count);
         color = mix(color, vec3(0.0, 0.0, tile_c), 0.3);
     }
-    // r_valid diagnostic (red)
-    if (r_valid_crossed) {
-        color = mix(color, vec3(1.0, 0.0, 0.0), 0.2);
-    }
 
     // Record per-pixel flags for the reduce/compute shader
-    record_pix_feedback(pix, tile_idx, it);
+    record_pix_feedback(pix, tile_idx, it, flags);
 
     // -- DEBUG --
     if (   i32(pix.x) == i32(uni.screen_width * 0.5) 

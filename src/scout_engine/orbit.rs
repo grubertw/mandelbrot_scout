@@ -6,6 +6,8 @@ use std::sync::{Arc, Weak};
 use log::warn;
 use rug::{Float, Complex};
 use parking_lot::{Mutex, RwLock};
+use crate::scout_engine::tile::TileGeometry;
+use crate::scout_engine::utils::complex_distance;
 
 /// All ReferenceOrbit object are Arc+Mutex wrapped, to support
 /// the massive concurrency needed when evaluating these orbits both
@@ -30,7 +32,7 @@ pub const NEAR_ZERO_THRESHOLD: f64 = 1e-30;
 /// For period detection, wait for burn-in before starting
 pub const BURN_IN: u32 = 64;
 /// max size of the period (in iteration count)
-pub const MAX_PERIOD_CHECK: u32 = 32;
+pub const MAX_PERIOD_CHECK: u32 = 60;
 
 /// Checked against contraction
 const INTERIOR_THRESHOLD: f64 = -1e-3;
@@ -40,8 +42,6 @@ const STRONG_CONTRACTION: f64 = -0.01;
 const STIFFNESS_CHECK: f64 = 1e20;
 /// Checked against z_min
 const NEAR_CRITICAL: f64 = 1e-10;
-/// Ref orbits must go past user max to be useful for perturbation
-const REF_ORBIT_USER_EXTENSION: f64 = 1.1;
 
 #[derive(Clone, Debug)]
 pub struct IdFactory {
@@ -115,6 +115,12 @@ impl ReferenceOrbit {
         }
     }
 
+    pub fn extend_orbit(&mut self, new_max_iters: u32) {
+        self.max_ref_orbit_iters = new_max_iters;
+        let size_to_increase = new_max_iters as usize - self.orbit.len();
+        self.orbit.reserve(size_to_increase);
+    }
+
     pub fn is_interior(&self) -> bool {
         self.quality_metrics.contraction < INTERIOR_THRESHOLD 
             && self.quality_metrics.escape_index.is_none()
@@ -162,9 +168,7 @@ impl ReferenceOrbit {
     /// Later, if this orbit is chosen as an anchor, but max_user_iter changes
     /// the orbit must be 'invalidated' (i.e. un-anchored), and then continued
     /// which will change the value of r_valid.
-    pub fn compute_to(&mut self, max_user_iter: u32) {
-        let max_iter = (max_user_iter as f64 * REF_ORBIT_USER_EXTENSION) as u32;
-        
+    pub fn compute_to(&mut self, max_iter: u32) {
         let curr_iter = self.orbit.len() as u32;
         if max_iter < curr_iter {
             warn!("For Orbit {}, curr_iter={} is already at (or past) max_iter={}", 
@@ -245,6 +249,24 @@ impl ReferenceOrbit {
                 break;
             }
         }
+
+        // Compute contraction metric taking the orbit's period into account.
+        self.quality_metrics.contraction = if let Some(p) = self.quality_metrics.period {
+            let mut sum = Float::with_val(prec.0, 0);
+            let start = self.orbit.len() - p as usize;
+            for k in start..self.orbit.len() {
+                let two_z = self.orbit[k].clone() * &two;
+                let mag_two_z = two_z.clone().abs().real().clone();
+                if mag_two_z > NEAR_ZERO_THRESHOLD {
+                    sum += mag_two_z.clone().ln();
+                }
+            }
+
+            sum / Float::with_val(prec.0, p)
+        } else {
+            // fallback: global average
+            self.curr_log_sum.clone() / Float::with_val(prec.0, self.log_count)
+        };
     }
 }
 
@@ -307,6 +329,42 @@ impl OrbitGpuPayload {
             re_lo: Vec::<f32>::new(), 
             im_hi: Vec::<f32>::new(), 
             im_lo: Vec::<f32>::new()
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OrbitScore {
+    pub depth: f64,
+    pub dist: f64,
+    pub contraction: f64,
+
+    pub total_score: f64,
+    pub orbit: LiveOrbit,
+}
+
+impl OrbitScore {
+    pub fn new(orbit: LiveOrbit, tile: &TileGeometry) -> Self {
+        let orb_g = orbit.read();
+        let tile_center = tile.center();
+        let tile_radius = tile.radius();
+
+        let sample_dist_from_tile_center = complex_distance(orb_g.c_ref(), tile_center);
+
+        let depth = if orb_g.escape_index().is_none() {1.0} else {
+            orb_g.escape_index().unwrap() as f64 / orb_g.max_ref_orbit_iters as f64
+        };
+        let contraction = (-orb_g.contraction().to_f64()).clamp(0.0, 2.0);
+        let dist = 1.0 - (sample_dist_from_tile_center.to_f64() / tile_radius.to_f64())
+            .clamp(0.0, 1.0);
+
+        let total_score =
+            depth * 2.0 +
+                contraction * 200.0 +
+                dist * 0.1;
+
+        Self {
+            depth, dist, contraction, total_score, orbit: orbit.clone()
         }
     }
 }

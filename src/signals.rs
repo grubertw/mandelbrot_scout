@@ -59,6 +59,17 @@ impl CameraSnapshot {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct GpuGridSample {
+    pub frame_stamp: FrameStamp,
+    
+    // Gpu Reduced info about the pest sampled pixel it's sample grid
+    pub best_sample: Complex,
+    pub best_sample_iters: u32,
+    pub best_sample_escaped: bool,
+    pub max_user_iters: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TileObservation {
     pub frame_stamp: FrameStamp,
@@ -81,6 +92,7 @@ pub struct TileOrbitViewDf {
     pub id: TileId,
     pub geometry: TileGeometry,
     pub delta_from_center: Complex,
+    pub delta_from_center_to_anchor: ComplexDf,
     pub orbit: ReferenceOrbitDf,
 }
 

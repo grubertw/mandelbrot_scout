@@ -17,7 +17,6 @@ use iced_winit::winit::window::Window;
 
 use rug::{Float, Complex};
 use log::{trace, debug, info, warn};
-use std::hash::{DefaultHasher, Hasher};
 use std::sync::Arc;
 use std::time;
 use parking_lot::Mutex;
@@ -33,8 +32,8 @@ pub struct Scene {
     height: f64,
     scout_engine: ScoutEngine,
     loaded_tiles: Vec<(TileId, OrbitId)>,
-    feedback_hash: u64, // Hash of loaded tiles, used to send feedback to scout engine only when it's changed.
     uniform: SceneUniform,
+    reduce_uniform: ReduceUniform,
     pipeline: PipelineBundle,
 }
 
@@ -50,26 +49,24 @@ impl Scene {
         let scale_df = Df::from_float(&scale);
 
         // Configure ScoutEngine (our single source of truth for reference orbits)
-        let scout_config = Arc::new(Mutex::new( ScoutEngineConfig {
+        let scout_config =  ScoutEngineConfig {
             max_live_orbits: MAX_LIVE_ORBITS,
             max_user_iters: MAX_USER_ITER,
             max_ref_orbit_iters: MAX_REF_ORBIT,
             auto_start: AUTO_START,
             starting_scale: STARTING_SCALE,
-            starting_tile_pixel_span: STARTING_TILE_PIXEL_SPAN,
-            smallest_tile_pixel_span: SMALLEST_TILE_PIXEL_SPAN,
-            coverage_to_anchor: COVERAGE_TO_ANCHOR,
-            orbit_rng_seed: ORBIT_RNG_SEED,
-            num_orbits_to_spawn_per_tile: NUM_ORBITS_PER_TILE_SPAWN,
-            max_tile_anchor_failure_attempts: MAX_TILE_ANCHOR_FAILURE_ATTEMPTS,
-            split_tile_on_poor_coverage_check: SPLIT_TILE_ON_POOR_COVERAGE,
+            max_tile_levels: MAX_TILE_LEVELS,
+            ideal_tile_size: IDEAL_TILE_SIZE,
+            ref_iters_multiplier: REF_ITERS_MULTIPLIER,
+            num_seeds_to_spawn_per_tile_eval: NUM_SEEDS_TO_SPAWN_PER_TILE_EVAL,
+            contraction_threshold: CONTRACTION_THRESHOLD,
             rug_precision: INIT_RUG_PRECISION,
             exploration_budget: EXPLORATION_BUDGET,
-        }));
+        };
 
         let scout_engine = ScoutEngine::new(
-            window, 
             scout_config,
+            window,
             CameraSnapshot::new(
                 FrameStamp::new(), center.clone(), scale.clone(),
                 width.max(height) / 2.0,
@@ -83,16 +80,24 @@ impl Scene {
             screen_height: height as f32,
             max_iter: MAX_USER_ITER, tile_count: 0,
         };
+        
+        let reduce_uniform = ReduceUniform {
+            screen_width: uniform.screen_width as u32,
+            screen_height: uniform.screen_height as u32,
+            grid_size: SCREEN_GRID_SIZE,
+            grid_width: uniform.screen_width as u32 / SCREEN_GRID_SIZE,
+        };
 
         // Configure and initialize all WGPU resources for render passes.
-        let pipeline = PipelineBundle::build_pipelines(device, &uniform, texture_format);
+        let pipeline = PipelineBundle::build_pipelines(
+            device, &uniform, &reduce_uniform, texture_format);
 
         Scene { 
             frame_id: 0, frame_timestamp: time::Instant::now(), 
             center, scale, scale_factor: Float::with_val(INIT_RUG_PRECISION, 1.05),
             width, height, scout_engine, 
-            loaded_tiles: Vec::new(), feedback_hash: 0,
-            uniform, pipeline
+            loaded_tiles: Vec::new(),
+            uniform, reduce_uniform, pipeline
         }
     }
 
@@ -123,6 +128,7 @@ impl Scene {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -152,6 +158,7 @@ impl Scene {
                 label: Some("reduce tiles pass"),
                 timestamp_writes: None
             });
+            queue.write_buffer(&self.pipeline.reduce_uniform_buff, 0, bytemuck::cast_slice(&[self.reduce_uniform]));
 
             cpass.set_pipeline(&self.pipeline.reduce_pipeline);
             cpass.set_bind_group(0, &self.pipeline.reduce_bg, &[]);
@@ -162,7 +169,107 @@ impl Scene {
         queue.submit(Some(encoder.finish()));
     }
 
-    pub fn read_orbit_feedback(
+    pub fn read_grid_feedback(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) {
+        let byte_size = 
+            (self.reduce_uniform.grid_width 
+            * (self.reduce_uniform.screen_height / SCREEN_GRID_SIZE)) as u64 
+            * std::mem::size_of::<GridFeedbackOut>() as u64;
+        if byte_size == 0 {
+            warn!("This frame had no grid feedback!");
+            return;
+        }
+
+        let mut encoder = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("grid feedback copy encoder"),
+            },
+        );
+
+        encoder.copy_buffer_to_buffer(
+            &self.pipeline.grid_feedback_buffer,
+            0,
+            &self.pipeline.grid_feedback_readback,
+            0,
+            byte_size,
+        );
+
+        queue.submit(Some(encoder.finish()));
+
+        let buffer_slice = self.pipeline.grid_feedback_readback.slice(0..byte_size);
+
+        let (sender, receiver) = futures::channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |res| {
+            sender.send(res).ok();
+        });
+
+        device.poll(wgpu::PollType::Wait{submission_index: None, timeout: None})
+            .expect("Failed to poll grid feedback");
+
+        let feedback = executor::block_on(async {
+            match receiver.await {
+                Ok(Ok(())) => {
+                    let data = buffer_slice.get_mapped_range();
+                    // SAFETY: TileFeedbackOut is Pod + repr(C)
+                    let slice: &[GridFeedbackOut] =
+                        bytemuck::cast_slice(&data);
+
+                    let result = slice.to_vec();
+                    drop(data);
+                    self.pipeline.grid_feedback_readback.unmap();
+                    result
+                }
+                _ => {
+                    self.pipeline.grid_feedback_readback.unmap();
+                    Vec::new()
+                }
+            }
+        });
+
+        let mut trace_str = String::from(format!("Scene read {} GpuSamples.\n", feedback.len()).as_str());
+
+        let grid_samples: Vec<GpuGridSample> = feedback
+            .iter()
+            .map(|sample| {
+                let best_sample =self.build_c_from_scene(sample.best_pixel_x, sample.best_pixel_y);
+                let sample_iters = sample.iter();
+                let escaped = sample.escaped();
+
+                if !escaped {
+                    trace_str.push_str(
+                        format!("\t({:<3}, {:<3}) c={:<40} depth={:<3} escaped={} perturbed={} \
+                        perturbed_err={} max_iters_reached={} tile_id={}\traw_flags={}\n",
+                           sample.best_pixel_x, sample.best_pixel_y,
+                           best_sample.to_string_radix(10, Some(10)),
+                           sample_iters, escaped,
+                            sample.perturbed(),
+                            sample.perturb_err(),
+                            sample.max_iters_reached(),
+                            sample.tile_id(),
+                            sample.best_pixel_flags
+                    ).as_str());
+                }
+
+                GpuGridSample {
+                    frame_stamp: FrameStamp {
+                        frame_id: self.frame_id,
+                        timestamp: self.frame_timestamp
+                    },
+                    best_sample,
+                    best_sample_iters: sample_iters,
+                    best_sample_escaped: escaped,
+                    max_user_iters: self.uniform.max_iter
+            }})
+            .collect();
+
+        trace!("{}", trace_str);
+        self.scout_engine.set_grid_samples(grid_samples)
+    }
+
+    pub fn read_tile_feedback(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -175,68 +282,55 @@ impl Scene {
 
         let mut encoder = device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
-                label: Some("orbit feedback copy encoder"),
+                label: Some("grid feedback copy encoder"),
             },
         );
 
         encoder.copy_buffer_to_buffer(
-            &self.pipeline.orbit_feedback_buffer,
+            &self.pipeline.tile_feedback_buffer,
             0,
-            &self.pipeline.orbit_feedback_readback,
+            &self.pipeline.tile_feedback_readback,
             0,
             byte_size,
         );
 
         queue.submit(Some(encoder.finish()));
 
-        let buffer_slice = self.pipeline.orbit_feedback_readback.slice(0..byte_size);
+        let buffer_slice = self.pipeline.tile_feedback_readback.slice(0..byte_size);
 
         let (sender, receiver) = futures::channel::oneshot::channel::<Result<(), wgpu::BufferAsyncError>>();
         buffer_slice.map_async(wgpu::MapMode::Read, move |res| {
             sender.send(res).ok();
         });
 
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .expect("Failed to poll tile feedback");
 
         let feedback = futures::executor::block_on(async {
             match receiver.await {
                 Ok(Ok(())) => {
                     let data = buffer_slice.get_mapped_range();
-
                     // SAFETY: TileFeedbackOut is Pod + repr(C)
                     let slice: &[TileFeedbackOut] =
                         bytemuck::cast_slice(&data);
 
                     let result = slice.to_vec();
-
                     drop(data);
-                    self.pipeline.orbit_feedback_readback.unmap();
-
+                    self.pipeline.tile_feedback_readback.unmap();
                     result
                 }
                 _ => {
-                    self.pipeline.orbit_feedback_readback.unmap();
+                    self.pipeline.tile_feedback_readback.unmap();
                     Vec::new()
                 }
             }
         });
 
-        // Determine if the GPU orbit-slot configuration has changed.
-        let mut hasher = DefaultHasher::new();
-        for o in &self.loaded_tiles {
-            hasher.write_i64(o.0.tx);
-            hasher.write_i64(o.0.ty);
-            hasher.write_i64(o.1 as i64);
-        }
-        let tile_hash = hasher.finish();
-
-        // Only send orbit observactiosn of the GPU orbit-slot config has changed.
-        if tile_hash != self.feedback_hash && 
-           self.loaded_tiles.len() == self.uniform.tile_count as usize {
+        if self.loaded_tiles.len() == self.uniform.tile_count as usize {
             let observations: Vec<TileObservation> = feedback
                 .iter()
                 .enumerate()
-                .map(|(i, v)| TileObservation{
+                .map(|(i, v)| TileObservation {
                     frame_stamp: FrameStamp {
                         frame_id: self.frame_id,
                         timestamp: self.frame_timestamp
@@ -245,17 +339,13 @@ impl Scene {
                     orbit_id: self.loaded_tiles[i].1,
                     feedback: *v
                 })
-                .collect(); 
+                .collect();
 
             self.scout_engine.submit_tile_observations(observations);
-            self.feedback_hash = tile_hash;
-        } else {
-            trace!("Tile config unchanged. Will not send observations this frame. num loaded tiles is {}",
-                self.loaded_tiles.len());
         }
     }
 
-    pub fn read_debug<'a>(&'a self, device: &wgpu::Device, queue: &wgpu::Queue) {
+    pub fn read_debug(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
         // 1) create encoder, copy storage -> readback
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("debug copy encoder"),
@@ -279,7 +369,8 @@ impl Scene {
             sender.send(v).unwrap();
         });
 
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait{submission_index: None, timeout: None})
+            .expect("Failed to poll debug copy buffer");
 
         executor::block_on(async {
             if let Ok(Ok(_)) = receiver.await {
@@ -336,6 +427,9 @@ impl Scene {
         self.height = height;
         self.uniform.screen_width = width as f32;
         self.uniform.screen_height = height as f32;
+        self.reduce_uniform.screen_width = width as u32;
+        self.reduce_uniform.screen_height = height as u32;
+        self.reduce_uniform.grid_width = width as u32 / SCREEN_GRID_SIZE;
 
         debug!("Window size changed w={} h={}", width, height);
     }
@@ -506,14 +600,14 @@ impl Scene {
             tex_height, tex_width, row_count, largest_orb_len, texture_data.len());
 
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &self.pipeline.ref_orbit_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             bytemuck::cast_slice(&texture_data),
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(std::num::NonZeroU32::new(
                     tex_width * std::mem::size_of::<f32>() as u32
@@ -540,6 +634,27 @@ impl Scene {
             queue.write_buffer(&self.pipeline.tile_geometry_buf, 0, bytemuck::cast_slice(&tile_geometry));
         }
     }
+
+    fn build_c_from_scene(&self, pix_x: i32, pix_y: i32) -> Complex {
+        let half_width = self.width / 2.0;
+        let half_height = self.height / 2.0;
+
+        let dx = pix_x - half_width as i32;
+        let dy = half_height as i32 - pix_y;
+
+        let mut off_x = self.scale.clone();
+        off_x *= dx;
+
+        let mut off_y = self.scale.clone();
+        off_y *= dy;
+
+        let mut pix_c = self.center.clone();
+        let (re, im) = pix_c.as_mut_real_imag();
+        *re += &off_x;
+        *im += &off_y;
+
+        pix_c
+    }
 }
 
 pub fn build_gpu_tile_geometry_from_tile_views(
@@ -562,8 +677,10 @@ pub fn build_gpu_tile_geometry_from_tile_views(
                 anchor_c_ref_re_lo: tile.orbit.c_ref.re.lo,
                 anchor_c_ref_im_hi: tile.orbit.c_ref.im.hi,
                 anchor_c_ref_im_lo: tile.orbit.c_ref.im.lo,
-                r_valid_hi: tile.orbit.r_valid.hi,
-                r_valid_lo: tile.orbit.r_valid.lo,
+                center_offset_re_hi: tile.delta_from_center_to_anchor.re.hi,
+                center_offset_re_lo: tile.delta_from_center_to_anchor.re.lo,
+                center_offset_im_hi: tile.delta_from_center_to_anchor.im.hi,
+                center_offset_im_lo: tile.delta_from_center_to_anchor.im.lo,
                 tile_screen_min_x: (tile_x_center - r_pix) as f32,
                 tile_screen_max_x: (tile_x_center + r_pix) as f32,
                 tile_screen_min_y: (tile_y_center - r_pix) as f32,

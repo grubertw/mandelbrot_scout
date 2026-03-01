@@ -15,17 +15,16 @@ use controls::Controls;
 use controls::Message;
 use scene::Scene;
 
-use iced_wgpu::graphics::Viewport;
+use iced_wgpu::graphics::{Viewport, Shell};
 use iced_wgpu::{Engine, Renderer, wgpu};
 use iced_winit::Clipboard;
 use iced_winit::conversion;
-use iced_winit::core::event;
 use iced_winit::core::mouse;
 use iced_winit::core::renderer;
-use iced_winit::core::{Font, Pixels, Size, Theme, Color};
+use iced_winit::core::window;
+use iced_winit::core::{Event, Font, Pixels, Size, Theme};
+use iced_winit::runtime::user_interface::{self, UserInterface};
 use futures::executor;
-use iced_winit::runtime::program;
-use iced_winit::runtime::Debug;
 use iced_winit::winit;
 
 use winit::{
@@ -45,6 +44,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::process;
+use std::time::Instant;
 
 #[allow(clippy::large_enum_variant)]
 enum Runner {
@@ -55,12 +55,12 @@ enum Runner {
         device: wgpu::Device,
         surface: wgpu::Surface<'static>,
         format: wgpu::TextureFormat,
-        engine: Engine,
         renderer: Renderer,
-        debug: Debug,
         scene: Rc<RefCell<Scene>>,
-        state: program::State<Controls>,
-        cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
+        controls: Controls,
+        events: Vec<Event>,
+        cursor: mouse::Cursor,
+        cache: user_interface::Cache,
         clipboard: Clipboard,
         viewport: Viewport,
         modifiers: ModifiersState,
@@ -85,20 +85,17 @@ impl ApplicationHandler for Runner {
             let physical_size = window.inner_size();
             let viewport = Viewport::with_physical_size(
                 Size::new(physical_size.width, physical_size.height),
-                window.scale_factor() as f64);            
+                window.scale_factor() as f32);
 
             let clipboard = Clipboard::connect(window.clone());
-            let backend = wgpu::util::backend_bits_from_env().unwrap_or_default();
 
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: backend,
-                ..Default::default()});
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
             let surface = instance
                 .create_surface(window.clone())
                 .expect("Create window surface");
 
-            debug!("Runner.resumed - physical_size={:?} scale_fac={:?} backend={:?}", 
-                physical_size, window.scale_factor(), backend);
+            debug!("Runner.resumed - physical_size={:?} scale_fac={:?}",
+                physical_size, window.scale_factor());
 
             let (format, adapter, device, queue) =
                 executor::block_on(async {
@@ -114,7 +111,12 @@ impl ApplicationHandler for Runner {
                     let (device, queue) = adapter
                         .request_device(&wgpu::DeviceDescriptor {label: None,
                             required_features: adapter_features,
-                            required_limits: wgpu::Limits::default()}, None)
+                            required_limits: wgpu::Limits::default(),
+                            memory_hints: wgpu::MemoryHints::MemoryUsage,
+                            trace: wgpu::Trace::Off,
+                            experimental_features:
+                            wgpu::ExperimentalFeatures::disabled(),
+                        })
                         .await
                         .expect("Request device");
 
@@ -136,9 +138,11 @@ impl ApplicationHandler for Runner {
                 desired_maximum_frame_latency: 2});
 
             // Initialize scene and GUI controls
-            let scene = Rc::new(RefCell::new(Scene::new(window.clone(), &device, format, 
-                physical_size.width.into(), 
-                physical_size.height.into())));
+            let scene = Rc::new(RefCell::new(
+                Scene::new(window.clone(), &device, format,
+                    physical_size.width.into(),
+                    physical_size.height.into()
+                )));
             // Take a snapshot of where the camera is in the beginning to send to ScoutEngine
             // So that an initial reference orbit can be computed.
             scene.borrow_mut().take_camera_snapshot();
@@ -146,10 +150,18 @@ impl ApplicationHandler for Runner {
             let controls = Controls::new(Rc::clone(&scene));
 
             // Initialize iced
-            let mut debug = Debug::new();
-            let engine = Engine::new(&adapter, &device, &queue, format, None);
-            let mut renderer = Renderer::new(&device, &engine, Font::default(), Pixels::from(16));
-            let state = program::State::new(controls, viewport.logical_size(), &mut renderer, &mut debug);
+            let renderer = {
+                let engine = Engine::new(
+                    &adapter,
+                    device.clone(),
+                    queue.clone(),
+                    format,
+                    None,
+                    Shell::headless(),
+                );
+
+                Renderer::new(engine, Font::default(), Pixels::from(16))
+            };
 
             // Change this to render continuously
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -159,16 +171,17 @@ impl ApplicationHandler for Runner {
             let mouse_rb_state = ElementState::Released;
 
             info!("ApplicationHandler Runner Initialized");
-            *self = Self::Ready {window, device, queue, surface, format, engine, renderer, debug, 
-                scene: Rc::clone(&scene), state, cursor_position: None, modifiers: ModifiersState::default(),
+            *self = Self::Ready {window, device, queue, surface, format, renderer,
+                scene: Rc::clone(&scene), controls, events: Vec::new(), cursor: mouse::Cursor::Unavailable,
+                cache: user_interface::Cache::new(), modifiers: ModifiersState::default(),
                 clipboard, viewport, resized: false, prev_pos, mouse_lb_state, mouse_rb_state};
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop,
             _window_id: WindowId, event: WindowEvent) {
-        let Self::Ready {window, device, queue, surface, format, engine, renderer, debug, scene, 
-            state, viewport, cursor_position, modifiers, clipboard, resized, 
+        let Self::Ready {window, device, queue, surface, format, renderer, scene,
+            controls, events, viewport, cursor, cache, modifiers, clipboard, resized,
             mouse_lb_state, mouse_rb_state, prev_pos} = self
         else {
             return;
@@ -184,7 +197,7 @@ impl ApplicationHandler for Runner {
                         size.height.into());
 
                     *viewport = Viewport::with_physical_size(Size::new(size.width, size.height),
-                        window.scale_factor() as f64);
+                        window.scale_factor() as f32);
 
                     surface.configure(device, &wgpu::SurfaceConfiguration {
                             format: *format,
@@ -213,7 +226,7 @@ impl ApplicationHandler for Runner {
                             let scout_diags = s.read_scout_diagnostics();
                             let mut scout_diags_g = scout_diags.lock();
                             if !scout_diags_g.consumed {
-                                state.queue_message(Message::UpdateDebugText(scout_diags_g.message.clone()));
+                                controls.update(Message::UpdateDebugText(scout_diags_g.message.clone()));
                                 scout_diags_g.consumed = true;
                             }
 
@@ -222,25 +235,67 @@ impl ApplicationHandler for Runner {
 
                             s.stamp_frame();
                             s.read_debug(&device, &queue);
-                            //s.read_gpu_feedback(&device, &queue);
-                            s.read_orbit_feedback(&device, &queue);
-                            //s.read_gpu_texture_feedback(&device, &queue);
+                            s.read_grid_feedback(&device, &queue);
+                            s.read_tile_feedback(&device, &queue);
                         }
 
-                        let mut encoder = device.create_command_encoder(
-                            &wgpu::CommandEncoderDescriptor { label: None });
-
                         // Draw Iced on top
-                        renderer.present(engine, &device, &queue, &mut encoder, 
-                            None, frame.texture.format(), &view, viewport, &debug.overlay());
-                        engine.submit(queue, encoder);
+                        let mut interface = UserInterface::build(
+                            controls.view(),
+                            viewport.logical_size(),
+                            std::mem::take(cache),
+                            renderer,
+                        );
 
-                        //debug!("draw frame={:?}", frame);
-                        frame.present();
+                        let (state, _) = interface.update(
+                            &[Event::Window(
+                                window::Event::RedrawRequested(
+                                    Instant::now(),
+                                ),
+                            )],
+                            *cursor,
+                            renderer,
+                            clipboard,
+                            &mut Vec::new(),
+                        );
 
                         // Update the mouse cursor
-                        window.set_cursor(iced_winit::conversion::mouse_interaction(
-                            state.mouse_interaction()));
+                        if let user_interface::State::Updated {
+                            mouse_interaction,
+                            ..
+                        } = state
+                        {
+                            // Update the mouse cursor
+                            if let Some(icon) =
+                                conversion::mouse_interaction(
+                                    mouse_interaction,
+                                )
+                            {
+                                window.set_cursor(icon);
+                                window.set_cursor_visible(true);
+                            } else {
+                                window.set_cursor_visible(false);
+                            }
+                        }
+
+                        // Draw the interface
+                        interface.draw(
+                            renderer,
+                            &Theme::Dark,
+                            &renderer::Style::default(),
+                            *cursor,
+                        );
+                        *cache = interface.into_cache();
+
+                        renderer.present(
+                            None,
+                            frame.texture.format(),
+                            &view,
+                            viewport,
+                        );
+
+                        // Present the frame
+                        frame.present();
                     }
                     Err(error) => match error {
                         wgpu::SurfaceError::OutOfMemory => {
@@ -254,7 +309,10 @@ impl ApplicationHandler for Runner {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                *cursor_position = Some(position);
+                *cursor = mouse::Cursor::Available(conversion::cursor_position(
+                    position,
+                    viewport.scale_factor(),
+                ));
 
                 match mouse_rb_state {
                     ElementState::Pressed => {
@@ -339,37 +397,42 @@ impl ApplicationHandler for Runner {
             _ => {}
         }
 
-        // Map window event to iced event, and filter mouse movements when no mouse
-        // buttons are preseed 
-        if let Some(event) = conversion::window_event(event, window.scale_factor(), *modifiers) {
-            let mut queue_event = true;
-
-            if let event::Event::Mouse(me) = event {
-                if let mouse::Event::CursorMoved{..} = me {
-                    if   *mouse_lb_state == ElementState::Released 
-                      || *mouse_lb_state == ElementState::Released {
-                        queue_event = false;
-                    }
-                }
-            }
-
-            if queue_event {
-                debug!("Queing window event={:?}", event);
-                state.queue_event(event);
-            }
+        // Map window event to iced event
+        if let Some(event) = conversion::window_event(
+            event,
+            window.scale_factor() as f32,
+            *modifiers,
+        ) {
+            events.push(event);
         }
 
         // If there are events pending
-        if !state.is_queue_empty() {
-            debug!{"State Q is not empty, so requesting redraw"};
+        if !events.is_empty() {
+            // We process them
+            let mut interface = UserInterface::build(
+                controls.view(),
+                viewport.logical_size(),
+                std::mem::take(cache),
+                renderer,
+            );
 
-            // We update iced
-            let _ = state.update(viewport.logical_size(), cursor_position
-                    .map(|p| {conversion::cursor_position(p,viewport.scale_factor())})
-                    .map(mouse::Cursor::Available)
-                    .unwrap_or(mouse::Cursor::Unavailable),
-                renderer, &Theme::Dark, &renderer::Style {text_color: Color::WHITE},
-                clipboard, debug);
+            let mut messages = Vec::new();
+
+            let _ = interface.update(
+                events,
+                *cursor,
+                renderer,
+                clipboard,
+                &mut messages,
+            );
+
+            events.clear();
+            *cache = interface.into_cache();
+
+            // update our UI with any messages
+            for message in messages {
+                controls.update(message);
+            }
 
             // and request a redraw
             window.request_redraw();

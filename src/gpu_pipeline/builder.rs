@@ -7,8 +7,11 @@ use wgpu::util::DeviceExt;
 #[derive(Debug)]
 pub struct PipelineBundle {
     pub uniform_buff: wgpu::Buffer,
-    pub orbit_feedback_buffer: wgpu::Buffer,
-    pub orbit_feedback_readback: wgpu::Buffer,
+    pub reduce_uniform_buff: wgpu::Buffer,
+    pub grid_feedback_buffer: wgpu::Buffer,
+    pub grid_feedback_readback: wgpu::Buffer,
+    pub tile_feedback_buffer: wgpu::Buffer,
+    pub tile_feedback_readback: wgpu::Buffer,
     pub debug_buffer: wgpu::Buffer,
     pub debug_readback: wgpu::Buffer,
     pub ref_orbit_texture: wgpu::Texture,
@@ -27,9 +30,11 @@ impl PipelineBundle {
     pub fn build_pipelines(
         device: &wgpu::Device,
         uniform: &SceneUniform,
+        reduce_uniform: &ReduceUniform,
         texture_format: wgpu::TextureFormat,
     ) -> Self {
-        let (flags_tex, orbit_feedback_buffer) = create_shared_buffers(device);
+        let (flags_tex, grid_feedback_buffer, tile_feedback_buffer) = 
+            create_shared_buffers(device);
 
         //
         // Build WGPU Bind Group and Pipeline descriptors
@@ -41,7 +46,7 @@ impl PipelineBundle {
 
         let (
             clear_bg, clear_pipeline
-        ) = build_clear_pipeline(device, &flags_tex, &orbit_feedback_buffer);
+        ) = build_clear_pipeline(device, &flags_tex, &grid_feedback_buffer, &tile_feedback_buffer);
 
         let (
             uniform_buff,
@@ -49,15 +54,20 @@ impl PipelineBundle {
             debug_buffer, debug_readback,
             scene_bg, ref_orbit_bg, debug_bg, 
             render_pipeline
-        ) = build_render_pipeline(device, &uniform, texture_format, &flags_tex);
+        ) = build_render_pipeline(device, uniform, texture_format, &flags_tex);
 
         let (
-            orbit_feedback_readback, reduce_bg, reduce_pipeline
-        ) = build_reduce_pipeline(device, &flags_tex, &orbit_feedback_buffer);
+            reduce_uniform_buff, grid_feedback_readback, tile_feedback_readback, 
+            reduce_bg, reduce_pipeline
+        ) = build_reduce_pipeline(device, reduce_uniform, &flags_tex, 
+                                  &grid_feedback_buffer, &tile_feedback_buffer);
 
         Self {
-            uniform_buff,
-            orbit_feedback_buffer, orbit_feedback_readback,
+            uniform_buff, reduce_uniform_buff,
+            grid_feedback_buffer,
+            grid_feedback_readback,
+            tile_feedback_buffer,
+            tile_feedback_readback,
             debug_buffer, debug_readback,
             ref_orbit_texture, tile_geometry_buf,
             clear_bg, scene_bg, ref_orbit_bg, debug_bg, reduce_bg,
@@ -70,7 +80,7 @@ impl PipelineBundle {
 // Create WGPU Buffers & Textures to be shared accorss three piplines 
 //
 fn create_shared_buffers(device: &wgpu::Device) 
--> (wgpu::Texture, wgpu::Buffer) {
+-> (wgpu::Texture, wgpu::Buffer, wgpu::Buffer) {
     // --- Per-pixel feedback textures ---
     let flags_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("flags_tex"),
@@ -89,24 +99,33 @@ fn create_shared_buffers(device: &wgpu::Device)
     });
 
     // --- Reduce output buffer ---
-    let orbit_feedback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("orbit_feedback_buffer"),
+    let grid_feedback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("grid_feedback_buffer"),
+        size: ((MAX_SCREEN_WIDTH / SCREEN_GRID_SIZE) * (MAX_SCREEN_HEIGHT / SCREEN_GRID_SIZE)) as u64
+            * std::mem::size_of::<GridFeedbackOut>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    
+    let tile_feedback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("tile_feedback_buffer"),
         size: MAX_ORBITS_PER_FRAME as u64
             * std::mem::size_of::<TileFeedbackOut>() as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
-    (flags_tex, orbit_feedback_buffer)
+    (flags_tex, grid_feedback_buffer, tile_feedback_buffer)
 }
 
 //
 // Pipeline 1 Bind Group Layout & Pipeline (clear/compute)
 //
 fn build_clear_pipeline(
-    device: &wgpu::Device, 
-    flags_tex: &wgpu::Texture, 
-    orbit_feedback_buffer: &wgpu::Buffer, 
+    device: &wgpu::Device,
+    flags_tex: &wgpu::Texture,
+    grid_feedback_buffer: &wgpu::Buffer,
+    tile_feedback_buffer: &wgpu::Buffer,
 ) -> (wgpu::BindGroup, wgpu::ComputePipeline) {
     // Shader for the Clear (compute) pipeline
     let clear_shader = device.create_shader_module(wgpu::include_wgsl!("clear_feedback.wgsl"));  
@@ -125,9 +144,20 @@ fn build_clear_pipeline(
                 },
                 count: None,
             },
-            // orbit_feedback
+            // grid feedback
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // tile feedback
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -151,7 +181,11 @@ fn build_clear_pipeline(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: orbit_feedback_buffer.as_entire_binding(),
+                resource: grid_feedback_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: tile_feedback_buffer.as_entire_binding(),
             },
         ],
     });
@@ -168,7 +202,9 @@ fn build_clear_pipeline(
             label: Some("clear_pipeline"),
             layout: Some(&clear_pipeline_layout),
             module: &clear_shader,
-            entry_point: "cs_main",
+            entry_point: Option::from("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
         });
     
     (clear_bg, clear_pipeline)
@@ -368,12 +404,14 @@ fn build_render_pipeline(
         layout: Some(&render_pipeline_layout),
         vertex: wgpu::VertexState {
             module: &frag_shader,
-            entry_point: "vs_main",
+            entry_point: Option::from("vs_main"),
+            compilation_options: Default::default(),
             buffers: &[],
         },
         fragment: Some(wgpu::FragmentState {
             module: &frag_shader,
-            entry_point: "fs_main",
+            entry_point: Option::from("fs_main"),
+            compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: texture_format,
                 blend: Some(wgpu::BlendState::REPLACE),
@@ -383,7 +421,8 @@ fn build_render_pipeline(
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
-        multiview: None
+        multiview: None,
+        cache: None,
     });
 
     (
@@ -398,15 +437,31 @@ fn build_render_pipeline(
 // Pipeline 3 layouts and pipeline (reduce/compute)
 //
 fn build_reduce_pipeline(
-    device: &wgpu::Device, 
-    flags_tex: &wgpu::Texture, 
-    orbit_feedback_buffer: &wgpu::Buffer,
-) -> (wgpu::Buffer, wgpu::BindGroup, wgpu::ComputePipeline) {
+    device: &wgpu::Device,
+    reduce_uniform: &ReduceUniform,
+    flags_tex: &wgpu::Texture,
+    grid_feedback_buffer: &wgpu::Buffer,
+    tile_feedback_buffer: &wgpu::Buffer,
+) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup, wgpu::ComputePipeline) {
     // shader for Reduce (compute) pipeline
     let reduce_shader = device.create_shader_module(wgpu::include_wgsl!("reduce_feedback.wgsl"));
 
-    let orbit_feedback_readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("orbit_feedback_readback"),
+    let reduce_uniform_buff = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None,
+        contents: bytemuck::bytes_of(reduce_uniform),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let grid_feedback_readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("grid_feedback_readback"),
+        size: (((MAX_SCREEN_WIDTH / SCREEN_GRID_SIZE) * (MAX_SCREEN_HEIGHT / SCREEN_GRID_SIZE)) as usize
+            * std::mem::size_of::<GridFeedbackOut>()) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let tile_feedback_readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("tile_feedback_readback"),
         size: (MAX_ORBITS_PER_FRAME as usize
             * std::mem::size_of::<TileFeedbackOut>()) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
@@ -417,9 +472,19 @@ fn build_reduce_pipeline(
         &wgpu::BindGroupLayoutDescriptor {
             label: Some("reduce_feedback_bgl"),
             entries: &[
-                // flags_tex
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None
+                    },
+                    count: None,
+                },
+                // flags_tex
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Uint,
@@ -428,9 +493,20 @@ fn build_reduce_pipeline(
                     },
                     count: None,
                 },
-                // orbit_feedback buffer
+                // grid feedback buffer
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // tile feedback buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -449,13 +525,21 @@ fn build_reduce_pipeline(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
+                resource: reduce_uniform_buff.as_entire_binding()
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
                 resource: wgpu::BindingResource::TextureView(
                     &flags_tex.create_view(&Default::default())
                 ),
             },
             wgpu::BindGroupEntry {
-                binding: 1,
-                resource: orbit_feedback_buffer.as_entire_binding(),
+                binding: 2,
+                resource: grid_feedback_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: tile_feedback_buffer.as_entire_binding(),
             },
         ],
     });
@@ -472,8 +556,10 @@ fn build_reduce_pipeline(
             label: Some("reduce_feedback_pipeline"),
             layout: Some(&reduce_pipeline_layout),
             module: &reduce_shader,
-            entry_point: "main",
+            entry_point: Option::from("main"),
+            compilation_options: Default::default(),
+            cache: None,
         });
     
-    (orbit_feedback_readback, reduce_bg, reduce_pipeline)
+    (reduce_uniform_buff, grid_feedback_readback, tile_feedback_readback, reduce_bg, reduce_pipeline)
 }

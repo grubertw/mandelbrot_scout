@@ -14,21 +14,18 @@ use crate::signals::*;
 use iced_winit::winit::window::Window;
 
 use futures::{channel};
-use futures::executor::{ThreadPool};
+use futures::executor::ThreadPool;
 
-use rand_chacha::ChaCha8Rng;
-use rand::SeedableRng;
 use parking_lot::{Mutex, RwLock};
-use rug::Float;
 use log::{trace, info};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::numerics::Df;
+use crate::numerics::{ComplexDf, Df};
+use crate::scout_engine::tasks::create_tile_levels;
 
 pub type ScoutConfig                = Arc<Mutex<ScoutEngineConfig>>;
-type OrbitSeedRng               = Arc<Mutex<ChaCha8Rng>>;
 type CameraSnapshotSender       = channel::mpsc::Sender<CameraSnapshot>;
 type CameraSnapshotReceiver     = channel::mpsc::Receiver<CameraSnapshot>;
 type TileObservationsSender     = channel::mpsc::Sender<Vec<TileObservation>>;
@@ -62,33 +59,25 @@ pub struct ScoutEngineConfig {
     /// Start when the scale threshold is crossed
     pub auto_start: bool,
     /// Starting scale for tile creation, orbit spawning, and everything scout-engine
-    /// does! Changes to this value should be tightly bounded, according to the rules
-    /// of perturbation math.
+    /// does! 
     pub starting_scale: f64,
-    /// Once the starting scale threshold has been crossed, start tiles with this pixel span
-    pub starting_tile_pixel_span: f64,
-    /// The smallest tile-size scout-engine will try to create, in pixels
-    pub smallest_tile_pixel_span: f64,
-    /// The required coverage percentage to anchor a tile
-    /// Scale is between 0 and 1, with 0 being no coverage, and 1 being full coverage.
-    /// More specifically, this is a ratio between the tile_size and a candidate orbit's
-    /// r_valid, where a coverage of 1 means that the tile fully fits the orbit's radius
-    /// for valid perturbation.
-    pub coverage_to_anchor: f64,
-    /// (Psudo) random number generator seed to use for creating orbit 'seeds'
-    /// for complex tiles. Random Number Generator is seeded ONCE, at start of
-    /// the program, so randomness is deterministic for repeated program executions.
-    /// (i.e. good for testing!)
-    pub orbit_rng_seed: u64,
-    /// For any orbit spawn operation, spawn this number of orbits per tile
-    pub num_orbits_to_spawn_per_tile: u32,
-    /// Maximum number of times a 'legitimate' attempt was made to anchor
-    /// a tile and resulted in failure
-    pub max_tile_anchor_failure_attempts: u32,
-    /// After a set number of seeds that are spawned for a tile, check for
-    /// poor coverage, and if the average falls under a threshold, split the tile
-    pub split_tile_on_poor_coverage_check: u32,
-    /// Used to initialize the level-0 tile grid
+    /// Maximum number of tile levels. While it makes sense to increase this at runtime,
+    /// there is no reason to decrease it.
+    pub max_tile_levels: u32,
+    /// Ideal size of a tile in the level hierarchy
+    /// Scout will use current camera scale and this value to extrapolate which
+    /// tile level to use
+    pub ideal_tile_size: f64,
+    /// Number of extra iterations Scout will perform on the ref orbit
+    /// Ref orbits should always at least have max_user_iters,
+    /// unless they escape early, and in which case they are not worth extending as far
+    pub ref_iters_multiplier: f64,
+    /// Number of Reference Orbits ScoutEngine will create from sampled seed candidates
+    /// Note, the seed candidate list is taken from a snapshot of GpuGridSample(s), which
+    /// are reduced within a compute shader running on the GPU.
+    pub num_seeds_to_spawn_per_tile_eval: u32,
+    /// Orbit ranking/selection criteria
+    pub contraction_threshold: f64,
     pub rug_precision: u32,
     /// Numer of 'convergence' cycles that scout engine is allowed to
     /// repeat after a camera pan/zoom. Each cycle may result in new
@@ -101,22 +90,20 @@ pub struct ScoutEngineConfig {
 pub struct ScoutEngineContext {
     /// Our startup configuration
     pub config: ScoutConfig,
+    /// Deterministic descending power-of-two tile hierarchy 
+    pub tile_levels: Vec<TileLevel>,
     /// Our working pool of reference orbits
     pub living_orbits: LivingOrbits,
     /// Where our live complex tiles are stored
     pub tile_registry: TileRegistry,
     /// Creates unique orbit_id's
     pub orbit_id_factory: OrbitIdFactory,
-    /// (Psudo) Random Number Generator used to create/spawn orbit seed (Complex) 
-    /// values for ReferenceOrbit(s). C value is usually bounded by the geometry
-    /// described by TileGeometry in OrbitTileView
-    pub orbit_seed_rng: OrbitSeedRng,
     /// the most recent camera snapshot, essential for knowning when the user 
     /// last changed the viewport. Only scout_worker should update this.
     pub last_camera_snapshot: Arc<Mutex<CameraSnapshot>>,
-    /// Tile Level zero
-    /// If this is unset, it means ScoutEngine has never been started.
-    pub level_zero: Arc<Mutex<TileLevel>>,
+    /// Most recent set of GPU Grid Samples
+    /// Polled by Scout worker during tile evaluation
+    pub grid_samples: Arc<Mutex<Vec<GpuGridSample>>>,
     /// Flag that signifies that scout_worker has changed the context since 
     /// last viewed from without (i.e. by the Scene)
     context_changed: Arc<AtomicBool>,
@@ -127,6 +114,45 @@ pub struct ScoutEngineContext {
 }
 
 impl ScoutEngineContext {
+    pub fn new(
+        config: ScoutEngineConfig, 
+        window: Arc<Window>, 
+        snapshot: CameraSnapshot
+    ) -> Self {
+        info!("Creating ScoutEngineContext with {} TileLevels and level zero tile_size={}",
+            config.max_tile_levels, config.max_tile_levels);
+        
+        let tile_levels = create_tile_levels(
+            config.rug_precision, config.max_tile_levels);
+        
+        Self {
+            config: Arc::new(Mutex::new(config)),
+            tile_levels,
+            living_orbits: Arc::new(Mutex::new(Vec::new())),
+            tile_registry: Arc::new(RwLock::new(HashMap::new())),
+            orbit_id_factory: Arc::new(Mutex::new(IdFactory::new())),
+            last_camera_snapshot: Arc::new(Mutex::new(snapshot)),
+            grid_samples: Arc::new(Mutex::new(Vec::new())),
+            context_changed: Arc::new(AtomicBool::new(false)),
+            window,
+            diagnostics: Arc::new(Mutex::new(ScoutDiagnostics::new(
+                "Scout Engine initializing...".to_string()))
+            ),
+        }
+    }
+    
+    pub fn tile_level_for_snapshot(&self, snapshot: &CameraSnapshot) -> TileLevel{
+        let ideal_tile_size_px = self.config.lock().ideal_tile_size;
+        let mut ideal_tile_size = snapshot.scale().clone();
+        ideal_tile_size *= ideal_tile_size_px;
+        
+        self.tile_levels
+            .iter()
+            .rfind(|lvl| lvl.tile_size > ideal_tile_size)
+            .cloned()
+            .unwrap()
+    }
+    
     pub fn context_changed(&self) {
         self.context_changed.store(true, Ordering::Relaxed);
 
@@ -157,15 +183,10 @@ pub struct ScoutEngine {
 }
 
 impl ScoutEngine {
-    pub fn new(window: Arc<Window>, config: ScoutConfig, snapshot: CameraSnapshot) -> Self {
-        // Initial level-zero tile size. Note, it could change when the scout button is clicked.
-        let prec = config.lock().rug_precision;
-        let starting_scale = config.lock().starting_scale;
-        let starting_tile_pixel_span = config.lock().starting_tile_pixel_span;
-        let tile_size = Float::with_val(
-            prec, starting_scale * starting_tile_pixel_span);
-
-        let orb_rng_seed = config.lock().orbit_rng_seed;
+    pub fn new(config: ScoutEngineConfig, window: Arc<Window>, snapshot: CameraSnapshot) -> Self {
+        let context = 
+            Arc::new(ScoutEngineContext::new(config, window, snapshot));
+        
         let thread_pool = ThreadPool::new().expect("Failed to build ThreadPool for ScoutEngine");
 
         // Create asynch channels for communicating between the render loop/thread and
@@ -175,22 +196,7 @@ impl ScoutEngine {
         let (tile_observations_tx, tile_observations_rx)
             = channel::mpsc::channel::<Vec<TileObservation>>(10);
         let (explore_tx, explore_rx) = channel::mpsc::channel::<ScoutSignal>(10);
-
-        let context = Arc::new(ScoutEngineContext {
-            config,
-            living_orbits: Arc::new(Mutex::new(Vec::new())),
-            tile_registry: Arc::new(RwLock::new(HashMap::new())),
-            orbit_id_factory: Arc::new(Mutex::new(IdFactory::new())),
-            orbit_seed_rng: Arc::new(Mutex::new(ChaCha8Rng::seed_from_u64(orb_rng_seed))),
-            last_camera_snapshot: Arc::new(Mutex::new(snapshot)),
-            context_changed: Arc::new(AtomicBool::new(false)),
-            level_zero: Arc::new(Mutex::new(TileLevel::new(tile_size))),
-            window,
-            diagnostics: Arc::new(Mutex::new(ScoutDiagnostics::new(
-                "Scout Engine initializing...".to_string()))
-            ),
-        });
-
+        
         // Launch ScoutEngine's long-lived task, which 'blocks' on the above async channels
         thread_pool.spawn_ok(
             scout_worker(thread_pool.clone(), context.clone(),
@@ -230,6 +236,12 @@ impl ScoutEngine {
         self.context.diagnostics.clone()
     }
 
+    pub fn set_grid_samples(&self, grid_samples: Vec<GpuGridSample>) {
+        let mut cxt_grid_samples = self.context.grid_samples.lock();
+        //trace!("Scout Engine set grid {} samples: {:?}", grid_samples.len(), grid_samples);
+        *cxt_grid_samples = grid_samples;
+    }
+    
     pub fn set_max_user_iterations(&mut self, max_iters: u32) {
         let mut config_g = self.context.config.lock();
         info!("Set max_user_iters={}", max_iters);
@@ -239,18 +251,15 @@ impl ScoutEngine {
     pub fn query_tiles_for_orbits(&self,
         snapshot: &CameraSnapshot
     ) -> Vec<TileOrbitViewDf> {
-
         // First find the top-level tiles that fall within the camera bounds
-        let level_zero_g = self.context.level_zero.lock();
-        let top_tile_ids = find_tile_ids_under_camera(snapshot, &level_zero_g);
+        let tile_level = self.context.tile_level_for_snapshot(snapshot);
+        let tile_ids = find_tile_ids_under_camera(snapshot, &tile_level);
         let tile_views = find_tiles_in_registry(
-            self.context.tile_registry.clone(), &top_tile_ids);
-
-        let mut collected_tiles: Vec<TileView> = Vec::new();
-        find_anchor_orbits(&tile_views, snapshot, &mut collected_tiles);
-
-        let df_tiles: Vec<TileOrbitViewDf> = collected_tiles
+            self.context.tile_registry.clone(), &tile_ids);
+        
+        let df_tiles: Vec<TileOrbitViewDf> = tile_views
             .iter()
+            .filter(|tile| tile.read().anchor_orbit.is_some())
             .map(|tile| {
                 let tile_g = tile.read();
                 let orb_g = tile_g.anchor_orbit.as_ref().unwrap().read();
@@ -259,10 +268,13 @@ impl ScoutEngine {
                 // co-ordinates, and this ensures greatest accuracy.
                 let delta_from_center =
                     complex_delta(tile_g.geometry.center(), snapshot.center());
+                let delta_from_center_to_anchor =
+                    complex_delta(orb_g.c_ref(), snapshot.center());
                 TileOrbitViewDf {
                     id: tile_g.id.clone(),
                     geometry: tile_g.geometry.clone(),
                     delta_from_center,
+                    delta_from_center_to_anchor: ComplexDf::from_complex(&delta_from_center_to_anchor),
                     orbit: ReferenceOrbitDf {
                         orbit_id: orb_g.orbit_id,
                         c_ref: orb_g.gpu_payload.c_ref,
@@ -275,18 +287,17 @@ impl ScoutEngine {
                         contraction: Df::from_float(orb_g.contraction()),
                         created_at: orb_g.quality_metrics.created_at,
                     }
-                }
-            }).collect();
+                }})
+            .collect();
         
         let mut trace_str = String::from(
-            format!("Query tiles for orbits found {} tiles with anchor orbits...\n", 
-            df_tiles.len()).as_str());
+            format!("Query tiles at level {} for orbits. Found {} tiles with anchor orbits...\n",
+                tile_level.level, df_tiles.len()).as_str());
         for tile in &df_tiles {
-            trace_str.push_str(format!("{:>3?}\torb_id={:>4} delta_from_sc={} \tr_valid={:.6e} contraction={:.2} escape={:?} len={}\n",
+            trace_str.push_str(format!("{:>3?}\torb_id={:>4} delta_from_sc_to_tc={} delta_from_sc_to_a={:?} \tescape={:?} len={}\n",
                tile.id, tile.orbit.orbit_id,
-               tile.delta_from_center.to_string_radix(10, Some(6)),
-               tile.orbit.r_valid.hi,
-               tile.orbit.contraction.hi,
+               tile.delta_from_center.to_string_radix(10, Some(10)),
+                tile.delta_from_center_to_anchor,
                tile.orbit.escape_index,
                 tile.orbit.orbit_re_hi.len()
             ).as_str());

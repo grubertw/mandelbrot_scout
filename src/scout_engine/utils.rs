@@ -1,8 +1,8 @@
 use crate::scout_engine::tile::*;
 
-use crate::signals::CameraSnapshot;
+use crate::signals::{CameraSnapshot, GpuGridSample};
 
-use rug::{Float, Complex, Assign};
+use rug::{Float, Complex};
 
 // I.e. distance as a vector
 pub fn complex_delta(a: &Complex, b: &Complex) -> Complex {
@@ -44,10 +44,6 @@ pub fn find_tile_ids_under_camera(
 
     let (min_x, max_x) = if t_tl.tx <= t_br.tx { (t_tl.tx, t_br.tx) } else { (t_br.tx, t_tl.tx) };
     let (min_y, max_y) = if t_tl.ty <= t_br.ty { (t_tl.ty, t_br.ty) } else { (t_br.ty, t_tl.ty) };
-
-    let mut num_tiles = half_extent.clone();
-    num_tiles *= 2.0;
-    num_tiles /= &level.tile_size;
     
     (min_x..=max_x)
         .flat_map(|tx| (min_y..=max_y)
@@ -93,105 +89,29 @@ fn tile_overlaps_camera(tile: &TileGeometry, cam: &CameraSnapshot) -> bool {
     dx <= sum_hw_x && dy <= sum_hw_y
 }
 
-pub fn find_anchor_orbits(
-    tiles: &[TileView],
-    current_camera: &CameraSnapshot,
-    collected_orbits: &mut Vec<TileView>
-) {
-    for tile in tiles {
-        let tile_g = tile.read();
-        // Only collect anchors if the tile overlaps the camera
-        let tile_in_viewport = tile_overlaps_camera(&tile_g.geometry, current_camera);
+pub fn grid_samples_in_tile(
+    tile: TileView,
+    samples: &[GpuGridSample]
+) -> Vec<GpuGridSample> {
+    let tile_g = tile.read();
+    let tile_c_re = tile_g.geometry.center().real();
+    let tile_c_imag = tile_g.geometry.center().imag();
+    let tile_r = tile_g.geometry.radius();
 
-        if tile_g.anchor_orbit.is_some() && tile_in_viewport {
-            collected_orbits.push(tile.clone());
-        }
+    samples
+        .iter()
+        .filter_map(|sample| {
+            let mut dx = tile_c_re.clone() - sample.best_sample.real();
+            dx = dx.clone().abs();
 
-        find_anchor_orbits(&tile_g.children, current_camera, collected_orbits);
-    }
-}
+            let mut dy = tile_c_imag.clone() - sample.best_sample.imag();
+            dy = dy.clone().abs();
 
-pub fn find_tiles_needing_anchors(
-    tiles: &[TileView], 
-    current_camera: &CameraSnapshot,
-    tiles_to_seed: &mut Vec<TileView>
-) {
-    for tile in tiles {
-        let tile_g = tile.read();
-        // Only spawn anchors for tiles that have a center within viewport
-        let tile_in_viewport = tile_overlaps_camera(&tile_g.geometry, current_camera);
-
-        if tile_g.anchor_orbit.is_none() && tile_g.num_orbits_per_spawn > 0 && tile_in_viewport {
-            tiles_to_seed.push(tile.clone());
-        }
-
-        find_tiles_needing_anchors(&tile_g.children, current_camera, tiles_to_seed);
-    }
-}
-
-pub fn find_smallest_tile_size(
-    tiles: &[TileView],
-    smallest_tile_size: &mut Float,
-) {
-    for tile in tiles {
-        let tile_g = tile.read();
-        if tile_g.level.tile_size.to_f64() < smallest_tile_size.to_f64() {
-            smallest_tile_size.assign(&tile_g.level.tile_size);
-        }
-
-        find_smallest_tile_size(&tile_g.children, smallest_tile_size);
-    }
-}
-
-pub fn find_tile_with_best_coverage(
-    tiles: &[TileView],
-    best_tile: &mut (f64, TileView),
-) {
-    for tile in tiles {
-        let tile_g = tile.read();
-        if tile_g.anchor_orbit.is_none()
-            && let Some(can) = tile_g.candidate_orbits.first() {
-
-             if can.score.coverage > best_tile.0 {
-                 *best_tile = (can.score.coverage, tile.clone());
-             }
-        }
-
-        find_tile_with_best_coverage(&tile_g.children, best_tile);
-    }
-}
-
-pub fn find_tile_with_worst_coverage(
-    tiles: &[TileView],
-    worst_tile: &mut (f64, TileView),
-) {
-    for tile in tiles {
-        let tile_g = tile.read();
-        if tile_g.anchor_orbit.is_none()
-            && let Some(can) = tile_g.candidate_orbits.first() {
-
-            if can.score.coverage < worst_tile.0 {
-                *worst_tile = (can.score.coverage, tile.clone());
+            if dx <= *tile_r && dy <= *tile_r {
+                Some(sample)
             }
-        }
-
-        find_tile_with_worst_coverage(&tile_g.children, worst_tile);
-    }
-}
-
-pub fn count_tiles_that_reached_min_size_for_current_viewport_and_should_split(
-    tiles: &[TileView],
-    current_camera: &CameraSnapshot,
-) -> usize {
-    let mut min_size_count = 0;
-    for tile in tiles {
-        let mut tile_g = tile.write();
-        if tile_g.min_size_reached_for_current_viewport(&current_camera) && tile_g.should_split() {
-            min_size_count += 1;
-        }
-        
-        min_size_count += count_tiles_that_reached_min_size_for_current_viewport_and_should_split(
-            &tile_g.children, current_camera);
-    }
-    min_size_count
+            else {None}
+        })
+        .cloned()
+        .collect()
 }

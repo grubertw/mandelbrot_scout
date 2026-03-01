@@ -1,9 +1,8 @@
 use super::scene::Scene;
 
 use iced_wgpu::Renderer;
-use iced_widget::{text_input, column, row, text, button, horizontal_space};
+use iced_widget::{text_input, column, row, text, button, space};
 use iced_widget::core::{Alignment, Color, Element, Theme, Length};
-use iced_winit::runtime::{Program, Task};
 
 use log::{trace};
 
@@ -11,7 +10,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use iced_wgpu::core::text::Wrapping;
 use rug::{Complex, Float};
-use crate::scene::policy::{COVERAGE_TO_ANCHOR, EXPLORATION_BUDGET, SMALLEST_TILE_PIXEL_SPAN, STARTING_TILE_PIXEL_SPAN};
+use crate::scene::policy::{IDEAL_TILE_SIZE, NUM_SEEDS_TO_SPAWN_PER_TILE_EVAL, REF_ITERS_MULTIPLIER};
 use crate::scout_engine::ScoutSignal;
 
 #[derive(Clone)]
@@ -21,10 +20,9 @@ pub struct Controls {
     center_x: String,
     center_y: String,
     scale: String,
-    starting_tile_span: String,
-    smallest_tile_span: String,
-    coverage_to_anchor: String,
-    explore_budget: String,
+    ideal_tile_size: String,
+    ref_iters_multiplier: String,
+    spawn_per_tile: String,
     debug_msg: String,
     scene: Rc<RefCell<Scene>>
 }
@@ -41,10 +39,9 @@ pub enum Message {
     ApplyCenterScale,
     ResetScoutEngine,
     GoScout,
-    StartingTileSpanChanged(String),
-    SmallestTileSpanChanged(String),
-    CoverageToAnchorChanged(String),
-    ExploreBudgetChanged(String),
+    IdealTileSizeChanged(String),
+    RefItersMultiplierChanged(String),
+    SpawnPerTileChanged(String),
     UpdateDebugText(String),
 }
 
@@ -60,22 +57,17 @@ impl Controls {
             iter_increment: "10".to_string(),
             max_iterations: max_iters,
             center_x, center_y, scale,
-            starting_tile_span: STARTING_TILE_PIXEL_SPAN.to_string(),
-            smallest_tile_span: SMALLEST_TILE_PIXEL_SPAN.to_string(),
-            coverage_to_anchor: COVERAGE_TO_ANCHOR.to_string(),
-            explore_budget: EXPLORATION_BUDGET.to_string(),
+            ideal_tile_size: IDEAL_TILE_SIZE.to_string(),
+            ref_iters_multiplier: REF_ITERS_MULTIPLIER.to_string(),
+            spawn_per_tile: NUM_SEEDS_TO_SPAWN_PER_TILE_EVAL.to_string(),
             debug_msg: "debug info loading...".to_string(),
             scene: s
         }
     }
 }
 
-impl Program for Controls {
-    type Theme = Theme;
-    type Message = Message;
-    type Renderer = Renderer;
-
-    fn update(&mut self, message: Message) -> Task<Message> {
+impl Controls {
+    pub fn update(&mut self, message: Message) {
         trace!("Update {:?}", message);
         match message {
             Message::IterIncrementChanged(iter_inc) => {
@@ -137,38 +129,31 @@ impl Program for Controls {
             Message::GoScout => {
                 let mut scene_b = self.scene.borrow_mut();
                 let mut config = scene_b.scout_config().lock().clone();
-                config.starting_tile_pixel_span = if let Ok(v) =
-                    self.starting_tile_span.parse::<f64>() { v } else { 0.0 };
-                config.smallest_tile_pixel_span = if let Ok(v) =
-                    self.smallest_tile_span.parse::<f64>() { v } else { 0.0 };
-                config.coverage_to_anchor = if let Ok(v) =
-                    self.coverage_to_anchor.parse::<f64>() { v } else { 0.0 };
-                config.exploration_budget = if let Ok(v) =
-                    self.explore_budget.parse::<i32>() { v } else { 0 };
+                config.ideal_tile_size = if let Ok(v) =
+                    self.ideal_tile_size.parse::<f64>() { v } else { 0.0 };
+                config.ref_iters_multiplier = if let Ok(v) =
+                    self.ref_iters_multiplier.parse::<f64>() { v } else { 0.0 };
+                config.num_seeds_to_spawn_per_tile_eval = if let Ok(v) =
+                    self.spawn_per_tile.parse::<u32>() { v } else { 0 };
 
                 scene_b.send_scout_signal(ScoutSignal::ExploreSignal(config));
             }
-            Message::StartingTileSpanChanged(starting_span) => {
-                self.starting_tile_span = starting_span;
+            Message::IdealTileSizeChanged(ideal_tile_size) => {
+                self.ideal_tile_size = ideal_tile_size;
             }
-            Message::SmallestTileSpanChanged(smallest_span) => {
-                self.smallest_tile_span = smallest_span;
+            Message::RefItersMultiplierChanged(ref_iters_multiplier) => {
+                self.ref_iters_multiplier = ref_iters_multiplier;
             }
-            Message::CoverageToAnchorChanged(coverage_to_anchor) => {
-                self.coverage_to_anchor = coverage_to_anchor;
-            }
-            Message::ExploreBudgetChanged(budget) => {
-                self.explore_budget = budget;
+            Message::SpawnPerTileChanged(spawn_per_tile) => {
+                self.spawn_per_tile = spawn_per_tile;
             }
             Message::UpdateDebugText(dbg_msg) => {
                 self.debug_msg = dbg_msg;
             }
         }
-
-        Task::none()
     }
 
-    fn view(&self) -> Element<'_, Message, Theme, Renderer> {
+    pub fn view(&self) -> Element<'_, Message, Theme, Renderer> {
         trace!("View");
 
         let dbg_row = row![
@@ -182,20 +167,21 @@ impl Program for Controls {
             button("<")
             .on_press(Message::SubtractIters)
             .height(Length::Shrink),
-            horizontal_space().width(Length::Fixed(5.0)),
+            space().width(Length::Fixed(5.0)),
             text_input("Placeholder...", &self.iter_increment)
                 .on_input(Message::IterIncrementChanged)
                 .width(Length::Fixed(40.0)),
-             horizontal_space().width(Length::Fixed(5.0)),
+            space().width(Length::Fixed(5.0)),
             button(">")
             .on_press(Message::AddIters)
             .height(Length::Shrink),
-            horizontal_space().width(Length::Fixed(20.0)),
+            space().width(Length::Fixed(20.0)),
             text("max iterations: ")
             .color(Color::WHITE)
             .size(14),
             text(self.max_iterations.to_string())
-            .size(14),
+            .color(Color::WHITE)
+            .size(15),
         ]
         .height(Length::Fixed(30.0));
 
@@ -229,7 +215,7 @@ impl Program for Controls {
                 .on_input(Message::ScaleChanged)
                 .width(Length::Fixed(100.0)),
 
-            horizontal_space().width(Length::Fixed(20.0)),
+            space().width(Length::Fixed(20.0)),
 
             button("Apply")
             .on_press(Message::ApplyCenterScale)
@@ -244,51 +230,40 @@ impl Program for Controls {
             .width(Length::Fixed(110.0))
             .height(Length::Shrink),
 
-            text("tile size px start: ")
+            text("ideal tile size px: ")
             .color(Color::WHITE)
             .width(Length::Fixed(70.0))
             .wrapping(Wrapping::Word)
             .size(12)
             .align_x(Alignment::End),
-            horizontal_space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.starting_tile_span)
-                .on_input(Message::StartingTileSpanChanged)
+            space().width(Length::Fixed(5.0)),
+            text_input("Placeholder...", &self.ideal_tile_size)
+                .on_input(Message::IdealTileSizeChanged)
                 .width(Length::Fixed(60.0)),
 
-            text("smallest tile px: ")
+            text("ref iters multiplier: ")
             .color(Color::WHITE)
             .width(Length::Fixed(65.0))
             .wrapping(Wrapping::Word)
             .size(12)
             .align_x(Alignment::End),
-            horizontal_space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.smallest_tile_span)
-                .on_input(Message::SmallestTileSpanChanged)
+            space().width(Length::Fixed(5.0)),
+            text_input("Placeholder...", &self.ref_iters_multiplier)
+                .on_input(Message::RefItersMultiplierChanged)
                 .width(Length::Fixed(60.0)),
 
-             text("coverage to anchor: ")
+             text("spawn count per tile: ")
             .color(Color::WHITE)
             .width(Length::Fixed(75.0))
             .wrapping(Wrapping::Word)
             .size(12)
             .align_x(Alignment::End),
-            horizontal_space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.coverage_to_anchor)
-                .on_input(Message::CoverageToAnchorChanged)
+            space().width(Length::Fixed(5.0)),
+            text_input("Placeholder...", &self.spawn_per_tile)
+                .on_input(Message::SpawnPerTileChanged)
                 .width(Length::Fixed(40.0)),
 
-            text("explore budget: ")
-            .color(Color::WHITE)
-            .width(Length::Fixed(65.0))
-            .wrapping(Wrapping::Word)
-            .size(12)
-            .align_x(Alignment::End),
-            horizontal_space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.explore_budget)
-                .on_input(Message::ExploreBudgetChanged)
-                .width(Length::Fixed(25.0)),
-
-            horizontal_space().width(Length::Fixed(20.0)),
+            space().width(Length::Fixed(20.0)),
 
             button("Scout!")
             .on_press(Message::GoScout)
