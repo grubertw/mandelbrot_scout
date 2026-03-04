@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use iced_wgpu::core::text::Wrapping;
 use rug::{Complex, Float};
-use crate::scene::policy::{IDEAL_TILE_SIZE, NUM_SEEDS_TO_SPAWN_PER_TILE_EVAL, REF_ITERS_MULTIPLIER};
+use crate::scene::policy::{NUM_QUALIFIED_ORBITS, NUM_SEEDS_TO_SPAWN_PER_EVAL, REF_ITERS_MULTIPLIER};
 use crate::scout_engine::ScoutSignal;
 
 #[derive(Clone)]
@@ -20,9 +20,9 @@ pub struct Controls {
     center_x: String,
     center_y: String,
     scale: String,
-    ideal_tile_size: String,
     ref_iters_multiplier: String,
-    spawn_per_tile: String,
+    spawn_per_eval: String,
+    num_qualified_orbits: String,
     debug_msg: String,
     scene: Rc<RefCell<Scene>>
 }
@@ -39,9 +39,9 @@ pub enum Message {
     ApplyCenterScale,
     ResetScoutEngine,
     GoScout,
-    IdealTileSizeChanged(String),
     RefItersMultiplierChanged(String),
-    SpawnPerTileChanged(String),
+    SpawnPerEvalChanged(String),
+    NumQualifiedOrbits(String),
     UpdateDebugText(String),
 }
 
@@ -57,9 +57,9 @@ impl Controls {
             iter_increment: "10".to_string(),
             max_iterations: max_iters,
             center_x, center_y, scale,
-            ideal_tile_size: IDEAL_TILE_SIZE.to_string(),
             ref_iters_multiplier: REF_ITERS_MULTIPLIER.to_string(),
-            spawn_per_tile: NUM_SEEDS_TO_SPAWN_PER_TILE_EVAL.to_string(),
+            spawn_per_eval: NUM_SEEDS_TO_SPAWN_PER_EVAL.to_string(),
+            num_qualified_orbits: NUM_QUALIFIED_ORBITS.to_string(),
             debug_msg: "debug info loading...".to_string(),
             scene: s
         }
@@ -129,23 +129,23 @@ impl Controls {
             Message::GoScout => {
                 let mut scene_b = self.scene.borrow_mut();
                 let mut config = scene_b.scout_config().lock().clone();
-                config.ideal_tile_size = if let Ok(v) =
-                    self.ideal_tile_size.parse::<f64>() { v } else { 0.0 };
                 config.ref_iters_multiplier = if let Ok(v) =
                     self.ref_iters_multiplier.parse::<f64>() { v } else { 0.0 };
-                config.num_seeds_to_spawn_per_tile_eval = if let Ok(v) =
-                    self.spawn_per_tile.parse::<u32>() { v } else { 0 };
+                config.num_seeds_to_spawn_per_eval = if let Ok(v) =
+                    self.spawn_per_eval.parse::<u32>() { v } else { 0 };
+                config.num_qualified_orbits = if let Ok(v) =
+                    self.num_qualified_orbits.parse::<u32>() { v } else { 0 };
 
                 scene_b.send_scout_signal(ScoutSignal::ExploreSignal(config));
-            }
-            Message::IdealTileSizeChanged(ideal_tile_size) => {
-                self.ideal_tile_size = ideal_tile_size;
             }
             Message::RefItersMultiplierChanged(ref_iters_multiplier) => {
                 self.ref_iters_multiplier = ref_iters_multiplier;
             }
-            Message::SpawnPerTileChanged(spawn_per_tile) => {
-                self.spawn_per_tile = spawn_per_tile;
+            Message::SpawnPerEvalChanged(spawn_per_tile) => {
+                self.spawn_per_eval = spawn_per_tile;
+            }
+            Message::NumQualifiedOrbits(num_qualified_orbits) => {
+                self.num_qualified_orbits = num_qualified_orbits;
             }
             Message::UpdateDebugText(dbg_msg) => {
                 self.debug_msg = dbg_msg;
@@ -197,7 +197,7 @@ impl Controls {
             .align_x(Alignment::End),
             text_input("Placeholder...", &self.center_x)
                 .on_input(Message::CenterXChanged)
-                .width(Length::Fixed(135.0)),
+                .width(Length::Fixed(140.0)),
 
             text("imag: ")
             .color(Color::WHITE)
@@ -205,7 +205,7 @@ impl Controls {
             .align_x(Alignment::End),
             text_input("Placeholder...", &self.center_y)
                 .on_input(Message::CenterYChanged)
-                .width(Length::Fixed(135.0)),
+                .width(Length::Fixed(140.0)),
 
             text("scale: ")
             .color(Color::WHITE)
@@ -213,7 +213,7 @@ impl Controls {
             .align_x(Alignment::End),
             text_input("Placeholder...", &self.scale)
                 .on_input(Message::ScaleChanged)
-                .width(Length::Fixed(100.0)),
+                .width(Length::Fixed(110.0)),
 
             space().width(Length::Fixed(20.0)),
 
@@ -230,17 +230,6 @@ impl Controls {
             .width(Length::Fixed(110.0))
             .height(Length::Shrink),
 
-            text("ideal tile size px: ")
-            .color(Color::WHITE)
-            .width(Length::Fixed(70.0))
-            .wrapping(Wrapping::Word)
-            .size(12)
-            .align_x(Alignment::End),
-            space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.ideal_tile_size)
-                .on_input(Message::IdealTileSizeChanged)
-                .width(Length::Fixed(60.0)),
-
             text("ref iters multiplier: ")
             .color(Color::WHITE)
             .width(Length::Fixed(65.0))
@@ -252,16 +241,27 @@ impl Controls {
                 .on_input(Message::RefItersMultiplierChanged)
                 .width(Length::Fixed(60.0)),
 
-             text("spawn count per tile: ")
+            text("spawn count per eval: ")
             .color(Color::WHITE)
             .width(Length::Fixed(75.0))
             .wrapping(Wrapping::Word)
             .size(12)
             .align_x(Alignment::End),
             space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.spawn_per_tile)
-                .on_input(Message::SpawnPerTileChanged)
+            text_input("Placeholder...", &self.spawn_per_eval)
+                .on_input(Message::SpawnPerEvalChanged)
                 .width(Length::Fixed(40.0)),
+            
+            text("max ref orbs: ")
+            .color(Color::WHITE)
+            .width(Length::Fixed(70.0))
+            .wrapping(Wrapping::Word)
+            .size(12)
+            .align_x(Alignment::End),
+            space().width(Length::Fixed(5.0)),
+            text_input("Placeholder...", &self.num_qualified_orbits)
+                .on_input(Message::NumQualifiedOrbits)
+                .width(Length::Fixed(30.0)),
 
             space().width(Length::Fixed(20.0)),
 

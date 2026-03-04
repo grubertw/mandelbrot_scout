@@ -4,11 +4,9 @@ pub const MAX_LIVE_ORBITS: u32 = 1000;
 pub const MAX_REF_ORBIT: u32 = 8192;
 pub const AUTO_START: bool = false;
 pub const STARTING_SCALE: f64 = 1e-6;
-pub const MAX_TILE_LEVELS: u32 = 64;
-pub const IDEAL_TILE_SIZE: f64 = 256.0;
 pub const REF_ITERS_MULTIPLIER: f64 = 1.25;
-pub const NUM_SEEDS_TO_SPAWN_PER_TILE_EVAL: u32 = 2;
-pub const CONTRACTION_THRESHOLD: f64 = 1.0;
+pub const NUM_SEEDS_TO_SPAWN_PER_EVAL: u32 = 2;
+pub const NUM_QUALIFIED_ORBITS: u32 = 2;
 pub const EXPLORATION_BUDGET: i32 = 2;
 
 // Initial Scene config/start location

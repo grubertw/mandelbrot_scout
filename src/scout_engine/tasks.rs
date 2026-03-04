@@ -1,6 +1,5 @@
 use crate::scout_engine::{ScoutConfig};
 use crate::scout_engine::orbit::*;
-use crate::scout_engine::tile::*;
 
 use crate::numerics::ComplexDf;
 use crate::signals::{FrameStamp};
@@ -9,17 +8,6 @@ use std::sync::Arc;
 use log::{debug};
 use rug::{Complex};
 use parking_lot::RwLock;
-
-pub fn create_tile_levels(
-    rug_precision: u32, max_tile_levels: u32,
-) -> Vec<TileLevel> {
-    let mut levels: Vec<TileLevel> = Vec::with_capacity(max_tile_levels as usize);
-
-    for i in 0..max_tile_levels {
-        levels.push(TileLevel::new(i, rug_precision));
-    }
-    levels
-}
 
 pub async fn start_reference_orbit(
     c_ref: Complex, 
@@ -88,28 +76,4 @@ pub async fn continue_reference_orbit(orbit: LiveOrbit, config: ScoutConfig) {
         orbit_g.gpu_payload.im_hi.push(cdf.im.hi);
         orbit_g.gpu_payload.im_lo.push(cdf.im.lo);
     }
-}
-
-pub fn fill_registry_with_missing_tiles(
-    tile_ids: &[TileId],
-    tile_registry: TileRegistry,
-    level: &TileLevel,
-) -> (Vec<TileView>, u32) {
-    let mut tile_reg_g = tile_registry.write();
-    debug!("Fill registry with missing tiles!");
-
-    let mut creation_count = 0;
-    let tiles: Vec<TileView> = tile_ids
-        .iter()
-        .map(|tile_id| {
-            if tile_reg_g.contains_key(&tile_id) == false {
-               creation_count += 1; 
-            }
-            tile_reg_g.entry(tile_id.clone())
-                .or_insert(Arc::new(RwLock::new(TileOrbitView::new(
-                    tile_id, level,
-                )))).clone()
-        })
-        .collect();
-    (tiles, creation_count)
 }

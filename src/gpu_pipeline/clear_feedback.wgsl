@@ -12,7 +12,7 @@ struct GridFeedback {
 @group(0) @binding(1)
 var<storage, read_write> grid_feedback : array<GridFeedback>;
 
-struct TileFeedback {
+struct OrbitFeedback {
     min_iter_count:         atomic<u32>,
     max_iter_count:         atomic<u32>,
     escaped_count:          atomic<u32>,
@@ -20,7 +20,7 @@ struct TileFeedback {
     max_iter_reached_count: atomic<u32>,
 };
 @group(0) @binding(2)
-var<storage, read_write> tile_feedback : array<TileFeedback>;
+var<storage, read_write> tile_feedback : array<OrbitFeedback>;
 
 const MAX_U32 : u32 = 0xFFFFFFFFu;
 

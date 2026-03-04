@@ -221,7 +221,7 @@ impl ApplicationHandler for Runner {
                             let mut s = scene.borrow_mut();
 
                             // Ask ScoutEngine for it's current tile orbits and push to the GPU
-                            s.query_tile_orbits(queue);
+                            s.query_qualified_orbits(queue);
 
                             let scout_diags = s.read_scout_diagnostics();
                             let mut scout_diags_g = scout_diags.lock();
@@ -236,7 +236,7 @@ impl ApplicationHandler for Runner {
                             s.stamp_frame();
                             s.read_debug(&device, &queue);
                             s.read_grid_feedback(&device, &queue);
-                            s.read_tile_feedback(&device, &queue);
+                            s.read_orbit_feedback(&device, &queue);
                         }
 
                         // Draw Iced on top

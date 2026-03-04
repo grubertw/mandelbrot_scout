@@ -1,12 +1,12 @@
 use crate::numerics::ComplexDf;
-use crate::signals::{FrameStamp};
+use crate::signals::{CameraSnapshot, FrameStamp};
 
 use std::sync::{Arc, Weak};
 
 use log::warn;
 use rug::{Float, Complex};
 use parking_lot::{Mutex, RwLock};
-use crate::scout_engine::tile::TileGeometry;
+use crate::scout_engine::ScoutConfig;
 use crate::scout_engine::utils::complex_distance;
 
 /// All ReferenceOrbit object are Arc+Mutex wrapped, to support
@@ -344,24 +344,29 @@ pub struct OrbitScore {
 }
 
 impl OrbitScore {
-    pub fn new(orbit: LiveOrbit, tile: &TileGeometry) -> Self {
+    pub fn new(orbit: LiveOrbit, cam: &CameraSnapshot, cfg: ScoutConfig) -> Self {
         let orb_g = orbit.read();
-        let tile_center = tile.center();
-        let tile_radius = tile.radius();
+        let cam_center = cam.center();
+        let cam_half_extent = cam.half_extent();
+        let curr_max_ref_iters = {
+            let cfg_g = cfg.lock();
+            cfg_g.max_user_iters as f64 * cfg_g.ref_iters_multiplier
+        };
 
-        let sample_dist_from_tile_center = complex_distance(orb_g.c_ref(), tile_center);
+        let mut sample_dist_from_cam_center = complex_distance(orb_g.c_ref(), cam_center);
+        sample_dist_from_cam_center = sample_dist_from_cam_center.abs();
 
         let depth = if orb_g.escape_index().is_none() {1.0} else {
-            orb_g.escape_index().unwrap() as f64 / orb_g.max_ref_orbit_iters as f64
+            orb_g.escape_index().unwrap() as f64 / curr_max_ref_iters
         };
-        let contraction = (-orb_g.contraction().to_f64()).clamp(0.0, 2.0);
-        let dist = 1.0 - (sample_dist_from_tile_center.to_f64() / tile_radius.to_f64())
-            .clamp(0.0, 1.0);
+        let contraction = (-(orb_g.contraction().to_f64() * 20.0)).clamp(-2.0, 2.0);
+        let dist = 1.0 - (sample_dist_from_cam_center.to_f64() / cam_half_extent.to_f64())
+            .log(10.0).clamp(0.0, 1000.0);
 
         let total_score =
             depth * 2.0 +
-                contraction * 200.0 +
-                dist * 0.1;
+                dist * 1.5 +
+                contraction * 1.0;
 
         Self {
             depth, dist, contraction, total_score, orbit: orbit.clone()

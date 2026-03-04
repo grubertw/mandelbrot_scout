@@ -121,19 +121,21 @@ struct Uniforms {
     center_y_lo:        f32,
     scale_hi:           f32,
     scale_lo:           f32,
-    screen_width:       f32,
-    screen_height:      f32,
     max_iter:           u32,
-    tile_count:         u32,
+    ref_orb_count:      u32,
+    screen_width:       u32,
+    screen_height:      u32,
+    grid_size:          u32,
+    grid_width:         u32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
-fn build_c_from_scene(pix: vec2<f32>) -> ComplexDf {
-    let half_w = uni.screen_width * 0.5;
-    let half_h = uni.screen_height * 0.5;
+fn build_c_from_scene(pix: vec2<i32>) -> ComplexDf {
+    let half_w = f32(uni.screen_width) * 0.5;
+    let half_h = f32(uni.screen_height) * 0.5;
 
-    let dx_i = i32(pix.x) - i32(half_w);
-    let dy_i = i32(half_h) - i32(pix.y); // y-axis increases downward, so must flip!
+    let dx_i = pix.x - i32(half_w);
+    let dy_i = i32(half_h) - pix.y; // y-axis increases downward, so must flip!
 
     let dx_df = df_from_i32(dx_i);
     let dy_df = df_from_i32(dy_i);
@@ -189,73 +191,55 @@ fn mandelbrot(c: ComplexDf) -> u32 {
 }
 
 // ----------------------------
-// Anchor Orbit Tiles from ScoutEngine
+// Qualified Orbits from ScoutEngine
 // ----------------------------
-// The Reference (anchor) Orbit data
+// The Reference Orbit data
 // Iteration count is on the x-azis (i.e. the RefOrb's Vec<Complex>'s index)
-// OrbitId/TileId is in the y-axis
+// OrbitId is in the y-axis
 // Note that each orbit takes 4x y-indicies (i.e. complex re(hi+lo) + im(hi+lo))
 @group(1) @binding(0)
 var ref_orbit_tex : texture_2d<f32>;
 
-struct GpuTileGeometry {
-    anchor_c_ref_re_hi:             f32,
-    anchor_c_ref_re_lo:             f32,
-    anchor_c_ref_im_hi:             f32,
-    anchor_c_ref_im_lo:             f32,
-    center_offset_re_hi:            f32,
-    center_offset_re_lo:            f32,
-    center_offset_im_hi:            f32,
-    center_offset_im_lo:            f32,
-    tile_screen_min_x:              f32,
-    tile_screen_min_y:              f32,
-    tile_screen_max_x:              f32,
-    tile_screen_max_y:              f32,
+struct GpuRefOrbitLocation {
+    c_ref_re_hi:            f32,
+    c_ref_re_lo:            f32,
+    c_ref_im_hi:            f32,
+    c_ref_im_lo:            f32,
+    center_offset_re_hi:    f32,
+    center_offset_re_lo:    f32,
+    center_offset_im_hi:    f32,
+    center_offset_im_lo:    f32,
 };
 
-// The 'geommetry' of each OrbitId/TileId. 
-// Constructing Delta-C from c_ref (the orbit seed), and in a way that avoids loss
-// of precision is the name of the game. tile_delta_from_anchor is computed in
-// high-presision FIRST, and preserved the entire time the orbit remains anchor 
-// for the tile. The CPU ALSO pre-computes the distance from scene-center to 
-// tile-center in high-precision, and only at the very end is rounded back down 
-// into tile-pixel mapping.
+// Location information for each Reference Orbit
+// For perturbation to succed without precision loss, both the reference orbit's
+// location, AND it's delta from screen/viewport center must be sent to the GPU.
+// Note that screen center is always tracked by the Scene using high (Rug) precision,
+// And it is this value that serves as a basis for intial pixel deltas (taken
+// through Df rounding pushed to the uniform). Although seeds are spawned from the
+// rounded Df values, precision is 'regained' after the scout calculates a high-
+// precision reference orbit (and qualifies it). The Scene then calculates a delta
+// from it's (Rug) center, and pushes this as 'center_offset', PER FRAME.
+// Now, delta_c can be computed 'safely', without the catastrophic cancelation that
+// happens if the GPU were to attempt calculating the delta between ref orbit and
+// screen center on it's own.
 @group(1) @binding(1)
-var<storage, read> tile_geometry : array<GpuTileGeometry>;
+var<storage, read> orbit_location : array<GpuRefOrbitLocation>;
 
 // Pertubation feedback into the reduce (compute) shader
 @group(1) @binding(2)
-var flags_tex: texture_storage_2d<r32uint, write>; 
-
-// Test if pixel is in a Tile
-fn pixel_in_tile(pix: vec2<f32>, tile: GpuTileGeometry) -> bool {
-    return pix.x >= tile.tile_screen_min_x &&
-           pix.x <= tile.tile_screen_max_x &&
-           pix.y >= tile.tile_screen_min_y &&
-           pix.y <= tile.tile_screen_max_y;
-}
-
-// Find the index of the tile, based on pixel (fragment) cordinates
-fn find_tile_index(pix: vec2<f32>) -> i32 {
-    for (var i: u32 = 0u; i < uni.tile_count; i = i + 1u) {
-        let tile = tile_geometry[i];
-        if (pixel_in_tile(pix, tile)) {
-            return i32(i);
-        }
-    }
-    return -1;
-}
+var flags_tex: texture_storage_2d<r32uint, write>;
 
 // delta_c - along with Zref-n0 - are needed to start pertubation.
-fn build_delta_c_from_tile_geometry(pix: vec2<f32>, tile_idx: u32) -> ComplexDf {
-    let half_w = uni.screen_width * 0.5;
-    let half_h = uni.screen_height * 0.5;
+fn build_delta_c_from_orbit_location(pix: vec2<i32>, orbit_idx: u32) -> ComplexDf {
+    let half_w = f32(uni.screen_width) * 0.5;
+    let half_h = f32(uni.screen_height) * 0.5;
     let scale = Df(uni.scale_hi, uni.scale_lo);
 
-    let tile = tile_geometry[tile_idx];
+    let orbit = orbit_location[orbit_idx];
 
-    let dx_i = i32(pix.x) - i32(half_w);
-    let dy_i = i32(half_h) - i32(pix.y);
+    let dx_i = pix.x - i32(half_w);
+    let dy_i = i32(half_h) - pix.y;
 
     let dx_df = df_from_i32(dx_i);
     let dy_df = df_from_i32(dy_i);
@@ -263,21 +247,21 @@ fn build_delta_c_from_tile_geometry(pix: vec2<f32>, tile_idx: u32) -> ComplexDf 
     let off_x = df_mul(dx_df, scale);
     let off_y = df_mul(dy_df, scale);
 
-    let delta_from_center_to_anchor = ComplexDf(
-        Df(tile.center_offset_re_hi, tile.center_offset_re_lo),
-        Df(tile.center_offset_im_hi, tile.center_offset_im_lo)
+    let delta_from_center_to_ref_orb = ComplexDf(
+        Df(orbit.center_offset_re_hi, orbit.center_offset_re_lo),
+        Df(orbit.center_offset_im_hi, orbit.center_offset_im_lo)
     );
 
     let delta_c = ComplexDf(
-        df_add(delta_from_center_to_anchor.r, off_x),
-        df_add(delta_from_center_to_anchor.i, off_y)
+        df_add(delta_from_center_to_ref_orb.r, off_x),
+        df_add(delta_from_center_to_ref_orb.i, off_y)
     );
 
     return delta_c;
 }
 
-fn load_ref_orbit(tile_idx: u32, it: u32) -> ComplexDf {
-    let base_y = tile_idx * 4u;
+fn load_ref_orbit(orbit_idx: u32, it: u32) -> ComplexDf {
+    let base_y = orbit_idx * 4u;
 
     let z_re_hi = textureLoad(ref_orbit_tex, vec2<i32>(i32(it), i32(base_y + 0u)), 0).x;
     let z_re_lo = textureLoad(ref_orbit_tex, vec2<i32>(i32(it), i32(base_y + 1u)), 0).x;
@@ -292,9 +276,9 @@ const ESCAPED_BIT: u32      = 1u << 16u;
 const PERTURB_BIT: u32      = 1u << 17u;
 const PERTURB_ERR_BIT: u32  = 1u << 18u;
 const MAX_ITER_BIT: u32     = 1u << 19u;
-const TILE_SHIFT: u32       = 20u;
+const ORBIT_SHIFT: u32      = 20u;
 
-fn record_pix_feedback(pix: vec2<f32>, tile_idx: i32, it: u32, flags_in: u32) {
+fn record_pix_feedback(pix: vec2<i32>, orbit_idx: u32, it: u32, flags_in: u32) {
     var flags = flags_in | (it & ITER_MASK);
     if (it < uni.max_iter) {
         flags = flags | ESCAPED_BIT;
@@ -302,12 +286,12 @@ fn record_pix_feedback(pix: vec2<f32>, tile_idx: i32, it: u32, flags_in: u32) {
     else {
         flags = flags | MAX_ITER_BIT;
     }
-    if (tile_idx >= 0) {
+    if (uni.ref_orb_count > 0) {
         flags = flags | PERTURB_BIT;
-        flags = flags | (u32(tile_idx) << TILE_SHIFT);
+        flags = flags | (orbit_idx << ORBIT_SHIFT);
     }
 
-    textureStore(flags_tex, vec2<i32>(i32(pix.x), i32(pix.y)), vec4<u32>(flags, 0u, 0u, 0u));
+    textureStore(flags_tex, pix, vec4<u32>(flags, 0u, 0u, 0u));
 }
 
 const BETA = 0.1; // Used for dynamic tracking of perturbation error
@@ -316,11 +300,11 @@ const BETA = 0.1; // Used for dynamic tracking of perturbation error
 // Mandelbrot Perturbance 
 // Inputs:
 // 1) orbit/tile index (into reference orbit texture)
-// 2) delta_c (from pixel to uni.center to tile.anchor_ref_c)
+// 2) delta_c (from ref_c to pixel)
 // Outputs:
 // 1) Iteration count
 // -------------------------------
-fn mandelbrot_perturb(tile_idx: u32, delta_c: ComplexDf) -> vec2<u32> {
+fn mandelbrot_perturb(orbit_idx: u32, delta_c: ComplexDf) -> vec2<u32> {
     var dz = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));
     var i: u32 = 0u;
     var flags: u32 = 0u;
@@ -328,7 +312,7 @@ fn mandelbrot_perturb(tile_idx: u32, delta_c: ComplexDf) -> vec2<u32> {
 
     for (i = 0u; i < max_i; i = i + 1u) {
         // Load reference orbit Z_n
-        let Z = load_ref_orbit(tile_idx, i);
+        let Z = load_ref_orbit(orbit_idx, i);
 
         // Track error dynamicly by comparing |dz_n| to |Z|
         let mag2_dz = cdf_mag2(dz);
@@ -379,20 +363,22 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
 // -------------------------------
 @fragment
 fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
-    let pix = vec2<f32>(coords.x, coords.y);
+    let pix = vec2<i32>(i32(coords.x), i32(coords.y));
     var it: u32 = 0u;
     var flags: u32 = 0u;
+    let orbit_idx: u32 = 0;
     var c = build_c_from_scene(pix);
-    var r_valid_crossed = false;
 
-    // Check if the pixel/frag co-ordinates fall within a tile.
-    // If they do, use perurbation. If not, use absoluate mandelbrot
-    // calculation.
-    let tile_idx = find_tile_index(pix);
-    if (tile_idx >= 0) {
-        let delta_c = build_delta_c_from_tile_geometry(pix, u32(tile_idx));
+    // Check if there is a (qualified) reference orbit available and,
+    // use the perturbance path, if found.
+    if (uni.ref_orb_count > 0) {
+        // Attempt perturbance with the 1st qualified orbit
+        let delta_c = build_delta_c_from_orbit_location(pix, orbit_idx);
+        let p_res = mandelbrot_perturb(orbit_idx, delta_c);
 
-        let p_res = mandelbrot_perturb(u32(tile_idx), delta_c);
+        // if error was detected, try to perturb with the next qualified ref orbit.
+        //orbit_idx += 1;
+        //if (((p_res.y & PERTURB_ERR_BIT) != 0u) && uni.ref_orb_count > orbit_idx) {}
         it = p_res.x;
         flags = p_res.y;
         c = delta_c;
@@ -409,18 +395,13 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
         // If in the set, color black
         color = vec3(0.0, 0.0, 0.0);
     }
-    // TileId/idx diagnostic (blue)
-    if (tile_idx >= 0 && uni.tile_count > 0u) {
-        let tile_c = f32(tile_idx) / f32(uni.tile_count);
-        color = mix(color, vec3(0.0, 0.0, tile_c), 0.3);
-    }
 
     // Record per-pixel flags for the reduce/compute shader
-    record_pix_feedback(pix, tile_idx, it, flags);
+    record_pix_feedback(pix, orbit_idx, it, flags);
 
     // -- DEBUG --
-    if (   i32(pix.x) == i32(uni.screen_width * 0.5) 
-        && i32(pix.y) == i32(uni.screen_height * 0.5) ) {
+    if (   pix.x == i32(f32(uni.screen_width) * 0.5)
+        && pix.y == i32(f32(uni.screen_height) * 0.5) ) {
         debug_out.center_x_hi = c.r.hi;
         debug_out.center_x_lo = c.r.lo;
         debug_out.center_y_hi = c.i.hi;
@@ -429,8 +410,8 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
         debug_out.scale_lo = uni.scale_lo;
         debug_out.screen_width = uni.screen_width;
         debug_out.screen_height = uni.screen_height;
-        debug_out.tile_count = uni.tile_count;
-        debug_out.tile_idx = tile_idx;
+        debug_out.ref_orb_count = uni.ref_orb_count;
+        debug_out.orbit_idx = orbit_idx;
     }
 
     return vec4<f32>(color, 1.0);
@@ -443,10 +424,10 @@ struct DebugOut {
     center_y_lo:        f32,
     scale_hi:           f32,
     scale_lo:           f32,
-    screen_width:       f32,
-    screen_height:      f32,
-    tile_count:         u32,
-    tile_idx:           i32,
+    screen_width:       u32,
+    screen_height:      u32,
+    ref_orb_count:      u32,
+    orbit_idx:          u32,
 };
 
 @group(2) @binding(0)

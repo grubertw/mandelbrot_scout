@@ -2,12 +2,10 @@ pub mod orbit;
 pub mod tile;
 mod worker;
 mod tasks;
-mod utils;
+pub(crate) mod utils;
 
 use crate::scout_engine::orbit::*;
-use crate::scout_engine::tile::*;
 use crate::scout_engine::worker::*;
-use crate::scout_engine::utils::*;
 
 use crate::signals::*;
 
@@ -16,20 +14,18 @@ use iced_winit::winit::window::Window;
 use futures::{channel};
 use futures::executor::ThreadPool;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex};
 use log::{trace, info};
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::numerics::{ComplexDf, Df};
-use crate::scout_engine::tasks::create_tile_levels;
+use crate::numerics::{Df};
 
-pub type ScoutConfig                = Arc<Mutex<ScoutEngineConfig>>;
+pub type ScoutConfig            = Arc<Mutex<ScoutEngineConfig>>;
 type CameraSnapshotSender       = channel::mpsc::Sender<CameraSnapshot>;
 type CameraSnapshotReceiver     = channel::mpsc::Receiver<CameraSnapshot>;
-type TileObservationsSender     = channel::mpsc::Sender<Vec<TileObservation>>;
-type TileObservationsReceiver   = channel::mpsc::Receiver<Vec<TileObservation>>;
+type OrbitObservationsSender    = channel::mpsc::Sender<Vec<OrbitObservation>>;
+type OrbitObservationsReceiver  = channel::mpsc::Receiver<Vec<OrbitObservation>>;
 type ExploreSignalSender        = channel::mpsc::Sender<ScoutSignal>;
 type ExploreSignalReceiver      = channel::mpsc::Receiver<ScoutSignal>;
 type ScoutContext               = Arc<ScoutEngineContext>;
@@ -61,28 +57,21 @@ pub struct ScoutEngineConfig {
     /// Starting scale for tile creation, orbit spawning, and everything scout-engine
     /// does! 
     pub starting_scale: f64,
-    /// Maximum number of tile levels. While it makes sense to increase this at runtime,
-    /// there is no reason to decrease it.
-    pub max_tile_levels: u32,
-    /// Ideal size of a tile in the level hierarchy
-    /// Scout will use current camera scale and this value to extrapolate which
-    /// tile level to use
-    pub ideal_tile_size: f64,
-    /// Number of extra iterations Scout will perform on the ref orbit
-    /// Ref orbits should always at least have max_user_iters,
-    /// unless they escape early, and in which case they are not worth extending as far
+    /// Multiply max_user_iters by this value for computing the length of a reference orbit
     pub ref_iters_multiplier: f64,
     /// Number of Reference Orbits ScoutEngine will create from sampled seed candidates
     /// Note, the seed candidate list is taken from a snapshot of GpuGridSample(s), which
     /// are reduced within a compute shader running on the GPU.
-    pub num_seeds_to_spawn_per_tile_eval: u32,
-    /// Orbit ranking/selection criteria
-    pub contraction_threshold: f64,
+    pub num_seeds_to_spawn_per_eval: u32,
+    /// Number of reference orbits to qualify (or keep qualified), per cycle.
+    /// With orbits of sufficient quality, the GPU should not have need to rebase
+    /// any more than 2 or three times.
+    pub num_qualified_orbits: u32,
     pub rug_precision: u32,
     /// Numer of 'convergence' cycles that scout engine is allowed to
-    /// repeat after a camera pan/zoom. Each cycle may result in new
-    /// orbits being spawned for tiles, depending on if the tile
-    /// is found with a deficient orbit score. 
+    /// repeat after a camera pan/zoom. Most of the time, only one should be needed,
+    /// but if perturbance is behaving poorly, more cycles may be needed to find a better
+    /// orbit (or set of orbits).
     pub exploration_budget: i32,
 }
 
@@ -90,12 +79,8 @@ pub struct ScoutEngineConfig {
 pub struct ScoutEngineContext {
     /// Our startup configuration
     pub config: ScoutConfig,
-    /// Deterministic descending power-of-two tile hierarchy 
-    pub tile_levels: Vec<TileLevel>,
     /// Our working pool of reference orbits
     pub living_orbits: LivingOrbits,
-    /// Where our live complex tiles are stored
-    pub tile_registry: TileRegistry,
     /// Creates unique orbit_id's
     pub orbit_id_factory: OrbitIdFactory,
     /// the most recent camera snapshot, essential for knowning when the user 
@@ -119,17 +104,9 @@ impl ScoutEngineContext {
         window: Arc<Window>, 
         snapshot: CameraSnapshot
     ) -> Self {
-        info!("Creating ScoutEngineContext with {} TileLevels and level zero tile_size={}",
-            config.max_tile_levels, config.max_tile_levels);
-        
-        let tile_levels = create_tile_levels(
-            config.rug_precision, config.max_tile_levels);
-        
         Self {
             config: Arc::new(Mutex::new(config)),
-            tile_levels,
             living_orbits: Arc::new(Mutex::new(Vec::new())),
-            tile_registry: Arc::new(RwLock::new(HashMap::new())),
             orbit_id_factory: Arc::new(Mutex::new(IdFactory::new())),
             last_camera_snapshot: Arc::new(Mutex::new(snapshot)),
             grid_samples: Arc::new(Mutex::new(Vec::new())),
@@ -139,18 +116,6 @@ impl ScoutEngineContext {
                 "Scout Engine initializing...".to_string()))
             ),
         }
-    }
-    
-    pub fn tile_level_for_snapshot(&self, snapshot: &CameraSnapshot) -> TileLevel{
-        let ideal_tile_size_px = self.config.lock().ideal_tile_size;
-        let mut ideal_tile_size = snapshot.scale().clone();
-        ideal_tile_size *= ideal_tile_size_px;
-        
-        self.tile_levels
-            .iter()
-            .rfind(|lvl| lvl.tile_size > ideal_tile_size)
-            .cloned()
-            .unwrap()
     }
     
     pub fn context_changed(&self) {
@@ -178,7 +143,7 @@ pub struct ScoutEngine {
     context: ScoutContext,
     // Async channels
     cameara_snapshot_tx: CameraSnapshotSender,
-    tile_observations_tx: TileObservationsSender,
+    tile_observations_tx: OrbitObservationsSender,
     explore_tx: ExploreSignalSender,
 }
 
@@ -194,7 +159,7 @@ impl ScoutEngine {
         let (cameara_snapshot_tx, cameara_snapshot_rx)
             = channel::mpsc::channel::<CameraSnapshot>(10);
         let (tile_observations_tx, tile_observations_rx)
-            = channel::mpsc::channel::<Vec<TileObservation>>(10);
+            = channel::mpsc::channel::<Vec<OrbitObservation>>(10);
         let (explore_tx, explore_rx) = channel::mpsc::channel::<ScoutSignal>(10);
         
         // Launch ScoutEngine's long-lived task, which 'blocks' on the above async channels
@@ -218,12 +183,10 @@ impl ScoutEngine {
     }
 
     pub fn submit_camera_snapshot(&mut self, snapshot: CameraSnapshot) {
-        info!("Camera Snapshot received: {:?}", snapshot);
         self.cameara_snapshot_tx.try_send(snapshot).ok();
     }
 
-    pub fn submit_tile_observations(&mut self, feedback: Vec<TileObservation>) {
-        info!("Tile Feedback received");
+    pub fn submit_orbit_observations(&mut self, feedback: Vec<OrbitObservation>) {
         self.tile_observations_tx.try_send(feedback).ok();
     }
     
@@ -248,62 +211,47 @@ impl ScoutEngine {
         config_g.max_user_iters = max_iters;
     }
 
-    pub fn query_tiles_for_orbits(&self,
-        snapshot: &CameraSnapshot
-    ) -> Vec<TileOrbitViewDf> {
-        // First find the top-level tiles that fall within the camera bounds
-        let tile_level = self.context.tile_level_for_snapshot(snapshot);
-        let tile_ids = find_tile_ids_under_camera(snapshot, &tile_level);
-        let tile_views = find_tiles_in_registry(
-            self.context.tile_registry.clone(), &tile_ids);
-        
-        let df_tiles: Vec<TileOrbitViewDf> = tile_views
+    pub fn query_qualified_orbits(&self) -> Vec<QualifiedOrbit> {
+        let num_orbits_to_qualify = self.config().lock().num_qualified_orbits as usize;
+        let pool_g = self.context.living_orbits.lock();
+
+        let df_orbits: Vec<QualifiedOrbit> = pool_g
             .iter()
-            .filter(|tile| tile.read().anchor_orbit.is_some())
-            .map(|tile| {
-                let tile_g = tile.read();
-                let orb_g = tile_g.anchor_orbit.as_ref().unwrap().read();
-                // Delta from viewport center to tile center must be computed per query
-                // This is kept is a rug Complex because it is directly translated to pixel
-                // co-ordinates, and this ensures greatest accuracy.
-                let delta_from_center =
-                    complex_delta(tile_g.geometry.center(), snapshot.center());
-                let delta_from_center_to_anchor =
-                    complex_delta(orb_g.c_ref(), snapshot.center());
-                TileOrbitViewDf {
-                    id: tile_g.id.clone(),
-                    geometry: tile_g.geometry.clone(),
-                    delta_from_center,
-                    delta_from_center_to_anchor: ComplexDf::from_complex(&delta_from_center_to_anchor),
-                    orbit: ReferenceOrbitDf {
-                        orbit_id: orb_g.orbit_id,
-                        c_ref: orb_g.gpu_payload.c_ref,
-                        orbit_re_hi: orb_g.gpu_payload.re_hi.clone(),
-                        orbit_re_lo: orb_g.gpu_payload.re_lo.clone(),
-                        orbit_im_hi: orb_g.gpu_payload.im_hi.clone(),
-                        orbit_im_lo: orb_g.gpu_payload.im_lo.clone(),
-                        escape_index: orb_g.quality_metrics.escape_index,
-                        r_valid: Df::from_float(orb_g.r_valid()),
-                        contraction: Df::from_float(orb_g.contraction()),
-                        created_at: orb_g.quality_metrics.created_at,
+            .take(num_orbits_to_qualify)
+            .enumerate()
+            .map(|(i, orb)| {
+                let orb_g = orb.read();
+
+                QualifiedOrbit {
+                    rank: i as u32,
+                    orbit_id: orb_g.orbit_id,
+                    c_ref: orb_g.c_ref().clone(),
+                    c_ref_df: orb_g.gpu_payload.c_ref,
+                    orbit_re_hi: orb_g.gpu_payload.re_hi.clone(),
+                    orbit_re_lo: orb_g.gpu_payload.re_lo.clone(),
+                    orbit_im_hi: orb_g.gpu_payload.im_hi.clone(),
+                    orbit_im_lo: orb_g.gpu_payload.im_lo.clone(),
+                    escape_index: orb_g.quality_metrics.escape_index,
+                    r_valid: Df::from_float(orb_g.r_valid()),
+                    contraction: Df::from_float(orb_g.contraction()),
+                    created_at: orb_g.quality_metrics.created_at,
                     }
-                }})
+                })
             .collect();
         
         let mut trace_str = String::from(
-            format!("Query tiles at level {} for orbits. Found {} tiles with anchor orbits...\n",
-                tile_level.level, df_tiles.len()).as_str());
-        for tile in &df_tiles {
-            trace_str.push_str(format!("{:>3?}\torb_id={:>4} delta_from_sc_to_tc={} delta_from_sc_to_a={:?} \tescape={:?} len={}\n",
-               tile.id, tile.orbit.orbit_id,
-               tile.delta_from_center.to_string_radix(10, Some(10)),
-                tile.delta_from_center_to_anchor,
-               tile.orbit.escape_index,
-                tile.orbit.orbit_re_hi.len()
+            format!("Query Living Orbit Pool for qualified orbits. Found {} total orbits, but only qualifying {}\n",
+                pool_g.len(), num_orbits_to_qualify ).as_str());
+        for q_orb in &df_orbits {
+            trace_str.push_str(format!("Rank #{:<2}\torb_id={:<4}\tescape={:?} len={} contraction={:.4e}\n",
+               q_orb.rank, q_orb.orbit_id,
+                q_orb.escape_index,
+                q_orb.orbit_re_hi.len(),
+                q_orb.contraction.hi
             ).as_str());
         }
         trace!("{}", trace_str);
 
-        df_tiles
+        df_orbits
     }
 }

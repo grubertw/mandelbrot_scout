@@ -1,15 +1,13 @@
 use crate::scout_engine::orbit::*;
-use crate::scout_engine::utils::*;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
 
 use rug::{Float, Complex};
-use crate::signals::{GpuGridSample};
 
-pub type TileView = Arc<RwLock<TileOrbitView>>;
-pub type TileRegistry = Arc<RwLock<HashMap<TileId, TileView>>>;
+type TileView = Arc<RwLock<TileOrbitView>>;
+type TileRegistry = Arc<RwLock<HashMap<TileId, TileView>>>;
 
 // Keep it super simple!
 const BASE_TILE_SIZE: f64 = 1.0;
@@ -137,47 +135,6 @@ impl TileOrbitView {
             geometry: TileGeometry::from_id(
                 tile_id, &level.tile_size),
             anchor_orbit: None,
-        }
-    }
-}
-
-// Intermediate structure for tracking grid-sample scores with complex seeds,
-// which are sorted using the SampleScore struct, which performs weighting/scoring
-// based on the sample's depth and proximity to tile-center.
-pub struct TileSampleScores {
-    pub tile: TileView,
-    pub scores: Vec<SampleScore>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SampleScore {
-    pub depth: f64,
-    pub dist: f64,
-    pub escape_penalty: f64,
-
-    pub total_score: f64,
-    pub seed: Complex,
-}
-
-impl SampleScore {
-    pub fn new(sample: &GpuGridSample, tile: &TileGeometry) -> Self {
-        let tile_center = tile.center();
-        let tile_radius = tile.radius();
-
-        let sample_dist_from_tile_center = complex_distance(&sample.best_sample, tile_center);
-
-        let depth = sample.best_sample_iters as f64 / sample.max_user_iters as f64;
-        let dist = 1.0 - (sample_dist_from_tile_center.to_f64() / tile_radius.to_f64())
-                            .clamp(0.0, 1.0);
-        let escape_penalty = if sample.best_sample_escaped {1.0} else {0.0};
-
-        let total_score =
-            depth * 4.0 +
-                dist * 0.5 +
-                (-escape_penalty * 10.0);
-
-        Self {
-            depth, dist, escape_penalty, total_score, seed: sample.best_sample.clone()
         }
     }
 }

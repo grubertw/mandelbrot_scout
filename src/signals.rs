@@ -1,7 +1,6 @@
-use crate::gpu_pipeline::structs::{TileFeedbackOut};
+use crate::gpu_pipeline::structs::{OrbitFeedbackOut};
 use crate::numerics::{ComplexDf, Df};
 use crate::scout_engine::orbit::OrbitId;
-use crate::scout_engine::tile::{TileId, TileGeometry};
 
 use std::hash::{Hash, Hasher};
 use std::time;
@@ -64,18 +63,17 @@ pub struct GpuGridSample {
     pub frame_stamp: FrameStamp,
     
     // Gpu Reduced info about the pest sampled pixel it's sample grid
-    pub best_sample: Complex,
-    pub best_sample_iters: u32,
-    pub best_sample_escaped: bool,
+    pub location: Complex,
+    pub iters_reached: u32,
+    pub escaped: bool,
     pub max_user_iters: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct TileObservation {
+pub struct OrbitObservation {
     pub frame_stamp: FrameStamp,
-    pub tile_id: TileId,
     pub orbit_id: OrbitId,
-    pub feedback: TileFeedbackOut,
+    pub feedback: OrbitFeedbackOut,
 }
 
 #[derive(Clone, Debug)]
@@ -88,18 +86,11 @@ pub struct FrameDiagnostics {
 // Produced by Scout Engine
 ///////////////////////////////////////////////////////////
 #[derive(Clone, Debug)]
-pub struct TileOrbitViewDf {
-    pub id: TileId,
-    pub geometry: TileGeometry,
-    pub delta_from_center: Complex,
-    pub delta_from_center_to_anchor: ComplexDf,
-    pub orbit: ReferenceOrbitDf,
-}
-
-#[derive(Clone, Debug)]
-pub struct ReferenceOrbitDf {
+pub struct QualifiedOrbit {
+    pub rank: u32,
     pub orbit_id: OrbitId,
-    pub c_ref: ComplexDf,
+    pub c_ref: Complex,
+    pub c_ref_df: ComplexDf,
     pub orbit_re_hi: Vec<f32>,
     pub orbit_re_lo: Vec<f32>,
     pub orbit_im_hi: Vec<f32>,
@@ -110,19 +101,19 @@ pub struct ReferenceOrbitDf {
     pub created_at: FrameStamp,
 }
 
-impl Hash for ReferenceOrbitDf {
+impl Hash for QualifiedOrbit {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.orbit_id.hash(state);
     }
 }
 
-impl PartialEq for ReferenceOrbitDf {
+impl PartialEq for QualifiedOrbit {
     fn eq(&self, other: &Self) -> bool {
         self.orbit_id == other.orbit_id
     }
 }
 
-impl Eq for ReferenceOrbitDf {}
+impl Eq for QualifiedOrbit {}
 
 #[derive(Clone, Debug)]
 pub struct ScoutDiagnostics {
