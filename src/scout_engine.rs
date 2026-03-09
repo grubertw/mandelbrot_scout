@@ -227,10 +227,7 @@ impl ScoutEngine {
                     orbit_id: orb_g.orbit_id,
                     c_ref: orb_g.c_ref().clone(),
                     c_ref_df: orb_g.gpu_payload.c_ref,
-                    orbit_re_hi: orb_g.gpu_payload.re_hi.clone(),
-                    orbit_re_lo: orb_g.gpu_payload.re_lo.clone(),
-                    orbit_im_hi: orb_g.gpu_payload.im_hi.clone(),
-                    orbit_im_lo: orb_g.gpu_payload.im_lo.clone(),
+                    orbit: orb_g.gpu_payload.cdf_orbit.clone(),
                     escape_index: orb_g.quality_metrics.escape_index,
                     r_valid: Df::from_float(orb_g.r_valid()),
                     contraction: Df::from_float(orb_g.contraction()),
@@ -246,7 +243,7 @@ impl ScoutEngine {
             trace_str.push_str(format!("Rank #{:<2}\torb_id={:<4}\tescape={:?} len={} contraction={:.4e}\n",
                q_orb.rank, q_orb.orbit_id,
                 q_orb.escape_index,
-                q_orb.orbit_re_hi.len(),
+                q_orb.orbit.len(),
                 q_orb.contraction.hi
             ).as_str());
         }

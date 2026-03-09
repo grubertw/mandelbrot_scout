@@ -1,6 +1,5 @@
-pub mod policy;
-
-use crate::scene::policy::*;
+use std::collections::HashMap;
+use crate::settings::Settings;
 use crate::gpu_pipeline::builder::*;
 use crate::gpu_pipeline::structs::*;
 use crate::numerics::*;
@@ -30,6 +29,16 @@ struct LoadedOrbit {
     gpu_orb_loc_info: GpuRefOrbitLocation
 }
 
+#[derive(Debug, Clone)]
+pub struct ColorPalette {
+    pub name: String,
+    palette: Vec<[u8; 4]>,
+    pub offset: f32,
+    pub frequency: f32,
+    pub frequency_range: (f32, f32),
+    pub gamma: f32,
+}
+
 #[derive(Debug)]
 pub struct Scene {
     frame_id: u64,
@@ -39,35 +48,43 @@ pub struct Scene {
     scale_factor: Float,
     width: f64,
     height: f64,
+    max_screen_width: u32,
+    max_screen_height: u32,
+    max_orbits_per_frame: u32,
+    max_palette_colors: u32,
     scout_engine: ScoutEngine,
     loaded_orbits: Vec<LoadedOrbit>,
     uniform: SceneUniform,
     pipeline: PipelineBundle,
+    selected_palette: String,
+    palette_changed: bool,
+    color_palettes: HashMap<String, ColorPalette>,
 }
 
 impl Scene {
     pub fn new(window: Arc<Window>, device: &wgpu::Device, 
         texture_format: wgpu::TextureFormat,
         width: f64, height: f64,
+        settings: &Settings
     ) -> Scene {
-        let center = Complex::with_val(INIT_RUG_PRECISION, CENTER);
+        let center = Complex::with_val(settings.init_rug_precision, settings.center);
         let c_df = ComplexDf::from_complex(&center);
 
-        let scale = Float::with_val(INIT_RUG_PRECISION, COMPLEX_SPAN / width);
+        let scale = Float::with_val(settings.init_rug_precision, settings.complex_span / width);
         let scale_df = Df::from_float(&scale);
 
         // Configure ScoutEngine (our single source of truth for reference orbits)
         let scout_config =  ScoutEngineConfig {
-            max_live_orbits: MAX_LIVE_ORBITS,
-            max_user_iters: MAX_USER_ITER,
-            max_ref_orbit_iters: MAX_REF_ORBIT,
-            auto_start: AUTO_START,
-            starting_scale: STARTING_SCALE,
-            ref_iters_multiplier: REF_ITERS_MULTIPLIER,
-            num_seeds_to_spawn_per_eval: NUM_SEEDS_TO_SPAWN_PER_EVAL,
-            num_qualified_orbits: NUM_QUALIFIED_ORBITS,
-            rug_precision: INIT_RUG_PRECISION,
-            exploration_budget: EXPLORATION_BUDGET,
+            max_live_orbits: settings.max_live_orbits,
+            max_user_iters: settings.max_user_iter,
+            max_ref_orbit_iters: settings.max_ref_orbit,
+            auto_start: settings.auto_start,
+            starting_scale: settings.starting_scale,
+            ref_iters_multiplier: settings.ref_iters_multiplier,
+            num_seeds_to_spawn_per_eval: settings.num_seeds_to_spawn_per_eval,
+            num_qualified_orbits: settings.num_qualified_orbits,
+            rug_precision: settings.init_rug_precision,
+            exploration_budget: settings.exploration_budget,
         };
 
         let scout_engine = ScoutEngine::new(
@@ -78,28 +95,43 @@ impl Scene {
                 width.max(height) / 2.0,
             ));
 
+        let color_palettes =
+            build_color_palettes_from_settings(settings);
+        let default_palette = color_palettes.get("default").unwrap();
+
         let uniform = SceneUniform {
             center_x_hi: c_df.re.hi, center_x_lo: c_df.re.lo,
             center_y_hi: c_df.im.hi, center_y_lo: c_df.im.lo,
             scale_hi:    scale_df.hi, scale_lo:    scale_df.lo,
             screen_width: width as u32,
             screen_height: height as u32,
-            max_iter: MAX_USER_ITER,
+            max_iter: settings.max_user_iter,
             ref_orb_count: 0,
-            grid_size: SCREEN_GRID_SIZE,
-            grid_width: width as u32 / SCREEN_GRID_SIZE,
+            grid_size: settings.screen_grid_size,
+            grid_width: width as u32 / settings.screen_grid_size,
+            palette_frequency: default_palette.frequency,
+            palette_offset: 0.0,
+            palette_gamma: 1.0,
+            render_flags: 0
         };
 
         // Configure and initialize all WGPU resources for render passes.
         let pipeline = PipelineBundle::build_pipelines(
-            device, &uniform, texture_format);
+            device, &uniform, texture_format, settings);
 
         Scene { 
             frame_id: 0, frame_timestamp: time::Instant::now(), 
-            center, scale, scale_factor: Float::with_val(INIT_RUG_PRECISION, 1.05),
-            width, height, scout_engine, 
+            center, scale, scale_factor: Float::with_val(settings.init_rug_precision, 1.05),
+            width, height,
+            max_screen_width: settings.max_screen_width,
+            max_screen_height: settings.max_screen_height,
+            max_orbits_per_frame: settings.max_orbits_per_frame,
+            max_palette_colors: settings.max_palette_colors,
+            scout_engine,
             loaded_orbits: Vec::new(),
-            uniform, pipeline
+            uniform, pipeline,
+            selected_palette: "default".to_string(),
+            palette_changed: true, color_palettes
         }
     }
 
@@ -107,8 +139,8 @@ impl Scene {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-        let gx = (MAX_SCREEN_WIDTH + 15) / 16;
-        let gy = (MAX_SCREEN_HEIGHT + 15) / 16;
+        let gx = (self.max_screen_width + 15) / 16;
+        let gy = (self.max_screen_height + 15) / 16;
 
         {
             trace!("Compute pass clear storage textures. gx={} gy={}", gx, gy);
@@ -151,7 +183,8 @@ impl Scene {
             render_pass.set_pipeline(&self.pipeline.render_pipeline);
             render_pass.set_bind_group(0, &self.pipeline.scene_bg, &[]);
             render_pass.set_bind_group(1, &self.pipeline.ref_orbit_bg, &[]);
-            render_pass.set_bind_group(2, &self.pipeline.debug_bg, &[]);
+            render_pass.set_bind_group(2, &self.pipeline.palette_bg, &[]);
+            render_pass.set_bind_group(3, &self.pipeline.debug_bg, &[]);
             render_pass.draw(0..3, 0..1);
         }
 
@@ -179,7 +212,7 @@ impl Scene {
     ) {
         let byte_size = 
             (self.uniform.grid_width
-            * (self.uniform.screen_height / SCREEN_GRID_SIZE)) as u64
+            * (self.uniform.screen_height / self.uniform.grid_size)) as u64
             * std::mem::size_of::<GridFeedbackOut>() as u64;
         if byte_size == 0 {
             warn!("This frame had no grid feedback!");
@@ -287,7 +320,7 @@ impl Scene {
             })
             .collect();
 
-        trace!("{}", trace_str);
+        //trace!("{}", trace_str);
         self.scout_engine.set_grid_samples(grid_samples)
     }
 
@@ -404,10 +437,9 @@ impl Scene {
                 debug!("  width  = {}\theight = {}", self.width, self.height);
                 debug!("FROM GPU:");
                 debug!("  center = (({},{}) ({},{}))", dbg.center_x_hi, dbg.center_x_lo, dbg.center_y_hi, dbg.center_y_lo);
-                debug!("  scale  = ({}, {})", dbg.scale_hi, dbg.scale_lo);
-                debug!("  width  = {}\theight = {}", dbg.screen_width, dbg.screen_height);
-                debug!("  ref_orb_count = {}", dbg.ref_orb_count);
-                debug!("  orbit_idx   = {}", dbg.orbit_idx);
+                debug!("  max_iters    = {}", dbg.max_iters);
+                debug!("  iter         = {}", dbg.iter);
+                debug!("  t            = {}", dbg.t);
     
                 drop(data);
                 self.pipeline.debug_readback.unmap();
@@ -448,7 +480,7 @@ impl Scene {
         self.height = height;
         self.uniform.screen_width = width as u32;
         self.uniform.screen_height = height as u32;
-        self.uniform.grid_width = width as u32 / SCREEN_GRID_SIZE;
+        self.uniform.grid_width = width as u32 / self.uniform.grid_size;
 
         debug!("Window size changed w={} h={}", width, height);
     }
@@ -519,7 +551,50 @@ impl Scene {
 
         c
     }
+    
+    pub fn set_debug_coloring(&mut self, debug_coloring: bool) {
+        self.uniform.set_debug_coloring(debug_coloring);
+    }
+    
+    pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
+        self.uniform.set_glitch_fix(glitch_fix);
+    }
 
+    // Obtain an enumerated list/mapping of color palettes
+    pub fn get_palette_list(&self) -> Vec<(String, String)> {
+        let mut palette_list = Vec::new();
+        self.color_palettes.
+            iter()
+            .for_each(|(key, palette)| {
+            palette_list.push((key.to_string(), palette.name.clone()));
+        });
+        palette_list
+    }
+    
+    pub fn get_palette(&self, key: &String) -> &ColorPalette {
+        &self.color_palettes[key]
+    }
+
+    pub fn set_selected_palette(&mut self, key: &String) {
+        self.selected_palette = key.clone();
+        self.palette_changed = true;
+    }
+
+    pub fn set_palette_frequency(&mut self, key: &String, frequency: f32) {
+        self.color_palettes.get_mut(key).unwrap().frequency = frequency;
+        self.uniform.palette_frequency = frequency;
+    }
+    
+    pub fn set_palette_offset(&mut self, key: &String, offset: f32) {
+        self.color_palettes.get_mut(key).unwrap().offset = offset;
+        self.uniform.palette_offset = offset;
+    }
+    
+    pub fn set_palette_gamma(&mut self, key: &String, gamma: f32) {
+        self.color_palettes.get_mut(key).unwrap().gamma = gamma;
+        self.uniform.palette_gamma = gamma;
+    }
+    
     pub fn stamp_frame(&mut self) {
         self.frame_id += 1;
         self.frame_timestamp = time::Instant::now();
@@ -548,7 +623,7 @@ impl Scene {
             let orbits = self.scout_engine.query_qualified_orbits();
 
             // Upload qualified orbits to a Texture2D
-            self.load_orbits_to_texture(&orbits, queue);
+            self.upload_orbits(&orbits, queue);
 
             // Build GPU-specific orbit locations from scout-engine's tile-orbit pairs
             self.loaded_orbits =
@@ -559,85 +634,35 @@ impl Scene {
         }
     }
 
-    fn load_orbits_to_texture(&mut self, orbits: &Vec<QualifiedOrbit>, queue: &wgpu::Queue) {
+    fn upload_orbits(&mut self, orbits: &Vec<QualifiedOrbit>, queue: &wgpu::Queue) {
         if orbits.len() == 0 {
             trace!("Orbit Count reduced to zero! Scout likely shutdown!");
             self.uniform.ref_orb_count = 0;
             return;
         }
 
-        let largest_orb_len = orbits
-            .iter()
-            .fold(0, |acc, orb| {
-                acc.max(orb.orbit_re_hi.len())
-            });
-
-        let orbit_count = orbits.len().min(MAX_ORBITS_PER_FRAME as usize);
-
-        let row_count = orbit_count * 4;
-        let orb_len = largest_orb_len.min(MAX_REF_ORBIT as usize);
-
-        let mut texture_data = Vec::<f32>::with_capacity(orb_len * row_count);
-
-        for orb in orbits {
-            // re_hi row
-            for it in 0..orb_len {
-                texture_data.push(orb.orbit_re_hi.get(it).copied().unwrap_or(0.0));
-            }
-
-            // re_lo row
-            for it in 0..orb_len {
-                texture_data.push(orb.orbit_re_lo.get(it).copied().unwrap_or(0.0));
-            }
-
-            // im_hi row
-            for it in 0..orb_len {
-                texture_data.push(orb.orbit_im_hi.get(it).copied().unwrap_or(0.0));
-            }
-
-            // im_lo row
-            for it in 0..orb_len {
-                texture_data.push(orb.orbit_im_lo.get(it).copied().unwrap_or(0.0));
-            }
+        let mut orbit_count: u32 = 0;
+        if orbits.len() > 0 {
+            let ranked_orb = &orbits[0];
+            queue.write_buffer(&self.pipeline.rank_one_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
+            orbit_count += 1;
+            trace!("Wrote Rank One RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
+                ranked_orb.orbit.len() * 16, ranked_orb.orbit.len());
         }
-        
-        let tex_height = row_count as u32;
-        let tex_width = orb_len as u32;
 
-        trace!("Text height = {}, Tex width = {}, row_count = {}, largest_orb_len={} texture_data.len={}",
-            tex_height, tex_width, row_count, largest_orb_len, texture_data.len());
+        if orbits.len() > 1 {
+            let ranked_orb = &orbits[1];
+            queue.write_buffer(&self.pipeline.rank_two_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
+            orbit_count += 1;
+            trace!("Wrote Rank Two RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
+                ranked_orb.orbit.len() * 16, ranked_orb.orbit.len());
+        }
 
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.pipeline.ref_orbit_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&texture_data),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(std::num::NonZeroU32::new(
-                    tex_width * std::mem::size_of::<f32>() as u32
-                ).unwrap().into()),
-                rows_per_image: Some(std::num::NonZeroU32::new(
-                    tex_height
-                ).unwrap().into()),
-            },
-            wgpu::Extent3d {
-                width: tex_width,
-                height: tex_height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        info!("Uploading qualified orbits into texture. width={} height={}. {} orbits uploaded of byte size {}",
-            tex_width, tex_height, orbit_count, &texture_data.len() * 4);
-        self.uniform.ref_orb_count = orbit_count as u32;
+        self.uniform.ref_orb_count = orbit_count;
     }
 
     fn upload_orbit_locations(&self, queue: &wgpu::Queue) {
-        if self.loaded_orbits.len() > 0 && self.loaded_orbits.len() <= MAX_ORBITS_PER_FRAME as usize {
+        if self.loaded_orbits.len() > 0 && self.loaded_orbits.len() <= self.max_orbits_per_frame as usize {
             let mut trace_str = String::from(
                 format!("Orbit Loadout has {} orbits. Mapping follows...\n",
                         self.loaded_orbits.len()).as_str());
@@ -657,6 +682,54 @@ impl Scene {
                 .map(|l| l.gpu_orb_loc_info)
                 .collect();
             queue.write_buffer(&self.pipeline.ref_orbit_location_buf, 0, bytemuck::cast_slice(&orb_locations));
+        }
+    }
+
+    pub fn upload_color_palette(&mut self, queue: &wgpu::Queue) {
+        if let Some(palette) = self.color_palettes.get(&self.selected_palette)
+                && self.palette_changed {
+            self.palette_changed = false;
+            self.uniform.palette_frequency = palette.frequency;
+            self.uniform.palette_offset = palette.offset;
+            self.uniform.palette_gamma = palette.gamma;
+
+            let max = self.max_palette_colors as usize;
+            let src = &palette.palette;
+
+            // Create a repeating cycle of the palette within the texture. This works best
+            // for texture color sampling, and for frequency/offset changes.
+            let mut full_palette = Vec::<[u8; 4]>::with_capacity(max);
+            for i in 0..max {
+                full_palette.push(src[i % src.len()]);
+            }
+
+            let palette_bytes: &[u8] = bytemuck::cast_slice(&full_palette);
+
+            trace!("Uploading color palette {}. freq={} offset={} gamma={} render_flags={} len={} bytes={}",
+                palette.name, self.uniform.palette_frequency,
+                self.uniform.palette_offset, self.uniform.palette_gamma,
+                self.uniform.render_flags,
+                self.max_palette_colors, palette_bytes.len());
+
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.pipeline.palette_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                palette_bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * self.max_palette_colors),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d {
+                    width: self.max_palette_colors,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
         }
     }
 
@@ -746,6 +819,7 @@ fn build_gpu_orbit_loadout_from_qualified_orbits(
                     c_ref_re_lo: orb.c_ref_df.re.lo,
                     c_ref_im_hi: orb.c_ref_df.im.hi,
                     c_ref_im_lo: orb.c_ref_df.im.lo,
+                    max_ref_iters: orb.escape_index.unwrap_or(orb.orbit.len() as u32),
                     center_offset_re_hi: center_offset_df.re.hi,
                     center_offset_re_lo: center_offset_df.re.lo,
                     center_offset_im_hi: center_offset_df.im.hi,
@@ -754,4 +828,33 @@ fn build_gpu_orbit_loadout_from_qualified_orbits(
         }
         })
         .collect()
+}
+
+fn build_color_palettes_from_settings(settings: &Settings) -> HashMap<String, ColorPalette> {
+    let mut color_palettes: HashMap<String, ColorPalette> = HashMap::new();
+    settings.palettes.iter().for_each(|(key, palette)| {
+        // First validate the palette is well-formed
+        if palette.array.len() % 3 != 0 {
+            warn!("Palette {} array is not a multiple of 3! Skipping!", key);
+        }
+        else {
+            color_palettes.insert(
+                key.clone(),
+                ColorPalette {
+                    name: palette.name.clone(),
+                    palette: palette.array
+                        .iter()
+                        .as_slice()
+                        .chunks(3)
+                        .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+                        .collect(),
+                    offset: 0.0,
+                    frequency: palette.frequency,
+                    frequency_range: palette.frequency_range,
+                    gamma: 1.0,
+                }
+            );
+        }
+    });
+    color_palettes
 }

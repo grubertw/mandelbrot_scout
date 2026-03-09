@@ -15,6 +15,20 @@ pub struct SceneUniform {
     pub screen_height:      u32,
     pub grid_size:          u32,
     pub grid_width:         u32,
+    pub palette_frequency:  f32,
+    pub palette_offset:     f32,
+    pub palette_gamma:      f32,
+    pub render_flags:       u32,
+}
+
+impl SceneUniform {
+    pub fn set_debug_coloring(&mut self, debug_coloring: bool) {
+        if debug_coloring { self.render_flags |= 1 << 0; } else { self.render_flags &= !(1 << 0) }
+    }
+
+    pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
+        if glitch_fix { self.render_flags |= 1 << 1; } else { self.render_flags &= !(1 << 1) }
+    }
 }
 
 #[repr(C)]
@@ -78,12 +92,9 @@ pub struct DebugOut {
     pub center_x_lo:        f32,
     pub center_y_hi:        f32,
     pub center_y_lo:        f32,
-    pub scale_hi:           f32,
-    pub scale_lo:           f32,
-    pub screen_width:       u32,
-    pub screen_height:      u32,
-    pub ref_orb_count:      u32,
-    pub orbit_idx:          u32,
+    pub max_iters:          u32,
+    pub iter:               u32,
+    pub t:                  f32,
 }
 
 #[repr(C)]
@@ -93,6 +104,7 @@ pub struct GpuRefOrbitLocation {
     pub c_ref_re_lo:            f32,
     pub c_ref_im_hi:            f32,
     pub c_ref_im_lo:            f32,
+    pub max_ref_iters:          u32,
     pub center_offset_re_hi:    f32,
     pub center_offset_re_lo:    f32,
     pub center_offset_im_hi:    f32,

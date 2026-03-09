@@ -16,3 +16,5 @@ log="0.4.29"
 env_logger="0.11.8"
 anstyle="1.0.6"
 chrono = { version = "0.4", features = ["clock"] }
+config = "0.15.19"
+serde = { version = "1.0.228", features = ["derive"] }

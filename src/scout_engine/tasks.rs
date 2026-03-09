@@ -38,10 +38,7 @@ pub async fn start_reference_orbit(
         .collect();
 
     for cdf in cdf_orbit {
-        orbit.gpu_payload.re_hi.push(cdf.re.hi);
-        orbit.gpu_payload.re_lo.push(cdf.re.lo);
-        orbit.gpu_payload.im_hi.push(cdf.im.hi);
-        orbit.gpu_payload.im_lo.push(cdf.im.lo);
+        orbit.gpu_payload.cdf_orbit.push(cdf);
     }
     Arc::new(RwLock::new(orbit))
 }
@@ -70,10 +67,6 @@ pub async fn continue_reference_orbit(orbit: LiveOrbit, config: ScoutConfig) {
 
     for i in start_iter..=orbit_g.orbit.len() {
         let cdf = ComplexDf::from_complex(&orbit_g.orbit[i]);
-
-        orbit_g.gpu_payload.re_hi.push(cdf.re.hi);
-        orbit_g.gpu_payload.re_lo.push(cdf.re.lo);
-        orbit_g.gpu_payload.im_hi.push(cdf.im.hi);
-        orbit_g.gpu_payload.im_lo.push(cdf.im.lo);
+        orbit_g.gpu_payload.cdf_orbit.push(cdf);
     }
 }

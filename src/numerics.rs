@@ -1,3 +1,4 @@
+use bytemuck;
 use std::ops::{Add, Mul};
 use rug::{Float, Complex};
 
@@ -9,13 +10,15 @@ pub const MAX_SAFE_DF_MAG: f64 = 1e30;
 // accross a wider set of GPUs. While not giving 53 bits of precision,
 // this can theoreticly give us up to 48 bits - i.e. 24+24 as f32 
 // has 24 bits - though in practice it will likely yeild only 40-44.
-#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Df {
     pub hi: f32,
     pub lo: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ComplexDf {
     pub re: Df,
     pub im: Df,

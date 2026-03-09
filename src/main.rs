@@ -1,3 +1,4 @@
+mod settings;
 mod controls;
 mod scene;
 mod gpu_pipeline;
@@ -11,6 +12,7 @@ mod signals;
 #[allow(dead_code)]
 mod scout_engine;
 
+use settings::Settings;
 use controls::Controls;
 use controls::Message;
 use scene::Scene;
@@ -46,9 +48,13 @@ use std::sync::Arc;
 use std::process;
 use std::time::Instant;
 
+const TITLE: &str = "Mandelbrot Scout";
+
 #[allow(clippy::large_enum_variant)]
 enum Runner {
-    Loading,
+    Loading {
+        settings: Settings,
+    },
     Ready {
         window: Arc<Window>,
         queue: wgpu::Queue,
@@ -75,13 +81,14 @@ enum Runner {
 impl ApplicationHandler for Runner {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         debug!("Runner.resumed");
-        if let Self::Loading = self {
+        if let Self::Loading{settings} = self {
             let window = Arc::new(event_loop.create_window(
                 WindowAttributes::default()).unwrap_or_else(|e| {
                     error!("Failed to Create window .. {}", e);
                     process::exit(1);
                 }));
 
+            window.set_title(TITLE);
             let physical_size = window.inner_size();
             let viewport = Viewport::with_physical_size(
                 Size::new(physical_size.width, physical_size.height),
@@ -141,7 +148,8 @@ impl ApplicationHandler for Runner {
             let scene = Rc::new(RefCell::new(
                 Scene::new(window.clone(), &device, format,
                     physical_size.width.into(),
-                    physical_size.height.into()
+                    physical_size.height.into(),
+                   settings
                 )));
             // Take a snapshot of where the camera is in the beginning to send to ScoutEngine
             // So that an initial reference orbit can be computed.
@@ -229,6 +237,9 @@ impl ApplicationHandler for Runner {
                                 controls.update(Message::UpdateDebugText(scout_diags_g.message.clone()));
                                 scout_diags_g.consumed = true;
                             }
+
+                            // Upload color palette texture, if changed.
+                            s.upload_color_palette(queue);
 
                             // Draw the scene (contains both fragment render and compute passes)
                             s.draw(&device, &queue, &view);
@@ -468,9 +479,17 @@ pub fn main() -> Result<(), winit::error::EventLoopError> {
         })
         .init();
 
+    // Load app settings from settings file
+    let settings = Settings::new().map_err(|e| {
+        error!("Unable to load settings: {}", e);
+        return e;
+    }).unwrap();
+
+    info!("Loaded application settings");
+
     // Initialize winit
     let event_loop = EventLoop::new().expect("Opening winit Event Loop");
-    let mut runner = Runner::Loading;
+    let mut runner = Runner::Loading{settings};
 
     info!("Starting Winit event loop");
 

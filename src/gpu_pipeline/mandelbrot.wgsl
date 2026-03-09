@@ -127,8 +127,15 @@ struct Uniforms {
     screen_height:      u32,
     grid_size:          u32,
     grid_width:         u32,
+    palette_frequency:  f32,
+    palette_offset:     f32,
+    palette_gamma:      f32,
+    render_flags:       u32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
+
+const DEBUG_COLORING: u32   = 1u << 0;
+const GLITCH_FIX: u32       = 1u << 1;
 
 fn build_c_from_scene(pix: vec2<i32>) -> ComplexDf {
     let half_w = f32(uni.screen_width) * 0.5;
@@ -190,21 +197,17 @@ fn mandelbrot(c: ComplexDf) -> u32 {
     return i;
 }
 
-// ----------------------------
-// Qualified Orbits from ScoutEngine
-// ----------------------------
-// The Reference Orbit data
-// Iteration count is on the x-azis (i.e. the RefOrb's Vec<Complex>'s index)
-// OrbitId is in the y-axis
-// Note that each orbit takes 4x y-indicies (i.e. complex re(hi+lo) + im(hi+lo))
+// Pertubation feedback into the reduce (compute) shader
+// Also contains iteration count, and the orbit used (i.e. rank-1, rank-2, ect)
 @group(1) @binding(0)
-var ref_orbit_tex : texture_2d<f32>;
+var flags_tex: texture_storage_2d<r32uint, write>;
 
 struct GpuRefOrbitLocation {
     c_ref_re_hi:            f32,
     c_ref_re_lo:            f32,
     c_ref_im_hi:            f32,
     c_ref_im_lo:            f32,
+    max_ref_iters:          u32,
     center_offset_re_hi:    f32,
     center_offset_re_lo:    f32,
     center_offset_im_hi:    f32,
@@ -226,9 +229,12 @@ struct GpuRefOrbitLocation {
 @group(1) @binding(1)
 var<storage, read> orbit_location : array<GpuRefOrbitLocation>;
 
-// Pertubation feedback into the reduce (compute) shader
+// Ranked ReferenceOrbits, in ComplexDf format
 @group(1) @binding(2)
-var flags_tex: texture_storage_2d<r32uint, write>;
+var<storage, read> rank_one_orbit: array<ComplexDf>;
+
+@group(1) @binding(3)
+var<storage, read> rank_two_orbit: array<ComplexDf>;
 
 // delta_c - along with Zref-n0 - are needed to start pertubation.
 fn build_delta_c_from_orbit_location(pix: vec2<i32>, orbit_idx: u32) -> ComplexDf {
@@ -261,14 +267,15 @@ fn build_delta_c_from_orbit_location(pix: vec2<i32>, orbit_idx: u32) -> ComplexD
 }
 
 fn load_ref_orbit(orbit_idx: u32, it: u32) -> ComplexDf {
-    let base_y = orbit_idx * 4u;
-
-    let z_re_hi = textureLoad(ref_orbit_tex, vec2<i32>(i32(it), i32(base_y + 0u)), 0).x;
-    let z_re_lo = textureLoad(ref_orbit_tex, vec2<i32>(i32(it), i32(base_y + 1u)), 0).x;
-    let z_im_hi = textureLoad(ref_orbit_tex, vec2<i32>(i32(it), i32(base_y + 2u)), 0).x;
-    let z_im_lo = textureLoad(ref_orbit_tex, vec2<i32>(i32(it), i32(base_y + 3u)), 0).x;
-
-    return ComplexDf(Df(z_re_hi, z_re_lo), Df(z_im_hi, z_im_lo));
+    if (orbit_idx == 0u) {
+        return rank_one_orbit[it];
+    }
+    else if (orbit_idx == 1u) {
+        return rank_two_orbit[it];
+    }
+    else {
+        return ComplexDf(Df(0.0, 0.0), Df(0.0, 0.0));
+    }
 }
 
 const ITER_MASK: u32        = 0x0000FFFFu;
@@ -294,7 +301,7 @@ fn record_pix_feedback(pix: vec2<i32>, orbit_idx: u32, it: u32, flags_in: u32) {
     textureStore(flags_tex, pix, vec4<u32>(flags, 0u, 0u, 0u));
 }
 
-const BETA = 0.1; // Used for dynamic tracking of perturbation error
+const BETA = 4.0; // Used for dynamic tracking of perturbation error
 
 // -------------------------------
 // Mandelbrot Perturbance 
@@ -307,19 +314,15 @@ const BETA = 0.1; // Used for dynamic tracking of perturbation error
 fn mandelbrot_perturb(orbit_idx: u32, delta_c: ComplexDf) -> vec2<u32> {
     var dz = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));
     var i: u32 = 0u;
+    var ref_i: u32 = 0u;
     var flags: u32 = 0u;
     let max_i = uni.max_iter;
+    let max_ref_iters = orbit_location[orbit_idx].max_ref_iters;
 
     for (i = 0u; i < max_i; i = i + 1u) {
         // Load reference orbit Z_n
-        let Z = load_ref_orbit(orbit_idx, i);
-
-        // Track error dynamicly by comparing |dz_n| to |Z|
-        let mag2_dz = cdf_mag2(dz);
-        let mag2_Z = cdf_mag2(Z);
-        if (mag2_dz > BETA * mag2_Z) {
-            flags |= PERTURB_ERR_BIT;
-        }
+        let Z = load_ref_orbit(orbit_idx, ref_i);
+        ref_i += 1;
 
         // λ_n = 2 * Z_n
         let lambda = cdf_add(Z, Z);
@@ -335,12 +338,39 @@ fn mandelbrot_perturb(orbit_idx: u32, delta_c: ComplexDf) -> vec2<u32> {
         let z = cdf_add(Z, dz);
 
         // Standard bailout
-        if (cdf_mag2(z) > 16.0) {
+        let mag2_z = cdf_mag2(z);
+        if (mag2_z > 16.0) {
             break;
+        }
+
+        if ((uni.render_flags & GLITCH_FIX) != 0) {
+            let mag2_dz = cdf_mag2(dz);
+            let abs_z = max((abs(z.r.hi) + abs(z.r.lo)), (abs(z.i.hi) + abs(z.i.lo))) * BETA;
+
+            if (abs_z < mag2_dz || (ref_i == max_ref_iters)) {
+                // Apply Zhuoran's glitch-fix, which resets where Z taken
+                // as we continue iterating on DeltaZn.
+                dz = z;
+                ref_i = 0;
+            }
         }
     }
 
     return vec2<u32>(i, flags);
+}
+
+//
+// Color bind groups and logic
+//
+@group(2) @binding(0)
+var palette_tex: texture_2d<f32>;
+
+@group(2) @binding(1)
+var palette_sampler: sampler;
+
+fn palette_lookup(t: f32) -> vec3<f32> {
+    return textureSample(palette_tex, palette_sampler,
+        vec2<f32>(t * uni.palette_frequency + uni.palette_offset, 0.5)).rgb;
 }
 
 // -------------------------------
@@ -389,7 +419,12 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
 
     // Color logic
     var t = f32(it) / f32(uni.max_iter);
-    var color = vec3<f32>(t, t*t, pow(t, 0.5));
+    t = pow(t, uni.palette_gamma);
+    var color = palette_lookup(t);
+
+    if ((uni.render_flags & DEBUG_COLORING) != 0) {
+        color = vec3<f32>(t, t*t, pow(t, 0.5));
+    }
 
     if (it == uni.max_iter) {
         // If in the set, color black
@@ -406,12 +441,9 @@ fn fs_main(@builtin(position) coords: vec4<f32>) -> @location(0) vec4<f32> {
         debug_out.center_x_lo = c.r.lo;
         debug_out.center_y_hi = c.i.hi;
         debug_out.center_y_lo = c.i.lo;
-        debug_out.scale_hi = uni.scale_hi;
-        debug_out.scale_lo = uni.scale_lo;
-        debug_out.screen_width = uni.screen_width;
-        debug_out.screen_height = uni.screen_height;
-        debug_out.ref_orb_count = uni.ref_orb_count;
-        debug_out.orbit_idx = orbit_idx;
+        debug_out.max_iters = uni.max_iter;
+        debug_out.iter = it;
+        debug_out.t = t;
     }
 
     return vec4<f32>(color, 1.0);
@@ -422,13 +454,10 @@ struct DebugOut {
     center_x_lo:        f32,
     center_y_hi:        f32,
     center_y_lo:        f32,
-    scale_hi:           f32,
-    scale_lo:           f32,
-    screen_width:       u32,
-    screen_height:      u32,
-    ref_orb_count:      u32,
-    orbit_idx:          u32,
+    max_iters:          u32,
+    iter:               u32,
+    t:                  f32,
 };
 
-@group(2) @binding(0)
+@group(3) @binding(0)
 var<storage, read_write> debug_out: DebugOut;

@@ -315,20 +315,14 @@ pub struct OrbitSnapshot {
 #[derive(Clone, Debug)]
 pub struct OrbitGpuPayload {
     pub c_ref: ComplexDf,
-    pub re_hi: Vec<f32>,
-    pub re_lo: Vec<f32>,
-    pub im_hi: Vec<f32>,
-    pub im_lo: Vec<f32>,
+    pub cdf_orbit: Vec<ComplexDf>,
 }
 
 impl OrbitGpuPayload {
     pub fn new(c_ref: ComplexDf) -> Self {
         Self {
             c_ref,
-            re_hi: Vec::<f32>::new(), 
-            re_lo: Vec::<f32>::new(), 
-            im_hi: Vec::<f32>::new(), 
-            im_lo: Vec::<f32>::new()
+            cdf_orbit: Vec::new(),
         }
     }
 }
