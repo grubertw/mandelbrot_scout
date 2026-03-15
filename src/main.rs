@@ -149,13 +149,13 @@ impl ApplicationHandler for Runner {
                 Scene::new(window.clone(), &device, format,
                     physical_size.width.into(),
                     physical_size.height.into(),
-                   settings
+                   &settings
                 )));
             // Take a snapshot of where the camera is in the beginning to send to ScoutEngine
             // So that an initial reference orbit can be computed.
             scene.borrow_mut().take_camera_snapshot();
             
-            let controls = Controls::new(Rc::clone(&scene));
+            let controls = Controls::new(&settings, Rc::clone(&scene));
 
             // Initialize iced
             let renderer = {

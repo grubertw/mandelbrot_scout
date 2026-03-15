@@ -1,9 +1,9 @@
 # Mandelbrot Scout
 Renders the Mandelbrot Set on the GPU using Rusts's WGPU library and WGSL shaders, and Iced as the GUI overlay. Leverages perturbation theory to overcome the GPU's float 32 precision limitation, and instead discovers qualified reference orbits 'in the neighborhood', which are computed on the CPU in high precision.  
 
-The state of the repo is still VERY much a work-in-progress, especially for perturbation on the GPU. That being said, I have made some very good progress, and can see quite visibly the drastic difference perturbation makes to overcome the GPU's precision wall! See in the screenshots section below!  
+As a hobby project, the state of the repo is always a work-in-progress, especially for perturbation theory. That being said, I have made some very good progress lately, and can see quite visibly the drastic difference perturbation makes to overcome the GPU's precision wall! See in the screenshots section below!  
 
-I always try to keep HEAD of the repo tested and running, even if/when experimental features are still being developed. As a stickler for quality UX, I will likely always remain hesitant to label 'official' releases on a regular basis, and likes lots of people writing fractal programs, this is very much a 'hobby project'.
+I always try to keep HEAD of the repo tested and running, even if/when experimental features are still being developed. As a stickler for quality UX, I will likely always remain hesitant to label 'official' releases on a regular basis.
 
 ## To compile:
 `$> cargo build`
@@ -27,10 +27,13 @@ That being said, my foremost goal with the project has always been: Make it fast
 
 # Project Goals
 1. Perturbation theory & Series Approximation for deep zooms [Wikipedia](https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set#Perturbation_theory_and_series_approximation)
-2. Ever increasing robustness and tuning for CPU-resident ScoutEngine, which finds and computes high-precision reference orbits for the scene/viewport!
+2. Ever-increasing robustness and tuning for CPU-resident ScoutEngine, which finds and computes high-precision reference orbits for the scene/viewport!
 3. UI controls for ScoutEngine behavior
+   1. Basic controls are working! Right now it is best to control the Scout manually, with the 'Scout!' button. (See User Manual section below!)
 4. Coloring algorithms that leverage distance approximation 
-5. UI-driven color palate selection 
+   1. Now using 4-neighbors strategy, after computing the distance derivative inside the Mandelbrot iteration loop!
+5. UI-driven color palette selection 
+   1. Color palettes are IN, and now configurable in settings.toml!
 6. Julia sets & cubic Mandelbrot 
 
 I've been iterating with ChatGPT on the 'Scout Engine' concept for a while now, and sometimes, if I am being honest, I wonder what the heck I was thinking to trust the AI to help me with design. It took me down some frightenting over-enginering paths - and this probably happened because of my own lack of understanding of perturbance - which created a hot-soup of complexity that I should have questened earlier on. That being said, it did help me understand the math better, and was useful for pouring through 10,000+ line log output.
@@ -58,6 +61,8 @@ While the GUI is still being heavily worked-on - and is highly subject to change
       1) Shift fractal iterations across the color palette. This value is always bounded between 0-1, 0 is the beginning, 1 is the end. Again note, the palette length is max_palette_colors, NOT the length of the palette array.
    4) Gamma slider
       3) Allows for non-liner interpolation of color. In the shader, this is essentially `t = pow(t, gamma)`. For a power-of-two fractal like the Mandelbrot, a good value to use is 2 - but ranges in-between also look nice!
+   5) Distance Estimation controls 
+      1) There are a LOT of additions here, and another complete overhaul of the UI. The best place to look for docs is in `settings.toml`
 3) Scout Controls
    1) "Reset Scout" button will delete from program memory all reference orbits, and stop perturbation mode
       1) i.e. Absolute iteration will resume, with no reference orbit being used.
@@ -110,6 +115,40 @@ Now, with those exact same coordinates, after pressing the "Scout!" button...
 ![First Scout Attempt Success](screenshots/Screenshot_2026-03-01_12-31-00.png)
 Note that I have a tile coloring diagnostic in the shader, and that's why the interior looks blue! Tiles are misaligned because they are using two different reference orbits. NOTE, I am NO LONGER USING TILES! Better to just have one good reference orbit, and then rebase with a secondary orbit, but ONLY for pixels that glitched.
 
+3.1 Update - Distance Estimation is working now!
+
+![De demo 1](screenshots/de_demo.gif)
+
+Here are a few clean screenshots, as the moving gifs don't show high quality.
+
+![De screenshot 1](screenshots/Screenshot_2026-03-15_23-14-51.jpg)
+
+![De screenshot 2](screenshots/Screenshot_2026-03-15_23-16-37.jpg)
+
+![De screenshot 3](screenshots/Screenshot_2026-03-15_23-18-59.jpg)
+
+
+One more DE demo!
+
+![De demo 2](screenshots/de_demo2.gif)
+
+Here are a dew DE renders that are working with perturbation!
+
+![De Pertrub Screenshot 1](screenshots/Screenshot_2026-03-15_23-35-16.jpg)
+
+![De Perturb Screenshot 2](screenshots/Screenshot_2026-03-15_23-36-07.jpg)
+
+![De Perturb Screenshot 3](screenshots/Screenshot_2026-03-15_23-37-28.jpg)
+
+Here is another quick demo on Stripe Averaging. At first I wasn't sure how much I liked the effect, but with some tuning and playing around with the sliders, I was able to make some very nice renders!
+
+![Stripe Demo](screenshots/stripe_demo.gif)
+
+![Stripe De Perturb 1](screenshots/Screenshot_2026-03-16_00-05-08.jpg)
+
+![Stripe De Perturb 2](screenshots/Screenshot_2026-03-16_00-21-36.jpg)
+
+
 Here is some craziness that ChatGPT was having me do, hunting for an orbit with a perfect 'r_valid' for linerized perturbation (which is NOT necessary when you keep the quadratic term).
 ![Older ScoutEngine failure](screenshots/Screenshot_2026-02-25_10-41-24.png)
 
@@ -141,4 +180,13 @@ NOTE: As with all examples in Git, make sure to view the correct code that has b
 
 https://sotrh.github.io/learn-wgpu/#what-is-wgpu
 
-Happy fractaling and happy coding!
+# License 
+The MIT License (MIT)
+
+Copyright © 2026 Travis Gruber
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

@@ -112,7 +112,25 @@ impl Scene {
             palette_frequency: default_palette.frequency,
             palette_offset: 0.0,
             palette_gamma: 1.0,
-            render_flags: 0
+            render_flags: 0,
+            distance_multiplier: settings.distance_multiplier,
+            glow_intensity: settings.glow_intensity,
+            neighbor_scale_multiplier: settings.neighbor_scale_multiplier,
+            ambient_intensity: settings.ambient_intensity,
+            key_light_intensity: settings.key_light_intensity,
+            key_light_azimuth: settings.key_light_azimuth,
+            key_light_elevation: settings.key_light_elevation,
+            fill_light_intensity: settings.fill_light_intensity,
+            fill_light_azimuth: settings.fill_light_azimuth,
+            fill_light_elevation: settings.fill_light_elevation,
+            specular_intensity: settings.specular_intensity,
+            specular_power: settings.specular_power,
+            ao_darkness: settings.ao_darkness,
+            stripe_density: settings.stripe_density,
+            stripe_strength: settings.stripe_strength,
+            stripe_gamma: settings.stripe_gamma,
+            rim_intensity: settings.rim_intensity,
+            rim_power: settings.rim_power,
         };
 
         // Configure and initialize all WGPU resources for render passes.
@@ -439,6 +457,8 @@ impl Scene {
                 debug!("  center = (({},{}) ({},{}))", dbg.center_x_hi, dbg.center_x_lo, dbg.center_y_hi, dbg.center_y_lo);
                 debug!("  max_iters    = {}", dbg.max_iters);
                 debug!("  iter         = {}", dbg.iter);
+                debug!("  nu_iter      = {}", dbg.nu_iter);
+                debug!("  distance     = {}", dbg.distance);
                 debug!("  t            = {}", dbg.t);
     
                 drop(data);
@@ -465,9 +485,6 @@ impl Scene {
 
     pub fn read_scout_diagnostics(&self) -> Arc<Mutex<ScoutDiagnostics>> {
         self.scout_engine.read_diagnostics()
-    }
-    pub fn max_iterations(&self) -> u32 {
-        self.uniform.max_iter
     }
 
     pub fn set_max_iterations(&mut self, max_iterations: u32) {
@@ -559,7 +576,43 @@ impl Scene {
     pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
         self.uniform.set_glitch_fix(glitch_fix);
     }
+    
+    pub fn set_smooth_coloring(&mut self, smooth_coloring: bool) {
+        self.uniform.set_smooth_coloring(smooth_coloring);
+    }
 
+    pub fn set_use_de(&mut self, use_de: bool) {
+        self.uniform.set_use_de(use_de);
+    }
+
+    pub fn set_use_stripes(&mut self, use_stripes: bool) {
+        self.uniform.set_use_stripes(use_stripes);
+    }
+
+    pub fn set_enable_glow(&mut self, enable_glow: bool) {
+        self.uniform.set_enable_glow(enable_glow);
+    }
+
+    pub fn set_enable_key_light(&mut self, enable_key_light: bool) {
+        self.uniform.set_enable_key_light(enable_key_light);
+    }
+
+    pub fn set_enable_fill_light(&mut self, enable_fill_light: bool) {
+        self.uniform.set_enable_fill_light(enable_fill_light);
+    }
+
+    pub fn set_enable_specular(&mut self, enable_specular: bool) {
+        self.uniform.set_enable_specular(enable_specular);
+    }
+
+    pub fn set_enable_ao(&mut self, enable_ao: bool) {
+        self.uniform.set_enable_ao(enable_ao);
+    }
+
+    pub fn set_enable_rim(&mut self, enable_rim: bool) {
+        self.uniform.set_enable_rim(enable_rim);
+    }
+    
     // Obtain an enumerated list/mapping of color palettes
     pub fn get_palette_list(&self) -> Vec<(String, String)> {
         let mut palette_list = Vec::new();
@@ -594,7 +647,79 @@ impl Scene {
         self.color_palettes.get_mut(key).unwrap().gamma = gamma;
         self.uniform.palette_gamma = gamma;
     }
+
+    pub fn set_distance_multiplier(&mut self, distance_multiplier: f32) {
+        self.uniform.distance_multiplier = distance_multiplier;
+    }
+
+    pub fn set_glow_intensity(&mut self, glow_intensity: f32) {
+        self.uniform.glow_intensity = glow_intensity;
+    }
+
+    pub fn set_neighbor_scale(&mut self, neighbor_scale: f32) {
+        self.uniform.neighbor_scale_multiplier = neighbor_scale;
+    }
+
+    pub fn set_ambient_intensity(&mut self, ambient_intensity: f32) {
+        self.uniform.ambient_intensity = ambient_intensity;
+    }
+
+    pub fn set_key_light_intensity(&mut self, key_light_intensity: f32) {
+        self.uniform.key_light_intensity = key_light_intensity;
+    }
+
+    pub fn set_key_light_azimuth(&mut self, key_light_azimuth: f32) {
+        self.uniform.key_light_azimuth = key_light_azimuth;
+    }
+
+    pub fn set_key_light_elevation(&mut self, key_light_elevation: f32) {
+        self.uniform.key_light_elevation = key_light_elevation;
+    }
+
+    pub fn set_fill_light_intensity(&mut self, fill_light_intensity: f32) {
+        self.uniform.fill_light_intensity = fill_light_intensity;
+    }
+
+    pub fn set_fill_light_azimuth(&mut self, fill_light_azimuth: f32) {
+        self.uniform.fill_light_azimuth = fill_light_azimuth;
+    }
+
+    pub fn set_fill_light_elevation(&mut self, fill_light_elevation: f32) {
+        self.uniform.fill_light_elevation = fill_light_elevation;
+    }
+
+    pub fn set_specular_intensity(&mut self, specular_intensity: f32) {
+        self.uniform.specular_intensity = specular_intensity;
+    }
+
+    pub fn set_specular_power(&mut self, specular_power: f32) {
+        self.uniform.specular_power = specular_power;
+    }
+
+    pub fn set_ao_darkness(&mut self, ao_darkness: f32) {
+        self.uniform.ao_darkness = ao_darkness;
+    }
+
+    pub fn set_stripe_density(&mut self, stripe_density: f32) {
+        self.uniform.stripe_density = stripe_density;
+    }
+
+    pub fn set_stripe_strength(&mut self, stripe_strength: f32) {
+        self.uniform.stripe_strength = stripe_strength;
+    }
+
+    pub fn set_stripe_gamma(&mut self, stripe_gamma: f32) {
+        self.uniform.stripe_gamma = stripe_gamma;
+    }
     
+    pub fn set_rim_intensity(&mut self, rim_intensity: f32) {
+        self.uniform.rim_intensity = rim_intensity;
+    }
+    
+    pub fn set_rim_power(&mut self, rim_power: f32) {
+        self.uniform.rim_power = rim_power;
+    }
+
     pub fn stamp_frame(&mut self) {
         self.frame_id += 1;
         self.frame_timestamp = time::Instant::now();

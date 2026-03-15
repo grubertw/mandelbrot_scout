@@ -19,6 +19,24 @@ pub struct SceneUniform {
     pub palette_offset:     f32,
     pub palette_gamma:      f32,
     pub render_flags:       u32,
+    pub distance_multiplier: f32,
+    pub glow_intensity:     f32,
+    pub neighbor_scale_multiplier: f32,
+    pub ambient_intensity: f32,
+    pub key_light_intensity: f32,
+    pub key_light_azimuth: f32,
+    pub key_light_elevation: f32,
+    pub fill_light_intensity: f32,
+    pub fill_light_azimuth: f32,
+    pub fill_light_elevation: f32,
+    pub specular_intensity: f32,
+    pub specular_power: f32,
+    pub ao_darkness: f32,
+    pub stripe_density: f32,
+    pub stripe_strength: f32,
+    pub stripe_gamma: f32,
+    pub rim_intensity: f32,
+    pub rim_power: f32,
 }
 
 impl SceneUniform {
@@ -28,6 +46,42 @@ impl SceneUniform {
 
     pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
         if glitch_fix { self.render_flags |= 1 << 1; } else { self.render_flags &= !(1 << 1) }
+    }
+    
+    pub fn set_smooth_coloring(&mut self, smooth_coloring: bool) {
+        if smooth_coloring { self.render_flags |= 1 << 2; } else { self.render_flags &= !(1 << 2) }
+    }
+    
+    pub fn set_use_de(&mut self, use_de: bool) {
+        if use_de { self.render_flags |= 1 << 3; } else { self.render_flags &= !(1 << 3) }
+    }
+    
+    pub fn set_use_stripes(&mut self, use_stripes: bool) {
+        if use_stripes { self.render_flags |= 1 << 4; } else { self.render_flags &= !(1 << 4) }
+    }
+    
+    pub fn set_enable_glow(&mut self, enable_glow: bool) {
+        if enable_glow { self.render_flags |= 1 << 5; } else { self.render_flags &= !(1 << 5) }
+    }
+    
+    pub fn set_enable_key_light(&mut self, enable_key_light: bool) {
+        if enable_key_light { self.render_flags |= 1 << 6; } else { self.render_flags &= !(1 << 6) }
+    }
+    
+    pub fn set_enable_fill_light(&mut self, enable_fill_light: bool) {
+        if enable_fill_light { self.render_flags |= 1 << 7; } else { self.render_flags &= !(1 << 7) }
+    }
+    
+    pub fn set_enable_specular(&mut self, enable_specular: bool) {
+        if enable_specular { self.render_flags |= 1 << 8; } else { self.render_flags &= !(1 << 8) }
+    }
+    
+    pub fn set_enable_ao(&mut self, enable_ao: bool) {
+        if enable_ao { self.render_flags |= 1 << 9; } else { self.render_flags &= !(1 << 9) }
+    }
+    
+    pub fn set_enable_rim(&mut self, enable_rim: bool) {
+        if enable_rim { self.render_flags |= 1 << 10; } else { self.render_flags &= !(1 << 10) }
     }
 }
 
@@ -94,6 +148,8 @@ pub struct DebugOut {
     pub center_y_lo:        f32,
     pub max_iters:          u32,
     pub iter:               u32,
+    pub nu_iter:            f32,
+    pub distance:           f32,
     pub t:                  f32,
 }
 

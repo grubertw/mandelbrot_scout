@@ -36,6 +36,33 @@ pub struct Settings {
     pub screen_grid_size: u32,
     pub max_palette_colors: u32,
     
+    // Color scene uniform settings
+    pub distance_multiplier: f32,
+    pub distance_multiplier_range: (f32, f32),
+    pub glow_intensity:     f32,
+    pub neighbor_scale_multiplier: f32,
+    pub neighbor_scale_range: (f32, f32),
+    pub ambient_intensity: f32,
+    pub key_light_intensity: f32,
+    pub key_light_azimuth: f32,
+    pub key_light_elevation: f32,
+    pub fill_light_intensity: f32,
+    pub fill_light_azimuth: f32,
+    pub fill_light_elevation: f32,
+    pub specular_intensity: f32,
+    pub specular_power: f32,
+    pub specular_power_range: (f32, f32),
+    pub ao_darkness: f32,
+    pub stripe_density: f32,
+    pub stripe_density_range: (f32, f32),
+    pub stripe_strength: f32,
+    pub stripe_strength_range: (f32, f32),
+    pub stripe_gamma: f32,
+    pub stripe_gamma_range: (f32, f32),
+    pub rim_intensity: f32,
+    pub rim_power: f32,
+    pub rim_power_range: (f32, f32),
+    
     pub palettes: Map<String, Palette>,
 }
 
