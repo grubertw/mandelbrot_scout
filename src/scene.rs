@@ -59,6 +59,7 @@ pub struct Scene {
     selected_palette: String,
     palette_changed: bool,
     color_palettes: HashMap<String, ColorPalette>,
+    redraw: bool,
 }
 
 impl Scene {
@@ -149,11 +150,17 @@ impl Scene {
             loaded_orbits: Vec::new(),
             uniform, pipeline,
             selected_palette: "default".to_string(),
-            palette_changed: true, color_palettes
+            palette_changed: true, color_palettes, redraw: true,
         }
     }
 
-    pub fn draw<'a>(&'a self, device: &wgpu::Device, queue: &wgpu::Queue, target: &'a wgpu::TextureView) {
+    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::TextureView) {
+        // Gate draw/render based on state change
+        // This allows the render loop to update GUI controls properly,
+        // without the heavy cost of re-running the mandelbrot computation in the fragment
+        // shader - which would happen any time mouse interaction was detected.
+        if !self.redraw { return; } self.redraw = false;
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
@@ -197,6 +204,8 @@ impl Scene {
             queue.write_buffer(&self.pipeline.uniform_buff, 0, bytemuck::cast_slice(&[self.uniform]));
             // So must orbit locations, if any exist
             self.upload_orbit_locations(queue);
+            // Upload color palette texture, if changed.
+            self.upload_color_palette(queue);
 
             render_pass.set_pipeline(&self.pipeline.render_pipeline);
             render_pass.set_bind_group(0, &self.pipeline.scene_bg, &[]);
@@ -219,8 +228,12 @@ impl Scene {
 
             cpass.dispatch_workgroups(gx, gy, 1);
         }
-
         queue.submit(Some(encoder.finish()));
+
+        self.stamp_frame();
+        self.read_debug(&device, &queue);
+        self.read_grid_feedback(&device, &queue);
+        self.read_orbit_feedback(device, &queue);
     }
 
     pub fn read_grid_feedback(
@@ -489,6 +502,7 @@ impl Scene {
 
     pub fn set_max_iterations(&mut self, max_iterations: u32) {
         self.uniform.max_iter = max_iterations;
+        self.redraw = true;
         self.scout_engine.set_max_user_iterations(max_iterations)
     }
 
@@ -498,13 +512,13 @@ impl Scene {
         self.uniform.screen_width = width as u32;
         self.uniform.screen_height = height as u32;
         self.uniform.grid_width = width as u32 / self.uniform.grid_size;
-
+        self.redraw = true;
         debug!("Window size changed w={} h={}", width, height);
     }
 
     pub fn set_scale(&mut self, scale: Float) {
         self.scale = scale;
-
+        self.redraw = true;
         let scale_df = Df::from_float(&self.scale);
         self.uniform.scale_hi = scale_df.hi;
         self.uniform.scale_lo = scale_df.lo;
@@ -520,7 +534,7 @@ impl Scene {
         let scale_df = Df::from_float(&self.scale);
         self.uniform.scale_hi = scale_df.hi;
         self.uniform.scale_lo = scale_df.lo;
-        
+        self.redraw = true;
         let s = self.scale.to_string_radix(10, None);
         debug!("Scale changed {}", s);
         s
@@ -548,7 +562,7 @@ impl Scene {
 
     pub fn set_center(&mut self, new_center: Complex) {
         self.center = new_center;
-
+        self.redraw = true;
         self.update_center_offsets();
     }
 
@@ -561,7 +575,7 @@ impl Scene {
         *imag += &dy;
 
         self.update_center_offsets();
-
+        self.redraw = true;
         let c = self.center.to_string_radix(10, None);
         debug!("Center changed {:?} ----- diff ({:?} {:?})", 
             c, dx, dy);
@@ -571,46 +585,57 @@ impl Scene {
     
     pub fn set_debug_coloring(&mut self, debug_coloring: bool) {
         self.uniform.set_debug_coloring(debug_coloring);
+        self.redraw = true;
     }
     
     pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
         self.uniform.set_glitch_fix(glitch_fix);
+        self.redraw = true;
     }
     
     pub fn set_smooth_coloring(&mut self, smooth_coloring: bool) {
         self.uniform.set_smooth_coloring(smooth_coloring);
+        self.redraw = true;
     }
 
     pub fn set_use_de(&mut self, use_de: bool) {
         self.uniform.set_use_de(use_de);
+        self.redraw = true;
     }
 
     pub fn set_use_stripes(&mut self, use_stripes: bool) {
         self.uniform.set_use_stripes(use_stripes);
+        self.redraw = true;
     }
 
     pub fn set_enable_glow(&mut self, enable_glow: bool) {
         self.uniform.set_enable_glow(enable_glow);
+        self.redraw = true;
     }
 
     pub fn set_enable_key_light(&mut self, enable_key_light: bool) {
         self.uniform.set_enable_key_light(enable_key_light);
+        self.redraw = true;
     }
 
     pub fn set_enable_fill_light(&mut self, enable_fill_light: bool) {
         self.uniform.set_enable_fill_light(enable_fill_light);
+        self.redraw = true;
     }
 
     pub fn set_enable_specular(&mut self, enable_specular: bool) {
         self.uniform.set_enable_specular(enable_specular);
+        self.redraw = true;
     }
 
     pub fn set_enable_ao(&mut self, enable_ao: bool) {
         self.uniform.set_enable_ao(enable_ao);
+        self.redraw = true;
     }
 
     pub fn set_enable_rim(&mut self, enable_rim: bool) {
         self.uniform.set_enable_rim(enable_rim);
+        self.redraw = true;
     }
     
     // Obtain an enumerated list/mapping of color palettes
@@ -631,93 +656,115 @@ impl Scene {
     pub fn set_selected_palette(&mut self, key: &String) {
         self.selected_palette = key.clone();
         self.palette_changed = true;
+        self.redraw = true;
     }
 
     pub fn set_palette_frequency(&mut self, key: &String, frequency: f32) {
         self.color_palettes.get_mut(key).unwrap().frequency = frequency;
         self.uniform.palette_frequency = frequency;
+        self.redraw = true;
     }
     
     pub fn set_palette_offset(&mut self, key: &String, offset: f32) {
         self.color_palettes.get_mut(key).unwrap().offset = offset;
         self.uniform.palette_offset = offset;
+        self.redraw = true;
     }
     
     pub fn set_palette_gamma(&mut self, key: &String, gamma: f32) {
         self.color_palettes.get_mut(key).unwrap().gamma = gamma;
         self.uniform.palette_gamma = gamma;
+        self.redraw = true;
     }
 
     pub fn set_distance_multiplier(&mut self, distance_multiplier: f32) {
         self.uniform.distance_multiplier = distance_multiplier;
+        self.redraw = true;
     }
 
     pub fn set_glow_intensity(&mut self, glow_intensity: f32) {
         self.uniform.glow_intensity = glow_intensity;
+        self.redraw = true;
     }
 
     pub fn set_neighbor_scale(&mut self, neighbor_scale: f32) {
         self.uniform.neighbor_scale_multiplier = neighbor_scale;
+        self.redraw = true;
     }
 
     pub fn set_ambient_intensity(&mut self, ambient_intensity: f32) {
         self.uniform.ambient_intensity = ambient_intensity;
+        self.redraw = true;
     }
 
     pub fn set_key_light_intensity(&mut self, key_light_intensity: f32) {
         self.uniform.key_light_intensity = key_light_intensity;
+        self.redraw = true;
     }
 
     pub fn set_key_light_azimuth(&mut self, key_light_azimuth: f32) {
         self.uniform.key_light_azimuth = key_light_azimuth;
+        self.redraw = true;
     }
 
     pub fn set_key_light_elevation(&mut self, key_light_elevation: f32) {
         self.uniform.key_light_elevation = key_light_elevation;
+        self.redraw = true;
     }
 
     pub fn set_fill_light_intensity(&mut self, fill_light_intensity: f32) {
         self.uniform.fill_light_intensity = fill_light_intensity;
+        self.redraw = true;
     }
 
     pub fn set_fill_light_azimuth(&mut self, fill_light_azimuth: f32) {
         self.uniform.fill_light_azimuth = fill_light_azimuth;
+        self.redraw = true;
     }
 
     pub fn set_fill_light_elevation(&mut self, fill_light_elevation: f32) {
         self.uniform.fill_light_elevation = fill_light_elevation;
+        self.redraw = true;
     }
 
     pub fn set_specular_intensity(&mut self, specular_intensity: f32) {
         self.uniform.specular_intensity = specular_intensity;
+        self.redraw = true;
     }
 
     pub fn set_specular_power(&mut self, specular_power: f32) {
         self.uniform.specular_power = specular_power;
+        self.redraw = true;
     }
 
     pub fn set_ao_darkness(&mut self, ao_darkness: f32) {
         self.uniform.ao_darkness = ao_darkness;
+        self.redraw = true;
     }
 
     pub fn set_stripe_density(&mut self, stripe_density: f32) {
         self.uniform.stripe_density = stripe_density;
+        self.redraw = true;
     }
 
     pub fn set_stripe_strength(&mut self, stripe_strength: f32) {
         self.uniform.stripe_strength = stripe_strength;
+        self.redraw = true;
     }
 
     pub fn set_stripe_gamma(&mut self, stripe_gamma: f32) {
         self.uniform.stripe_gamma = stripe_gamma;
+        self.redraw = true;
     }
     
     pub fn set_rim_intensity(&mut self, rim_intensity: f32) {
         self.uniform.rim_intensity = rim_intensity;
+        self.redraw = true;
     }
     
     pub fn set_rim_power(&mut self, rim_power: f32) {
         self.uniform.rim_power = rim_power;
+        self.redraw = true;
     }
 
     pub fn stamp_frame(&mut self) {

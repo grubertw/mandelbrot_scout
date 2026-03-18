@@ -1,5 +1,5 @@
 @group(0) @binding(0)
-var flags_tex : texture_storage_2d<r32uint, write>;
+var mandel_out_tex : texture_storage_2d<rgba32float, write>;
 
 // Aggregated screen-grid output (atomics)
 struct GridFeedback {
@@ -30,7 +30,7 @@ fn cs_main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let y = i32(gid.y);
 
     // Clear per-pixel textures
-    textureStore(flags_tex, vec2<i32>(x, y), vec4<u32>(0u, 0u, 0u, 0u));
+    textureStore(mandel_out_tex, vec2<i32>(x, y), vec4<f32>(0u, 0u, 0u, 0u));
 
     // Clear feedback (1D mapping)
     let grid_idx = gid.y * 65536u + gid.x;

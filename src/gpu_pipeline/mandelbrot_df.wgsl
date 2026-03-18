@@ -193,7 +193,7 @@ fn build_c_from_scene(pix: vec2<i32>) -> ComplexDf {
 // Mandelbrot iteration using DF arithmetic.
 // Returns iteration count (u32).
 // -------------------------------
-fn mandelbrot(c: ComplexDf) -> vec4<f32> {
+fn mandelbrot(c: ComplexDf) -> vec3<f32> {
     var z = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));
 
     var i: u32 = 0u;
@@ -219,25 +219,29 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
         // imag = 2*zx*zy + c.i  -> 2*zxy + c.i
         let imag_part = df_add(df_add(zxy, zxy), c.i);
 
-        // Derivitive tracking for DE
-        let zr = z.r.hi;
-        let zi = z.i.hi;
-        let dz_new = vec2<f32>(
-            2.0 * (zr * dz.x - zi * dz.y) + 1.0,
-            2.0 * (zr * dz.y + zi * dz.x)
-        );
-        dz = dz_new;
+        if ((uni.render_flags & USE_DE) != 0) {
+            // Derivitive tracking for DE
+            let zr = z.r.hi;
+            let zi = z.i.hi;
+            let dz_new = vec2<f32>(
+                2.0 * (zr * dz.x - zi * dz.y) + 1.0,
+                2.0 * (zr * dz.y + zi * dz.x)
+            );
+            dz = dz_new;
+        }
 
         // update z
         z.r = real_part;
         z.i = imag_part;
 
-        // for stripe-averaging
-        let angle = atan2(z.i.hi, z.r.hi);
-        var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
-        stripe = pow(stripe, uni.stripe_gamma);
-        stripe_sum += stripe;
-        stripe_count += 1.0;
+        if ((uni.render_flags & USE_STRIPES) != 0) {
+            // for stripe-averaging
+            let angle = atan2(z.i.hi, z.r.hi);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
+            stripe = pow(stripe, uni.stripe_gamma);
+            stripe_sum += stripe;
+            stripe_count += 1.0;
+        }
 
         // Bailout
         mag2 = cdf_mag2(z);
@@ -255,17 +259,25 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
         }
     }
 
+    var fi = f32(i - extra);
+    // Replace with smooth iters if enabled
+    if ((uni.render_flags & SMOOTH_COLORING) != 0) {
+        let safe_mag2 = max(escape_mag2, 1e-30);
+        fi = clamp(fi + 1.0 - log2(log(safe_mag2) * 0.5), 0.0, f32(max_i));
+    }
     // Finalize DE
-    let r = sqrt(mag2);
-    let dr = max(length(dz), 1e-30);
-    let distance = 0.5 * r * log(r) / dr;
-    // For smooth iterations
-    let fi = f32(i - extra);
-    let safe_mag2 = max(escape_mag2, 1e-30);
-    let nu = clamp(fi + 1.0 - log2(log(safe_mag2) * 0.5), 0.0, f32(max_i));
+    var distance: f32 = 0.0;
+    if ((uni.render_flags & USE_DE) != 0) {
+        let r = sqrt(mag2);
+        let dr = max(length(dz), 1e-30);
+        distance = 0.5 * r * log(r) / dr;
+    }
     // final stripe average
-    let stripe_avg = stripe_sum / stripe_count;
-    return vec4<f32>(fi, nu, distance, stripe_avg);
+    var stripe_avg: f32 = 0.0;
+    if ((uni.render_flags & USE_STRIPES) != 0) {
+        stripe_avg = stripe_sum / stripe_count;
+    }
+    return vec3<f32>(fi, distance, stripe_avg);
 }
 
 // Pertubation feedback into the reduce (compute) shader
@@ -376,7 +388,7 @@ fn record_pix_feedback(pix: vec2<i32>, orbit_idx: u32, it: u32) {
 // Mandelbrot Perturbance 
 //
 // -------------------------------
-fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
+fn mandelbrot_perturb(delta_c: ComplexDf) -> vec3<f32> {
     var dz = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));
     var i: u32 = 0u;
     let max_i = uni.max_iter;
@@ -408,24 +420,28 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
             delta_c
         );
 
-        // Derivitive tracking of 'reconstructed z'm for DE
-        let zr = z.r.hi;
-        let zi = z.i.hi;
-        let dz_new = vec2<f32>(
-            2.0 * (zr * dzdc.x - zi * dzdc.y) + 1.0,
-            2.0 * (zr * dzdc.y + zi * dzdc.x)
-        );
-        dzdc = dz_new;
+        if ((uni.render_flags & USE_DE) != 0) {
+            // Derivitive tracking of 'reconstructed z'm for DE
+            let zr = z.r.hi;
+            let zi = z.i.hi;
+            let dz_new = vec2<f32>(
+                2.0 * (zr * dzdc.x - zi * dzdc.y) + 1.0,
+                2.0 * (zr * dzdc.y + zi * dzdc.x)
+            );
+            dzdc = dz_new;
+        }
 
         // Absolute z for escape testing
         z = cdf_add(Z, dz);
 
-        // for stripe-averaging
-        let angle = atan2(zi, zr);
-        var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
-        stripe = pow(stripe, uni.stripe_gamma);
-        stripe_sum += stripe;
-        stripe_count += 1.0;
+        if ((uni.render_flags & USE_STRIPES) != 0) {
+            // for stripe-averaging
+            let angle = atan2(zi, zr);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
+            stripe = pow(stripe, uni.stripe_gamma);
+            stripe_sum += stripe;
+            stripe_count += 1.0;
+        }
 
         // Standard bailout
         mag2 = cdf_mag2(z);
@@ -443,17 +459,26 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
         }
     }
 
-    // Finalize DE calculation
-    let r = sqrt(mag2);
-    var dr = sqrt(length(dzdc));
-    var distance = 0.5 * r * log(r) / dr;
+    var fi = f32(i - extra);
     // For smooth iterations
-    let fi = f32(i - extra);
-    let safe_mag2 = max(escape_mag2, 1e-30);
-    let nu = clamp(fi + 1.0 - log2(log(safe_mag2) * 0.5), 0.0, f32(max_i));
+    if ((uni.render_flags & SMOOTH_COLORING) != 0) {
+        let safe_mag2 = max(escape_mag2, 1e-30);
+        fi = clamp(fi + 1.0 - log2(log(safe_mag2) * 0.5), 0.0, f32(max_i));
+    }
+    // Finalize DE calculation
+    var distance: f32 = 0.0;
+    if ((uni.render_flags & USE_DE) != 0) {
+        let r = sqrt(mag2);
+        var dr = sqrt(length(dzdc));
+        distance = 0.5 * r * log(r) / dr;
+    }
+
     // final stripe average
-    let stripe_avg = stripe_sum / stripe_count;
-    return vec4<f32>(fi, nu, distance, stripe_avg);
+    var stripe_avg: f32 = 0.0;
+    if ((uni.render_flags & USE_STRIPES) != 0) {
+        stripe_avg = stripe_sum / stripe_count;
+    }
+    return vec3<f32>(fi, distance, stripe_avg);
 }
 
 //

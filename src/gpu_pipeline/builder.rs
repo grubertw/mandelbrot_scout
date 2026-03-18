@@ -37,7 +37,7 @@ impl PipelineBundle {
         texture_format: wgpu::TextureFormat,
         settings: &Settings
     ) -> Self {
-        let (flags_tex, grid_feedback_buffer, orbit_feedback_buffer) =
+        let (mandel_out_tex, grid_feedback_buffer, orbit_feedback_buffer) =
             create_shared_buffers(device, settings);
 
         //
@@ -49,7 +49,7 @@ impl PipelineBundle {
         //
         let (
             clear_bg, clear_pipeline
-        ) = build_clear_pipeline(device, &flags_tex, &grid_feedback_buffer, &orbit_feedback_buffer);
+        ) = build_clear_pipeline(device, &mandel_out_tex, &grid_feedback_buffer, &orbit_feedback_buffer);
 
         let (
             uniform_buff,
@@ -58,13 +58,13 @@ impl PipelineBundle {
             debug_buffer, debug_readback,
             scene_bg, ref_orbit_bg, palette_bg, debug_bg,
             render_pipeline
-        ) = build_render_pipeline(device, uniform, texture_format, &flags_tex, settings);
+        ) = build_shader_calc_pipeline(device, uniform, texture_format, &mandel_out_tex, &settings);
 
         let (
             grid_feedback_readback, orbit_feedback_readback,
             reduce_bg, reduce_pipeline
-        ) = build_reduce_pipeline(device, &uniform_buff, &flags_tex,
-                  &grid_feedback_buffer, &orbit_feedback_buffer, settings);
+        ) = build_reduce_pipeline(device, &uniform_buff, &mandel_out_tex,
+                  &grid_feedback_buffer, &orbit_feedback_buffer, &settings);
 
         Self {
             uniform_buff,
@@ -87,8 +87,8 @@ impl PipelineBundle {
 fn create_shared_buffers(device: &wgpu::Device, settings: &Settings) 
 -> (wgpu::Texture, wgpu::Buffer, wgpu::Buffer) {
     // --- Per-pixel feedback textures ---
-    let flags_tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("flags_tex"),
+    let mandel_out_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mandel_out_tex"),
         size: wgpu::Extent3d {
             width: settings.max_screen_width,
             height: settings.max_screen_height,
@@ -97,7 +97,7 @@ fn create_shared_buffers(device: &wgpu::Device, settings: &Settings)
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R32Uint,
+        format: wgpu::TextureFormat::Rgba32Float,
         usage: wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
@@ -120,7 +120,7 @@ fn create_shared_buffers(device: &wgpu::Device, settings: &Settings)
         mapped_at_creation: false,
     });
 
-    (flags_tex, grid_feedback_buffer, orbit_feedback_buffer)
+    (mandel_out_tex, grid_feedback_buffer, orbit_feedback_buffer)
 }
 
 //
@@ -128,7 +128,7 @@ fn create_shared_buffers(device: &wgpu::Device, settings: &Settings)
 //
 fn build_clear_pipeline(
     device: &wgpu::Device,
-    flags_tex: &wgpu::Texture,
+    mandel_out_tex: &wgpu::Texture,
     grid_feedback_buffer: &wgpu::Buffer,
     orbit_feedback_buffer: &wgpu::Buffer,
 ) -> (wgpu::BindGroup, wgpu::ComputePipeline) {
@@ -138,13 +138,13 @@ fn build_clear_pipeline(
     let clear_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("clear_bgl"),
         entries: &[
-            // flags_tex
+            // mandel_out_tex
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::StorageTexture {
                     access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::R32Uint,
+                    format: wgpu::TextureFormat::R32Float,
                     view_dimension: wgpu::TextureViewDimension::D2,
                 },
                 count: None,
@@ -160,7 +160,7 @@ fn build_clear_pipeline(
                 },
                 count: None,
             },
-            // tile feedback
+            // orbit feedback
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
                 visibility: wgpu::ShaderStages::COMPUTE,
@@ -181,7 +181,7 @@ fn build_clear_pipeline(
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: wgpu::BindingResource::TextureView(
-                    &flags_tex.create_view(&Default::default())
+                    &mandel_out_tex.create_view(&Default::default())
                 ),
             },
             wgpu::BindGroupEntry {
@@ -218,11 +218,11 @@ fn build_clear_pipeline(
 //
 // Pipeline 2 Bind Group Layout & Pipeline (render/frag,vert)
 //
-fn build_render_pipeline(
-    device: &wgpu::Device, 
-    uniform: &SceneUniform, 
+fn build_shader_calc_pipeline(
+    device: &wgpu::Device,
+    uniform: &SceneUniform,
     texture_format: wgpu::TextureFormat,
-    flags_tex: &wgpu::Texture,
+    mandel_out_tex: &wgpu::Texture,
     settings: &Settings
 ) -> (
     wgpu::Buffer,
@@ -233,7 +233,7 @@ fn build_render_pipeline(
     wgpu::RenderPipeline
 ) {
     // Shader for the Render (vertex + fragment) pipeline
-    let frag_shader = device.create_shader_module(wgpu::include_wgsl!("mandelbrot.wgsl"));
+    let frag_shader = device.create_shader_module(wgpu::include_wgsl!("mandelbrot_df.wgsl"));
 
     let uniform_buff = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,
@@ -423,13 +423,13 @@ fn build_render_pipeline(
     });
 
     let ref_orbit_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("pipeline2_ref_orbit_bg"),
+        label: Some("ref_orbit_bg"),
         layout: &ref_orbit_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: wgpu::BindingResource::TextureView(
-                    &flags_tex.create_view(&Default::default())
+                    &mandel_out_tex.create_view(&Default::default())
                 ),
             },
             wgpu::BindGroupEntry {
@@ -486,8 +486,8 @@ fn build_render_pipeline(
         ],
     });
 
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Render Pipeline"),
+    let shader_calc_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Shader Calc Pipeline"),
         layout: Some(&render_pipeline_layout),
         vertex: wgpu::VertexState {
             module: &frag_shader,
@@ -518,7 +518,7 @@ fn build_render_pipeline(
         palette_texture,
         debug_buffer, debug_readback,
         scene_bg, ref_orbit_bg, palette_bg, debug_bg,
-        render_pipeline
+        shader_calc_pipeline
     )
 }
 //
@@ -527,7 +527,7 @@ fn build_render_pipeline(
 fn build_reduce_pipeline(
     device: &wgpu::Device,
     uniform_buff: &wgpu::Buffer,
-    flags_tex: &wgpu::Texture,
+    mandel_out_tex: &wgpu::Texture,
     grid_feedback_buffer: &wgpu::Buffer,
     orbit_feedback_buffer: &wgpu::Buffer,
     settings: &Settings
@@ -587,7 +587,7 @@ fn build_reduce_pipeline(
                     },
                     count: None,
                 },
-                // tile feedback buffer
+                // orbit feedback buffer
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -613,7 +613,7 @@ fn build_reduce_pipeline(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(
-                    &flags_tex.create_view(&Default::default())
+                    &mandel_out_tex.create_view(&Default::default())
                 ),
             },
             wgpu::BindGroupEntry {

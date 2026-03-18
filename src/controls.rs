@@ -487,8 +487,6 @@ impl Controls {
     }
 
     pub fn view(&self) -> Element<'_, Message, Theme, Renderer> {
-        trace!("View");
-
         let dbg_row = row![
             text(&self.debug_msg).color(Color::WHITE)
             .wrapping(Wrapping::Word)

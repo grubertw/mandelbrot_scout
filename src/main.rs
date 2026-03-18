@@ -238,16 +238,8 @@ impl ApplicationHandler for Runner {
                                 scout_diags_g.consumed = true;
                             }
 
-                            // Upload color palette texture, if changed.
-                            s.upload_color_palette(queue);
-
                             // Draw the scene (contains both fragment render and compute passes)
                             s.draw(&device, &queue, &view);
-
-                            s.stamp_frame();
-                            s.read_debug(&device, &queue);
-                            s.read_grid_feedback(&device, &queue);
-                            s.read_orbit_feedback(&device, &queue);
                         }
 
                         // Draw Iced on top
