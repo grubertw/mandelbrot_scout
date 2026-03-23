@@ -221,9 +221,10 @@ async fn evaluate_orbits(
     context.write_diagnostics(
         format!("Scout evaluated {} grid samples and spawned {} orbits. {} interior samples found!\n\
         \tBest Sample Info: iters_reached={} escaped={}\n\
-        \tBest Qualified Ref Orbit Info:\n\t\tref_len={}\n\t\tescape_index={}\n\t\tcontraction={:.5e}",
+        \tBest Qualified Ref Orbit Info:\n\t\tprec={:<3} ref_len={}\n\t\tescape_index={}\n\t\tcontraction={:.5e}",
                 grid_samples.len(), num_seeds, num_interior_seeds,
                 best_sample_iters_reached, best_sample_escaped,
+                current_camera.scale().prec(),
                 best_orbit_len,
                 best_oribt_escape_index.map_or(String::from("None"), |v| v.to_string()),
                 best_orbit_contraction

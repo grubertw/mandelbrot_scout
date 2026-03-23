@@ -1,11 +1,11 @@
 use crate::gpu_pipeline::structs::{OrbitFeedbackOut};
-use crate::numerics::{ComplexDf, Df};
 use crate::scout_engine::orbit::OrbitId;
 
 use std::hash::{Hash, Hasher};
 use std::time;
 
 use rug::{Float, Complex};
+use num_complex::Complex32;
 
 ///////////////////////////////////////////////////////////
 // Consumed by Scout Engine
@@ -90,11 +90,11 @@ pub struct QualifiedOrbit {
     pub rank: u32,
     pub orbit_id: OrbitId,
     pub c_ref: Complex,
-    pub c_ref_df: ComplexDf,
-    pub orbit: Vec<ComplexDf>,
+    pub c_ref_32: Complex32,
+    pub orbit: Vec<Complex32>,
     pub escape_index: Option<u32>,
-    pub r_valid: Df,
-    pub contraction: Df,
+    pub r_valid: f32,
+    pub contraction: f32,
     pub created_at: FrameStamp,
 }
 

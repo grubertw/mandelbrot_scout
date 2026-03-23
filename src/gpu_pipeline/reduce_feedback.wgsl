@@ -3,12 +3,9 @@
 // Bind Group 0: Reduction inputs + outputs
 // ---------------------------------------------
 struct Uniforms {
-    center_x_hi:        f32,
-    center_x_lo:        f32,
-    center_y_hi:        f32,
-    center_y_lo:        f32,
-    scale_hi:           f32,
-    scale_lo:           f32,
+    center_x:           f32,
+    center_y:           f32,
+    scale:              f32,
     max_iter:           u32,
     ref_orb_count:      u32,
     screen_width:       u32,
@@ -20,7 +17,7 @@ struct Uniforms {
 
 // Per-pixel inputs (read-only)
 @group(0) @binding(1)
-var flags_tex : texture_2d<u32>;
+var calc_tex : texture_2d<f32>;
 
 // Aggregated screen-grid output (atomics)
 struct GridFeedback {
@@ -33,41 +30,42 @@ struct GridFeedback {
 var<storage, read_write> grid_feedback : array<GridFeedback>;
 
 struct OrbitFeedback {
-    min_iter_count:         atomic<u32>,
-    max_iter_count:         atomic<u32>,
-    escaped_count:          atomic<u32>,
-    perurb_error_count:     atomic<u32>,
-    max_iter_reached_count: atomic<u32>,
+    min_iter_count:             atomic<u32>,
+    max_iter_count:             atomic<u32>,
+    escaped_count:              atomic<u32>,
+    perurb_error_inner_count:   atomic<u32>,
+    perurb_error_outer_count:   atomic<u32>,
+    max_iter_reached_count:     atomic<u32>,
 };
 @group(0) @binding(3)
 var<storage, read_write> orbit_feedback : array<OrbitFeedback>;
 
-const ITER_MASK: u32        = 0x0000FFFFu;
-const ESCAPED_BIT: u32      = 1u << 16u;
-const PERTURB_BIT: u32      = 1u << 17u;
-const PERTURB_ERR_BIT: u32  = 1u << 18u;
-const MAX_ITER_BIT: u32     = 1u << 19u;
-const ORBIT_SHIFT: u32      = 20u;
+const ESCAPED_BIT: u32              = 1u << 0u;
+const PERTURB_BIT: u32              = 1u << 1u;
+const PERTURB_ERR_INNER_BIT: u32    = 1u << 2u;
+const PERTURB_ERR_OUTER_BIT: u32    = 1u << 3u;
+const MAX_ITER_BIT: u32             = 1u << 4u;
+const ORBIT_SHIFT: u32              = 20u;
 
 // ---------------------------------------------
 // Compute entry point
 // ---------------------------------------------
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let pix = vec2<i32>(i32(gid.x), i32(gid.y));
+    let pix = vec2i(i32(gid.x), i32(gid.y));
 
-    // Bounds check against texture size
-    let dims = textureDimensions(flags_tex);
-    if (pix.x >= i32(dims.x) || pix.y >= i32(dims.y)) {
+    // Bounds checking based on real screen size
+    if (pix.x >= i32(uni.screen_width) || pix.y >= i32(uni.screen_height)) {
         return;
     }
 
-    let flags = textureLoad(flags_tex, pix, 0).x;
+    let flags = u32(textureLoad(calc_tex, pix, 0).w);
+    let iter = u32(floor(textureLoad(calc_tex, pix, 0).x));
 
-    let iter = flags & ITER_MASK;
     let escaped = (flags & ESCAPED_BIT) != 0u;
     let used_perturb = (flags & PERTURB_BIT) != 0u;
-    let perturb_err = (flags & PERTURB_ERR_BIT) != 0u;
+    let perturb_err_inner = (flags & PERTURB_ERR_INNER_BIT) != 0u;
+    let perturb_err_outer = (flags & PERTURB_ERR_OUTER_BIT) != 0u;
     let max_iter_reached = (flags & MAX_ITER_BIT) != 0u;
     let orbit_idx = flags >> ORBIT_SHIFT;
 
@@ -91,15 +89,18 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         atomicStore(&grid_feedback[grid_idx].best_pixel_flags, flags);
     }
 
-    if (used_perturb && orbit_idx < arrayLength(&orbit_feedback)) {
+    if (used_perturb) {
         atomicMin(&orbit_feedback[orbit_idx].min_iter_count, iter);
         atomicMax(&orbit_feedback[orbit_idx].max_iter_count, iter);
 
         if (escaped) {
             atomicAdd(&orbit_feedback[orbit_idx].escaped_count, 1u);
         }
-        if (perturb_err) {
-            atomicAdd(&orbit_feedback[orbit_idx].perurb_error_count, 1u);
+        if (perturb_err_inner) {
+            atomicAdd(&orbit_feedback[orbit_idx].perurb_error_inner_count, 1u);
+        }
+        if (perturb_err_outer) {
+            atomicAdd(&orbit_feedback[orbit_idx].perurb_error_outer_count, 1u);
         }
         if (max_iter_reached) {
             atomicAdd(&orbit_feedback[orbit_idx].max_iter_reached_count, 1u);

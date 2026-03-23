@@ -1,8 +1,13 @@
 [package]
-name = "mandelbrot"
-version = "0.3.1"
+name = "mandelbrot_scout"
+version = "0.3.2"
 authors = ["grubertw <grubertw@gmail.com>"]
+repository = "https://github.com/grubertw/mandelbrot_scout.git"
 edition = "2024"
+build = "build.rs"
+
+[build-dependencies]
+built = "0.8.0"
 
 [dependencies]
 iced_wgpu="0.14.0"
@@ -11,6 +16,7 @@ iced_widget="0.14.2"
 futures = { version = "0.3.32", features = ["thread-pool"] }
 parking_lot = {version = "0.12", features = ["hardware-lock-elision"]}
 bytemuck="1.25.0"
+num-complex = { version = "0.4.6" , features = ["bytemuck"]}
 rug="1.28.1"
 log="0.4.29"
 env_logger="0.11.8"

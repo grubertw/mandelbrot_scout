@@ -243,6 +243,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "built"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4ad8f11f288f48ca24471bbd51ac257aaeaaa07adae295591266b792902ae64"
+
+[[package]]
 name = "bumpalo"
 version = "3.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1537,10 +1543,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "mandelbrot"
-version = "0.3.1"
+name = "mandelbrot_scout"
+version = "0.3.2"
 dependencies = [
  "anstyle",
+ "built",
  "bytemuck",
  "chrono",
  "config",
@@ -1550,6 +1557,7 @@ dependencies = [
  "iced_widget",
  "iced_winit",
  "log",
+ "num-complex",
  "parking_lot",
  "rug",
  "serde",
@@ -1655,6 +1663,16 @@ checksum = "a8903e5a29a317527874d0402f867152a3d21c908bb0b933e416c65e301d4c36"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "num-complex"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
+dependencies = [
+ "bytemuck",
+ "num-traits",
 ]
 
 [[package]]

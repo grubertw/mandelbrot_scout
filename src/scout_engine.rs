@@ -19,7 +19,6 @@ use log::{trace, info};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::numerics::{Df};
 
 pub type ScoutConfig            = Arc<Mutex<ScoutEngineConfig>>;
 type CameraSnapshotSender       = channel::mpsc::Sender<CameraSnapshot>;
@@ -226,11 +225,11 @@ impl ScoutEngine {
                     rank: i as u32,
                     orbit_id: orb_g.orbit_id,
                     c_ref: orb_g.c_ref().clone(),
-                    c_ref_df: orb_g.gpu_payload.c_ref,
-                    orbit: orb_g.gpu_payload.cdf_orbit.clone(),
+                    c_ref_32: orb_g.gpu_payload.c_ref,
+                    orbit: orb_g.gpu_payload.c32_orbit.clone(),
                     escape_index: orb_g.quality_metrics.escape_index,
-                    r_valid: Df::from_float(orb_g.r_valid()),
-                    contraction: Df::from_float(orb_g.contraction()),
+                    r_valid: orb_g.r_valid().to_f32(),
+                    contraction: orb_g.contraction().to_f32(),
                     created_at: orb_g.quality_metrics.created_at,
                     }
                 })
@@ -240,11 +239,12 @@ impl ScoutEngine {
             format!("Query Living Orbit Pool for qualified orbits. Found {} total orbits, but only qualifying {}\n",
                 pool_g.len(), num_orbits_to_qualify ).as_str());
         for q_orb in &df_orbits {
-            trace_str.push_str(format!("Rank #{:<2}\torb_id={:<4}\tescape={:?} len={} contraction={:.4e}\n",
+            trace_str.push_str(format!("Rank #{:<2}\torb_id={:<4}\tescape={:?} len={} r_valid={:.3e} contraction={:.4e}\n",
                q_orb.rank, q_orb.orbit_id,
                 q_orb.escape_index,
                 q_orb.orbit.len(),
-                q_orb.contraction.hi
+                q_orb.r_valid,
+                q_orb.contraction
             ).as_str());
         }
         trace!("{}", trace_str);

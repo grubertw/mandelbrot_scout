@@ -1,6 +1,8 @@
-use std::env;
-
-use config::{Config, ConfigError, File, Map};
+use std::{env, io};
+use std::collections::HashMap;
+use config::{Config, ConfigBuilder, ConfigError, File, Map, Value};
+use config::builder::DefaultState;
+use log::{trace, warn};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -68,13 +70,113 @@ pub struct Settings {
 
 impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
-        let settings_dir_prefix =
-            env::var("SETTINGS_DIR").unwrap_or(String::from("settings"));
+        // Optional env override for config dir
+        let settings_dir = env::var("SETTINGS_DIR").unwrap_or_else(|_| String::from("settings"));
+        let primary_path = format!("{}/settings.toml", settings_dir);
+        let fallback_path = "settings.toml";
 
-        let s = Config::builder()
-            .add_source(File::with_name(format!("{}/settings.toml", settings_dir_prefix).as_str()))
-            .build()?;
-
-        s.try_deserialize()
+        // Try loading primary config first
+        match add_default_settings(Config::builder())?
+            .add_source(File::with_name(&primary_path))
+            .build()
+        {
+            Ok(config) => {
+                trace!("build config Ok, attempting to parse.");
+                config.try_deserialize()
+            },
+            Err(e) => {
+                if is_not_found(&e) {
+                    warn!("Did not find settings in SETTINGS_DIR {}, trying fallback", settings_dir);
+                    // Try fallback path
+                    match add_default_settings(Config::builder())?
+                        .add_source(File::with_name(fallback_path))
+                        .build() {
+                        Ok(c) => c.try_deserialize(),
+                        Err(e2) => {
+                            if is_not_found(&e2) {
+                                warn!("Could not find any settings.toml! Using program defaults, and a single default color palette!");
+                                return add_default_settings(Config::builder())?.build()?.try_deserialize();
+                            }
+                            Err(e2)
+                        }
+                    }
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
+}
+
+fn is_not_found(e: &ConfigError) -> bool {
+    match e {
+        ConfigError::NotFound(_) => true,
+        ConfigError::Foreign(f) => {
+            // Check the root cause downcast, or check the message
+            if let Some(io_err) = f.downcast_ref::<io::Error>() {
+                io_err.kind() == io::ErrorKind::NotFound
+            } else {
+                // Sometimes, Config wraps the io::Error further or uses Messages
+                let msg = f.to_string();
+                msg.contains("not found")
+            }
+        }
+        _ => false
+    }
+}
+
+fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBuilder<DefaultState>, ConfigError> {
+    // Provide a default color palette if settings.toml cannot be found!
+    let mut default_palette = HashMap::new();
+    default_palette.insert("name".to_string(), Value::from("Default"));
+    default_palette.insert("array".to_string(), Value::from(vec![255, 0, 0, 0, 255, 0, 0, 0, 255]));
+    default_palette.insert("frequency".to_string(), Value::from(0.03));
+    default_palette.insert("frequency_range".to_string(), Value::from(vec![0.0, 0.075]));
+    let mut palettes_map = HashMap::new();
+    palettes_map.insert("default".to_string(), Value::from(default_palette));
+
+    builder
+        .set_default("init_rug_precision", 128)?
+        .set_default("max_live_orbits", 100)?
+        .set_default("auto_start", false)?
+        .set_default("starting_scale", 1e-6)?
+        .set_default("ref_iters_multiplier", 1.25)?
+        .set_default("num_seeds_to_spawn_per_eval", 4)?
+        .set_default("num_qualified_orbits", 1)?
+        .set_default("exploration_budget", 2)?
+        .set_default("center", vec![-0.75, 0.0])?
+        .set_default("complex_span", 3.0)?
+        .set_default("max_user_iter", 500)?
+        .set_default("max_orbits_per_frame", 4)?
+        .set_default("max_ref_orbit", 65535)?
+        .set_default("max_screen_width", 3840)?
+        .set_default("max_screen_height", 2160)?
+        .set_default("screen_grid_size", 64)?
+        .set_default("max_palette_colors", 1024)?
+        .set_default("distance_multiplier", 1.0)?
+        .set_default("distance_multiplier_range", vec![0.1, 50.0])?
+        .set_default("glow_intensity", 0.3)?
+        .set_default("neighbor_scale_multiplier", 1.0)?
+        .set_default("neighbor_scale_range", vec![1.0, 10.0])?
+        .set_default("ambient_intensity", 0.75)?
+        .set_default("key_light_intensity", 0.85)?
+        .set_default("key_light_azimuth", 0.0)?
+        .set_default("key_light_elevation", 35.0)?
+        .set_default("fill_light_intensity", 0.35)?
+        .set_default("fill_light_azimuth", 180.0)?
+        .set_default("fill_light_elevation", 15.0)?
+        .set_default("specular_intensity", 0.3)?
+        .set_default("specular_power", 12.0)?
+        .set_default("specular_power_range", vec![0.8, 128.0])?
+        .set_default("ao_darkness", 0.3)?
+        .set_default("stripe_density", 12.0)?
+        .set_default("stripe_density_range", vec![0.1, 32.0])?
+        .set_default("stripe_strength", 0.3)?
+        .set_default("stripe_strength_range", vec![0.1, 8.0])?
+        .set_default("stripe_gamma", 0.8)?
+        .set_default("stripe_gamma_range", vec![0.1, 2.0])?
+        .set_default("rim_intensity", 0.3)?
+        .set_default("rim_power", 1.0)?
+        .set_default("rim_power_range", vec![0.01, 4.0])?
+        .set_default("palettes", palettes_map)
 }

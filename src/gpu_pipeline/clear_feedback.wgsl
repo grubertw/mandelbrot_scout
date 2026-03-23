@@ -13,11 +13,12 @@ struct GridFeedback {
 var<storage, read_write> grid_feedback : array<GridFeedback>;
 
 struct OrbitFeedback {
-    min_iter_count:         atomic<u32>,
-    max_iter_count:         atomic<u32>,
-    escaped_count:          atomic<u32>,
-    perurb_error_count:     atomic<u32>,
-    max_iter_reached_count: atomic<u32>,
+    min_iter_count:             atomic<u32>,
+    max_iter_count:             atomic<u32>,
+    escaped_count:              atomic<u32>,
+    perurb_error_inner_count:   atomic<u32>,
+    perurb_error_outer_count:   atomic<u32>,
+    max_iter_reached_count:     atomic<u32>,
 };
 @group(0) @binding(2)
 var<storage, read_write> tile_feedback : array<OrbitFeedback>;
@@ -30,7 +31,7 @@ fn cs_main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let y = i32(gid.y);
 
     // Clear per-pixel textures
-    textureStore(mandel_out_tex, vec2<i32>(x, y), vec4<f32>(0u, 0u, 0u, 0u));
+    textureStore(mandel_out_tex, vec2i(x, y), vec4f(0.0, 0.0, 0.0, 0.0));
 
     // Clear feedback (1D mapping)
     let grid_idx = gid.y * 65536u + gid.x;
@@ -46,7 +47,8 @@ fn cs_main(@builtin(global_invocation_id) gid : vec3<u32>) {
         atomicStore(&tile_feedback[tile_idx].min_iter_count, MAX_U32);
         atomicStore(&tile_feedback[tile_idx].max_iter_count, 0u);
         atomicStore(&tile_feedback[tile_idx].escaped_count, 0u);
-        atomicStore(&tile_feedback[tile_idx].perurb_error_count, 0u);
+        atomicStore(&tile_feedback[tile_idx].perurb_error_inner_count, 0u);
+        atomicStore(&tile_feedback[tile_idx].perurb_error_outer_count, 0u);
         atomicStore(&tile_feedback[tile_idx].max_iter_reached_count, 0u);
     }
 }

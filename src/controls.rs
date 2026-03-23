@@ -1,17 +1,23 @@
-use super::scene::Scene;
+use super::scene::{Scene};
 
 use iced_wgpu::Renderer;
 use iced_widget::{text_input, column, row, text, button, space, Row, slider, pick_list, checkbox, container, Column};
-use iced_widget::core::{Alignment, Color, Element, Theme, Length, border, color};
+use iced_widget::core::{Alignment, Color, Element, Theme, Length, border, color, Font};
 
 use log::{trace};
 
 use std::rc::Rc;
 use std::cell::RefCell;
+use iced_wgpu::core::font;
 use iced_wgpu::core::text::Wrapping;
 use rug::{Complex, Float};
 use crate::scout_engine::ScoutSignal;
 use crate::settings::Settings;
+
+pub mod built_info {
+    // The file has been placed there by the build script.
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PaletteSelection {
@@ -102,11 +108,13 @@ pub struct Controls {
     glitch_fix: bool,
 
     debug_msg: String,
+    info_text: String,
     scene: Rc<RefCell<Scene>>
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    DisplayInfo,
     EditingItersChanged(bool),
     EditingLocationChanged(bool),
     EditingColorChanged(bool),
@@ -184,8 +192,20 @@ impl Controls {
             PaletteSelection::new("default".to_string(), "Default".to_string());
         let palette = scene_b.get_palette(&palette_selection.key);
 
+        let info_text = format!("pkg_name={}\n\tpkg_version={}\n\tauthors={}\n\trepository={}\n\n\
+        rustc_version={}",
+            built_info::PKG_NAME,
+            built_info::PKG_VERSION,
+            built_info::PKG_AUTHORS,
+            built_info::PKG_REPOSITORY,
+            built_info::RUSTC_VERSION,
+        );
+
         Controls {
-            editing_iters: false, editing_location: false, editing_color: false, editing_scout: false,
+            editing_iters: false,
+            editing_location: false,
+            editing_color: false,
+            editing_scout: false,
             iter_step: 10,
             iter_range_min: 0, iter_range_max: settings.max_user_iter * 2,
             max_iterations: settings.max_user_iter,
@@ -232,7 +252,7 @@ impl Controls {
             spawn_per_eval: settings.num_seeds_to_spawn_per_eval.to_string(),
             num_qualified_orbits: settings.num_qualified_orbits.to_string(),
             glitch_fix: false,
-            debug_msg: "debug info loading...".to_string(),
+            debug_msg: "debug info loading...".to_string(), info_text,
             scene: scene.clone()
         }
     }
@@ -240,6 +260,14 @@ impl Controls {
     pub fn update(&mut self, message: Message) {
         trace!("Update {:?}", message);
         match message {
+            Message::DisplayInfo => {
+                if self.debug_msg.len() == self.info_text.len() {
+                    self.debug_msg = String::new();
+                }
+                else {
+                    self.debug_msg = self.info_text.clone();
+                }
+            }
             Message::EditingItersChanged(toggle) => {
                 self.editing_iters = toggle;
             }
@@ -494,22 +522,28 @@ impl Controls {
         ]
         .align_y(Alignment::Start);
 
+
         let toggles_row = row![
-            button("Iterations")
-            .on_press(Message::EditingItersChanged(!self.editing_iters))
-            .style(if self.editing_iters {button::primary} else {button::text}),
+            button(
+                text!("\u{1F6C8}")
+                .font(Font {weight: font::Weight::Semibold, ..Font::default()})
+            ).on_press(Message::DisplayInfo)
+                .style(button::text),
+            button("Iters")
+                .on_press(Message::EditingItersChanged(!self.editing_iters))
+                .style(if self.editing_iters {button::primary} else {button::text}),
             space().width(Length::Fixed(20.0)),
-            button("Location")
-            .on_press(Message::EditingLocationChanged(!self.editing_location))
-            .style(if self.editing_location {button::primary} else {button::text}),
+            button("Loc")
+                .on_press(Message::EditingLocationChanged(!self.editing_location))
+                .style(if self.editing_location {button::primary} else {button::text}),
             space().width(Length::Fixed(20.0)),
             button("Color")
-            .on_press(Message::EditingColorChanged(!self.editing_color))
-            .style(if self.editing_color {button::primary} else {button::text}),
+                .on_press(Message::EditingColorChanged(!self.editing_color))
+                .style(if self.editing_color {button::primary} else {button::text}),
             space().width(Length::Fixed(20.0)),
             button("Scout")
-            .on_press(Message::EditingScoutConfigChanged(!self.editing_scout))
-            .style(if self.editing_scout {button::primary} else {button::text}),
+                .on_press(Message::EditingScoutConfigChanged(!self.editing_scout))
+                .style(if self.editing_scout {button::primary} else {button::text}),
         ]
         .align_y(Alignment::Start);
 
@@ -754,7 +788,7 @@ impl Controls {
                         space().width(Length::Fixed(5.0)),
                         slider(self.stripe_strength_range.0..=self.stripe_strength_range.1,
                             self.stripe_strength, Message::StripeStrengthChanged)
-                            .step((self.stripe_strength_range.1 - self.stripe_strength_range.0) / 1000.0)
+                            .step((self.stripe_strength_range.1 - self.stripe_strength_range.0) / 5000.0)
                             .width(Length::Fixed(100.0)),
                         space().width(Length::Fixed(5.0)),
                         text(format!("{:<3.2}", self.stripe_strength))
@@ -892,7 +926,7 @@ impl Controls {
                 space().width(Length::Fixed(5.0)),
                 slider(self.neighbor_scale_range.0..=self.neighbor_scale_range.1,
                     self.neighbor_scale_multiplier, Message::NeighborScaleChanged)
-                    .step((self.neighbor_scale_range.1 - self.neighbor_scale_range.0) / 1000.0)
+                    .step(1.0)
                     .width(Length::Fixed(60.0)),
                 space().width(Length::Fixed(5.0)),
                 text(format!("{:<3.2}", self.neighbor_scale_multiplier))

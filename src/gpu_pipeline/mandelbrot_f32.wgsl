@@ -1,186 +1,20 @@
-// -------------------------------
-// Double-float structure
-// -------------------------------
-struct Df {
-    hi: f32,
-    lo: f32,
-};
-
-struct ComplexDf {
-    r: Df,
-    i: Df,
-};
-
-const one: f32 = 1.0;
-
-// -------------------------------
-// Double-float arithmatic operations
-// -------------------------------
-fn split_df(a: f32) -> Df {
-    let c = (f32(1u << 12u) + 1.0) * a;
-    let a_big = c - a;
-    let a_hi = c * one - a_big;
-    let a_lo = a * one - a_hi;
-
-    return Df(a_hi, a_lo);
-}
-
-// Special sum operation when a > b
-fn quickTwoSum(a: f32, b: f32) -> Df {
-	let x = (a + b) * one;
-	let b_virt = (x - a) * one;
-	let y = b - b_virt;
-	return Df(x, y);
-}
-
-fn twoSum(a: f32, b: f32) -> Df {
-	let x = (a + b);
-	let b_virt = (x - a) * one;
-	let a_virt = (x - b_virt) * one;
-	let b_err = b - b_virt;
-	let a_err = a - a_virt;
-	let y = a_err + b_err;
-	return Df(x, y);
-}
-
-fn twoSub(a: f32, b: f32) -> Df {
-	let s = (a - b);
-	let v = (s * one - a) * one;
-	let err = (a - (s - v) * one) * one - (b + v);
-	return Df(s, err);
-}
-
-fn twoProd(a: f32, b: f32) -> Df {
-	let x = a * b;
-	let a2 = split_df(a);
-	let b2 = split_df(b);
-	let err1 = x - (a2.hi * b2.hi * one) * one;
-	let err2 = err1 - (a2.lo * b2.hi * one) * one;
-	let err3 = err2 - (a2.hi * b2.lo * one) * one;
-	let y = a2.lo * b2.lo - err3;
-	return Df(x, y);
-}
-
-fn df_add(a: Df, b: Df) -> Df {
-	var s = twoSum(a.hi, b.hi);
-	var t = twoSum(a.lo, b.lo);
-	s.lo += t.hi;
-	s = quickTwoSum(s.hi, s.lo);
-	s.lo += t.lo;
-	s = quickTwoSum(s.hi, s.lo);
-	return s;
-}
-
-fn df_sub(a: Df, b: Df) -> Df {
-	var s = twoSub(a.hi, b.hi);
-	var t = twoSub(a.lo, b.lo);
-	s.lo += t.hi;
-	s = quickTwoSum(s.hi, s.lo);
-	s.lo += t.lo;
-	s = quickTwoSum(s.hi, s.lo);
-	return Df(s.hi, s.lo);
-}
-
-fn df_mul(a: Df, b: Df) -> Df {
-	var p = twoProd(a.hi, b.hi);
-	p.lo += a.hi * b.lo;
-	p.lo += a.lo * b.hi;
-	p = quickTwoSum(p.hi, p.lo);
-	return p;
-}
-
-//fn df_add(a: Df, b: Df) -> Df {
-//    let s = a.hi + b.hi;
-//    let e = (a.hi - s) + b.hi + a.lo + b.lo;
-//    return Df(s, e);
-//}
-//fn df_sub(a: Df, b: Df) -> Df {
-//    let s = a.hi - b.hi;
-//    let e = (a.hi - s) - b.hi + a.lo - b.lo;
-//    return Df(s, e);
-//}
-//fn df_mul(a: Df, b: Df) -> Df {
-//    let p = a.hi * b.hi;
-//    let e = a.hi * b.lo + a.lo * b.hi;
-//    return Df(p, e);
-//}
-
-// -------------------------------
-// Convert a regular f32 into a Df (lo = 0.0)
-// -------------------------------
-fn df_from_f32(x: f32) -> Df {
-    return Df(x, 0.0);
-}
-
-fn df_from_i32(i: i32) -> Df {
-    return Df(f32(i), 0.0);
-}
-
-// multiply Df by scalar f32
-fn df_mul_f32(a: Df, b: f32) -> Df {
-    return df_mul(a, Df(b, 0.0));
-}
-
-
-fn df_mag2(v: Df) -> f32 {
-    let v_abs = abs(v.hi) + abs(v.lo);
-    return v_abs * v_abs;
-}
-
-fn df_mag2_upper(zx: Df, zy: Df) -> f32 {
-    let ax = abs(zx.hi) + abs(zx.lo);
-    let ay = abs(zy.hi) + abs(zy.lo);
-    return ax * ax + ay * ay;
-}
-
-fn cdf_mag2(a: ComplexDf) -> f32 {
-    let abs_r = abs(a.r.hi) + abs(a.r.lo);
-    let abs_i = abs(a.i.hi) + abs(a.i.lo);
-    return abs_r * abs_r + abs_i * abs_i;
-}
-
-// -------------------------------
-// Complex double-float operations
-// z = x + i*y
-// -------------------------------
-fn cdf_add(a: ComplexDf, b: ComplexDf) -> ComplexDf {
-    var r: ComplexDf;
-    r.r = df_add(a.r, b.r);
-    r.i = df_add(a.i, b.i);
-    return r;
-}
-
-fn cdf_sub(a: ComplexDf, b: ComplexDf) -> ComplexDf {
-    var r: ComplexDf;
-    r.r = df_sub(a.r, b.r);
-    r.i = df_sub(a.i, b.i);
-    return r;
-}
-
-// complex multiply: (ar + i ai) * (br + i bi) = (ar*br - ai*bi) + i(ar*bi + ai*br)
-fn cdf_mul(a: ComplexDf, b: ComplexDf) -> ComplexDf {
-    let rr = df_mul(a.r, b.r);
-    let ii = df_mul(a.i, b.i);
-    var real = df_sub(rr, ii);
-    let rbi = df_mul(a.r, b.i);
-    let ibr = df_mul(a.i, b.r);
-    var imag = df_add(rbi, ibr);
-    var out: ComplexDf;
-    out.r = real;
-    out.i = imag;
-    return out;
+// For multiplying 2 complex numbers,
+// which is NOT the same is a matrix multiply (or dot product)
+fn c32_mul(a: vec2f, b: vec2f) -> vec2f {
+    let r2 = a.x * b.x;
+    let i2 = a.y * b.y;
+    let ri = a.x * b.y;
+    let ir = a.y * b.x;
+    return vec2f(r2 - i2, ri + ir);
 }
 
 // -------------------------------
 // Uniforms
 // -------------------------------
 struct Uniforms {
-    center_x_hi:        f32,
-    center_x_lo:        f32,
-    center_y_hi:        f32,
-    center_y_lo:        f32,
-    scale_hi:           f32,
-    scale_lo:           f32,
+    center_x:           f32,
+    center_y:           f32,
+    scale:              f32,
     max_iter:           u32,
     ref_orb_count:      u32,
     screen_width:       u32,
@@ -224,28 +58,19 @@ const ENABLE_SPEC: u32      = 1u << 8;
 const ENABLE_AO: u32        = 1u << 9;
 const ENABLE_RIM: u32       = 1u << 10;
 
-fn build_c_from_scene(pix: vec2<i32>) -> ComplexDf {
+fn build_c_from_scene(pix: vec2i) -> vec2f {
     let half_w = f32(uni.screen_width) * 0.5;
     let half_h = f32(uni.screen_height) * 0.5;
 
     let dx_i = pix.x - i32(half_w);
     let dy_i = i32(half_h) - pix.y; // y-axis increases downward, so must flip!
 
-    let dx_df = df_from_i32(dx_i);
-    let dy_df = df_from_i32(dy_i);
-
-    // Scene scale
-    let scale = Df(uni.scale_hi, uni.scale_lo);
-
-    // offset = dx*scale + dy*scale
-    let off_x = df_mul(dx_df, scale);
-    let off_y = df_mul(dy_df, scale);
+    let scale = uni.scale;
+    let offset = vec2f(f32(dx_i) * scale, f32(dy_i) * scale);
 
     // Scene/Viewport center
-    let center_x = Df(uni.center_x_hi, uni.center_x_lo);
-    let center_y = Df(uni.center_y_hi, uni.center_y_lo);
-
-    let c = ComplexDf(df_add(center_x, off_x), df_add(center_y, off_y)); 
+    let center = vec2f(uni.center_x, uni.center_y);
+    let c = center + offset;
     return c;
 }
 
@@ -256,19 +81,15 @@ const PERTURB_ERR_OUTER_BIT: u32    = 1u << 3u;
 const MAX_ITER_BIT: u32             = 1u << 4u;
 const ORBIT_SHIFT: u32              = 20u;
 
-// -------------------------------
-// Mandelbrot iteration using DF arithmetic.
-// Returns iteration count (u32).
-// -------------------------------
-fn mandelbrot(c: ComplexDf) -> vec4<f32> {
-    var z = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));
+fn mandelbrot(c: vec2f) -> vec4f {
+    var z = vec2f(0.0, 0.0);
 
     var i: u32 = 0u;
     let max_i: u32 = uni.max_iter;
-    var mag2: f32 = 0.0;
+    var mag_z: f32 = 0.0;
     // Extra tracking for DE/surface normals
-    var escape_mag2: f32 = 0.0;
-    var dz = vec2<f32>(0.0, 0.0);
+    var escape_mag_z: f32 = 0.0;
+    var dz = vec2f(0.0, 0.0);
     var extra: u32 = 0u; // Iterate a few past bailout for better DE values.
     // For stripe-averaging
     var stripe_sum: f32 = 0.0;
@@ -276,32 +97,17 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
     var flags: u32 = 0u;
 
     for (i = 0u; i < max_i; i = i + 1u) {
-        let zx2 = df_mul(z.r, z.r);
-        let zy2 = df_mul(z.i, z.i);
-        let zxy = df_mul(z.r, z.i);
-
-        // real = zx2 - zy2 + c.r
-        let real_part = df_add(df_sub(zx2, zy2), c.r);
-
-        // imag = 2*zx*zy + c.i  -> 2*zxy + c.i
-        let imag_part = df_add(df_add(zxy, zxy), c.i);
-
         if ((uni.render_flags & USE_DE) != 0) {
             // Derivitive tracking for DE
-            let dz_new = vec2<f32>(
-                2.0 * (z.r.hi * dz.x - z.i.hi * dz.y) + 1.0,
-                2.0 * (z.r.hi * dz.y + z.i.hi * dz.x)
-            );
-            dz = dz_new;
+            dz = 2.0 * c32_mul(dz, z) + vec2f(1.0, 0.0);
         }
 
         // update z
-        z.r = real_part;
-        z.i = imag_part;
+        z = c32_mul(z, z) + c;
 
         if ((uni.render_flags & USE_STRIPES) != 0) {
             // for stripe-averaging
-            let angle = atan2(z.i.hi, z.r.hi);
+            let angle = atan2(z.y, z.x);
             var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
             stripe = pow(stripe, uni.stripe_gamma);
             stripe_sum += stripe;
@@ -309,8 +115,8 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
         }
 
         // Bailout
-        mag2 = cdf_mag2(z);
-        if (mag2 > 1024.0) {
+        mag_z = length(z);
+        if (mag_z > 32.0) {
             flags |= ESCAPED_BIT;
             // Make extra iterations past escape for better DE approximation.
             if (extra >= 2) {
@@ -320,7 +126,7 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
         }
 
         if ((flags & ESCAPED_BIT) == 0) {
-            escape_mag2 = mag2;
+            escape_mag_z = mag_z;
         }
     }
 
@@ -331,8 +137,8 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
     var fi = f32(i - extra);
     // Replace with smooth iters if enabled
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        let safe_mag2 = max(escape_mag2, 1e-30);
-        fi = clamp(fi + 1.0 - log2(log(safe_mag2) * 0.5), 0.0, f32(max_i));
+        let safe_mag_z = max(escape_mag_z, 1e-30);
+        fi = clamp(fi + 1.0 - log2(log(safe_mag_z) * 0.5), 0.0, f32(max_i));
         if (i == max_i) {
             fi = f32(max_i);
         }
@@ -340,7 +146,7 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
     // Finalize DE
     var distance: f32 = 0.0;
     if ((uni.render_flags & USE_DE) != 0) {
-        let r = sqrt(mag2);
+        let r = mag_z;
         let dr = max(length(dz), 1e-30);
         distance = 0.5 * r * log(r) / dr;
     }
@@ -349,7 +155,7 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
     if ((uni.render_flags & USE_STRIPES) != 0) {
         stripe_avg = stripe_sum / stripe_count;
     }
-    return vec4<f32>(fi, distance, stripe_avg, f32(flags));
+    return vec4f(fi, distance, stripe_avg, f32(flags));
 }
 
 // All mandelbrot computation results are written to this texture
@@ -357,15 +163,12 @@ fn mandelbrot(c: ComplexDf) -> vec4<f32> {
 var calc_out_tex: texture_storage_2d<rgba32float, write>;
 
 struct GpuRefOrbitLocation {
-    c_ref_re_hi:            f32,
-    c_ref_re_lo:            f32,
-    c_ref_im_hi:            f32,
-    c_ref_im_lo:            f32,
-    max_ref_iters:          u32,
-    center_offset_re_hi:    f32,
-    center_offset_re_lo:    f32,
-    center_offset_im_hi:    f32,
-    center_offset_im_lo:    f32,
+    c_ref_re:           f32,
+    c_ref_im:           f32,
+    r_valid:            f32,
+    max_ref_iters:      u32,
+    center_offset_re:   f32,
+    center_offset_im:   f32,
 };
 
 // Location information for each Reference Orbit
@@ -385,51 +188,43 @@ var<storage, read> orbit_location : array<GpuRefOrbitLocation>;
 
 // Ranked ReferenceOrbits, in ComplexDf format
 @group(0) @binding(3)
-var<storage, read> rank_one_orbit: array<ComplexDf>;
+var<storage, read> rank_one_orbit: array<vec2f>;
 
 @group(0) @binding(4)
-var<storage, read> rank_two_orbit: array<ComplexDf>;
+var<storage, read> rank_two_orbit: array<vec2f>;
 
 // delta_c - along with Zref-n0 - are needed to start pertubation.
-fn build_delta_c_from_orbit_location(pix: vec2<i32>, orbit_idx: u32) -> ComplexDf {
+fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32) -> vec2f {
     let half_w = f32(uni.screen_width) * 0.5;
     let half_h = f32(uni.screen_height) * 0.5;
-    let scale = Df(uni.scale_hi, uni.scale_lo);
+    let scale = uni.scale;
 
     let orbit = orbit_location[orbit_idx];
 
     let dx_i = pix.x - i32(half_w);
     let dy_i = i32(half_h) - pix.y;
 
-    let dx_df = df_from_i32(dx_i);
-    let dy_df = df_from_i32(dy_i);
+    let offset = vec2f(f32(dx_i) * scale, f32(dy_i) * scale);
 
-    let off_x = df_mul(dx_df, scale);
-    let off_y = df_mul(dy_df, scale);
-
-    let delta_from_center_to_ref_orb = ComplexDf(
-        Df(orbit.center_offset_re_hi, orbit.center_offset_re_lo),
-        Df(orbit.center_offset_im_hi, orbit.center_offset_im_lo)
+    let delta_from_center_to_ref_orb = vec2f(
+        orbit.center_offset_re, orbit.center_offset_im
     );
 
-    let delta_c = ComplexDf(
-        df_add(delta_from_center_to_ref_orb.r, off_x),
-        df_add(delta_from_center_to_ref_orb.i, off_y)
-    );
-
+    let delta_c = delta_from_center_to_ref_orb + offset;
     return delta_c;
 }
 
-fn load_ref_orbit(orbit_idx: u32, it: u32) -> ComplexDf {
+fn load_ref_orbit(orbit_idx: u32, it: u32) -> vec2f {
+    var Z_c32 = vec2f(0.0, 0.0);
+
     if (orbit_idx == 0u) {
-        return rank_one_orbit[it];
+        Z_c32 = rank_one_orbit[it];
     }
     else if (orbit_idx == 1u) {
-        return rank_two_orbit[it];
+        Z_c32 = rank_two_orbit[it];
     }
-    else {
-        return ComplexDf(Df(0.0, 0.0), Df(0.0, 0.0));
-    }
+
+    return Z_c32;
 }
 
 const BETA = 0.001;
@@ -437,18 +232,18 @@ const BETA = 0.001;
 // -------------------------------
 // Mandelbrot Perturbance
 // -------------------------------
-fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
-    var dz = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));
+fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
+    var dz = vec2f(0.0, 0.0);
     var i: u32 = 0u;
     let max_i = uni.max_iter;
-    var mag2: f32 = 0.0;
+    var mag_z: f32 = 0.0;
     // Extra tracking for DE/surface normals
     // Note, this is a derivitive of 'full z', which
     // is taken after Z + dz, but of the 'previous iteration'
     // similar to how it is in the absolute recurrance.
-    var dzdc = vec2<f32>(0.0, 0.0);
-    var z = ComplexDf(df_from_f32(0.0), df_from_f32(0.0));
-    var escape_mag2: f32 = 0.0;
+    var dzdc = vec2f(0.0, 0.0);
+    var z = vec2f(0.0, 0.0);
+    var escape_mag_z: f32 = 0.0;
     var extra: u32 = 0u; // Iterate a few past bailout for better DE values.
     // For stripe-averaging
     var stripe_sum: f32 = 0.0;
@@ -460,30 +255,22 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
         let Z = load_ref_orbit(0u, i);
 
         // λ_n = 2 * Z_n
-        let lambda = cdf_add(Z, Z);
+        let lambda = Z + Z;
 
         // dz_{n+1} = λ_n * dz_n + dz_n^2 + Δc
-        let dz2 = cdf_mul(dz, dz);
-        dz = cdf_add(
-            cdf_add(cdf_mul(lambda, dz), dz2),
-            delta_c
-        );
+        dz = c32_mul(lambda, dz) + c32_mul(dz, dz) + delta_c;
 
         if ((uni.render_flags & USE_DE) != 0) {
             // Derivitive tracking of 'reconstructed z'm for DE
-            let dz_new = vec2<f32>(
-                2.0 * (z.r.hi * dzdc.x - z.i.hi * dzdc.y) + 1.0,
-                2.0 * (z.r.hi * dzdc.y + z.i.hi * dzdc.x)
-            );
-            dzdc = dz_new;
+            dzdc = 2.0 * c32_mul(dzdc, z) + vec2f(1.0, 0.0);
         }
 
         // Absolute z for escape testing
-        z = cdf_add(Z, dz);
+        z = Z + dz;
 
         if ((uni.render_flags & USE_STRIPES) != 0) {
             // for stripe-averaging
-            let angle = atan2(z.i.hi, z.r.hi);
+            let angle = atan2(z.y, z.x);
             var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
             stripe = pow(stripe, uni.stripe_gamma);
             stripe_sum += stripe;
@@ -491,8 +278,8 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
         }
 
         // Standard bailout
-        mag2 = cdf_mag2(z);
-        if (mag2 > 1024.0) {
+        mag_z = length(z);
+        if (mag_z > 32.0) {
              flags |= ESCAPED_BIT;
             // Make extra iterations past escape for better DE approximation.
             if (extra >= 2) {
@@ -502,17 +289,16 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
         }
 
         if ((flags & ESCAPED_BIT) == 0) {
-            escape_mag2 = mag2;
+            escape_mag_z = mag_z;
         }
 
-        let abs_z = sqrt(mag2);
-        let abs_dz = sqrt(cdf_mag2(dz));
-        let abs_Z = sqrt(cdf_mag2(Z));
+        let mag_dz = length(dz);
+        let mag_Z = length(Z);
 
-        if (abs_z < BETA * abs_dz) {
+        if (mag_z < BETA * mag_dz) {
             flags |= PERTURB_ERR_INNER_BIT;
         }
-        if (abs_dz > BETA * abs_Z) {
+        if (mag_dz > BETA * mag_Z) {
             flags |= PERTURB_ERR_OUTER_BIT;
         }
     }
@@ -524,8 +310,8 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
     var fi = f32(i - extra);
     // For smooth iterations
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        let safe_mag2 = max(escape_mag2, 1e-30);
-        fi = clamp(fi + 1.0 - log2(log(safe_mag2) * 0.5), 0.0, f32(max_i));
+        let safe_mag_z = max(escape_mag_z, 1e-30);
+        fi = clamp(fi + 1.0 - log2(log(safe_mag_z) * 0.5), 0.0, f32(max_i));
         if (i == max_i) {
             fi = f32(max_i);
         }
@@ -533,7 +319,7 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
     // Finalize DE calculation
     var distance: f32 = 0.0;
     if ((uni.render_flags & USE_DE) != 0) {
-        let r = sqrt(mag2);
+        let r = mag_z;
         var dr = sqrt(length(dzdc));
         distance = 0.5 * r * log(r) / dr;
     }
@@ -543,7 +329,7 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
     if ((uni.render_flags & USE_STRIPES) != 0) {
         stripe_avg = stripe_sum / stripe_count;
     }
-    return vec4<f32>(fi, distance, stripe_avg, f32(flags));
+    return vec4f(fi, distance, stripe_avg, f32(flags));
 }
 
 // ---------------------------------------------
@@ -551,14 +337,14 @@ fn mandelbrot_perturb(delta_c: ComplexDf) -> vec4<f32> {
 // ---------------------------------------------
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let pix = vec2<i32>(i32(gid.x), i32(gid.y));
+    let pix = vec2i(i32(gid.x), i32(gid.y));
 
     // Bounds checking based on real screen size
     if (pix.x >= i32(uni.screen_width) || pix.y >= i32(uni.screen_height)) {
         return;
     }
 
-    var results = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    var results = vec4f(0.0, 0.0, 0.0, 0.0);
 
     // Check if there is a (qualified) reference orbit available and,
     // use the perturbance path, if found.
@@ -587,10 +373,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 
 struct DebugOut {
-    center_x_hi:        f32,
-    center_x_lo:        f32,
-    center_y_hi:        f32,
-    center_y_lo:        f32,
+    center_x:           f32,
+    center_y:           f32,
     max_iters:          u32,
     fi:                 f32,
     distance:           f32,

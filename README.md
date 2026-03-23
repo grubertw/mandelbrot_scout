@@ -13,10 +13,11 @@ I always try to keep HEAD of the repo tested and running, even if/when experimen
 
 **If you don't have Rust on your system yet, it is very easy to install! Simply download the rustup shell script from [rust-lang.org](https://rust-lang.org/tools/install/), install rust, and then run `cargo run` from the shell once inside the project directory (where Cargo.toml is located). Cargo downloads and builds all the library dependencies, then the project, and then runs! Rust is also very portable, and works perfectly fine, right on Windows! While the shell script installer is meant for posix systems, the Rust community recommends Chocolaty.**
 
-I'll also include here a special note about Rug, which I am using for MPFR and MPC. As a Linux user, I already had the GNU gcc toolchain installed on my PC (and rustup/cargo will take care of this for you on Linux/MacOS), but on Windows, this requires msys/mingw. Iced and WGPU both seek to be platform independent however, and I am not forcing any render back-end, or using any experimental GL shader features. On MacOC, Metal will likely be used, and on Windows, it will most likely be DirectX-12. Environment variables CAN be used to force a render back-end. 
+I'll also include here a special note about Rug, which I am using for MPFR and MPC. As a Linux user, I already had the GNU gcc toolchain installed on my PC (and rustup/cargo will take care of this for you on Linux/MacOS), but on Windows, this requires msys/mingw. Iced and WGPU both seek to be platform independent however, and I am not forcing any render back-end, or using any experimental GL shader features. On MacOS, Metal will likely be used, and on Windows, it will most likely be DirectX-12. Environment variables CAN be used to force a render back-end. 
 
-UPDATE (03/09/2026):
-As of yet, I am currently unable to make a Windows build. While I still think it's possible, the problem I ran into is essentially a 'conflict' in dependencies. Because of Rug & MPFR, the mingw compiler needs to be used, and Rug/MFPR's instructions for this point to the installation of the msys terminal - which is essentially a cygwin derivative. Iced & WGPU do NOT like this, however, as cargo then thinks its building on linux, and then starts grabbing X11/Wayland dependencies, rather than Windows Libraries. I had, years ago before I integrated high-precision complex numbers, the program working and running on Windows just fine, and as a test, I compiled one of Iced's UI examples, and that ran on Windows just fine, so it absolutely DOES remain cross-platform! The solution here is likely to pre-compile Rug and then tweak cargo.toml to use that pre-compiled library/dll. Not sure when I will get around to trying this again, as I am not a Windows user. Another solution for windows may be to try Windows subsystem for Linux, though.. that route might present it's own difficulties, as this is a GPU intensive application, and absolutely must open a GUI window, in order to run.
+Update (03/23/2026): Mandelbrot Scout v3.1 has been released successfully! I created a Windows VM with a properly configured environment to build the program! For me, what worked best was to use 'Git for Windows', and configure it's PATH - which is the Windows User PATH anyways - to include where MSYS installs mingw and it's binaries (when it's pacman command is run). This makes it so cargo can find gcc and use it to build MFPF. 
+
+If you are trying to compile on windows and are running into issues, you can reach out to me through email, or on fractalforums.org, and I will try to help!  
 
 ## Background
 This project started out with my desire to learn more about OpenGL and how shaders work. As a lover of fractals, I had come across lots of articles that mentioned how the beautifully simple Mandelbrot algorithm can be parallelized. Ideally, each pixel - which can be mapped to a logical coordinate on the complex plane - can calculate its corresponding orbit - i.e. iteration steps until the coordinate escapes with a magnitude greater than 2 - as a completely independent operation. The only info that's needed is the number of iterations until escape, which is then used to compute a color. Well, what better way to compute colors per pixel than on a GPU, whose hardware was built for such a purpose? While some examples of rendering a fractal this way were around when I began looking (I started this in 2017, lol), they were all using GLSL and interfaced with OpenGl through C/C++. I wanted to use Rust though, and thought this could be a great way to learn that language, along with some newer graphics libraries that were making their way into the (at the time VERY new) Rust ecosystem.
@@ -84,8 +85,6 @@ While the GUI is still being heavily worked-on - and is highly subject to change
       1) Note that either scientific notation or decimal notation can be used inside these boxes. String validation of these values does not occur until the Apply button is clicked. 
 
 ## Helpful environment variables to use on CLI while running
-Having settings.toml is now a hard requirement for the program to run! I essentially removed all my hard-coded defaults, and put them in here! Eventually, I will also have hard-coded fallbacks, but for now, it's easy to make sure this file exists when the program runs. By default, the program looks for this file in `$cwd/settings/settings.toml`, were `$cwd` is the current working directory (and when using `cargo run` at project root, there is nothing more to be done). If you want to change its location, use the SETTINGS_DIR environment variable.
-
 The RUST_LOG environment variable controls all the logging output, which is essential for debugging. Also, many other library dependencies (critically, WGPU) use the Rust logger, so this turns into the most essential environment variable for debugging!
 
 Here are a few presets that I often use:
@@ -101,6 +100,8 @@ If you want to know more about what WGPU can support, look [here](https://github
 
 # Basic Use
 I made this GIF to show how easy this program is to use!
+
+Concerning settings.toml, while in v3.1, it was a hard requirement to have this file (and in a directory alongside the program called 'settings'), moving forward, it will no longer be necessary. That being said, this file is still useful for supplying overrides to the program, and making changes to its small set of initial color palettes. The file can now be placed directly next to the EXE, or put in a 'settings' dir (similar to repo structure), or you can also set a SETTINGS_DIR environment variable. If the program starts without this file however, there will only be one color palette available, the default RGB (repeating) palette.
 
 ![Basic Use](screenshots/basic_use.gif)
 
@@ -126,11 +127,6 @@ Here are a few clean screenshots, as the moving gifs don't show high quality.
 ![De screenshot 2](screenshots/Screenshot_2026-03-15_23-16-37.jpg)
 
 ![De screenshot 3](screenshots/Screenshot_2026-03-15_23-18-59.jpg)
-
-
-One more DE demo!
-
-![De demo 2](screenshots/de_demo2.gif)
 
 Here are a dew DE renders that are working with perturbation!
 

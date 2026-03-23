@@ -1,9 +1,9 @@
-use crate::numerics::ComplexDf;
 use crate::signals::{CameraSnapshot, FrameStamp};
 
 use std::sync::{Arc, Weak};
 
 use log::warn;
+use num_complex::Complex32;
 use rug::{Float, Complex};
 use parking_lot::{Mutex, RwLock};
 use crate::scout_engine::ScoutConfig;
@@ -90,7 +90,7 @@ impl ReferenceOrbit {
     ) -> Self {
         let orbit_id = id_fac.lock().next_id();
         let prec = *&c_ref.prec().0;
-        let c_ref_df = ComplexDf::from_complex(&c_ref);
+        let c_ref_32 = Complex32::new(c_ref.real().to_f32(), c_ref.imag().to_f32());
         
         Self {
             orbit_id, c_ref, 
@@ -105,7 +105,7 @@ impl ReferenceOrbit {
                 created_at: frame_stamp
             }, 
             is_anchored: false,
-            gpu_payload: OrbitGpuPayload::new(c_ref_df), 
+            gpu_payload: OrbitGpuPayload::new(c_ref_32),
             max_ref_orbit_iters,
             // Private variables that mutate in-place during mandelbrot computation
             curr_z: Complex::with_val(prec, (0.0, 0.0)),
@@ -314,15 +314,15 @@ pub struct OrbitSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct OrbitGpuPayload {
-    pub c_ref: ComplexDf,
-    pub cdf_orbit: Vec<ComplexDf>,
+    pub c_ref: Complex32,
+    pub c32_orbit: Vec<Complex32>,
 }
 
 impl OrbitGpuPayload {
-    pub fn new(c_ref: ComplexDf) -> Self {
+    pub fn new(c_ref: Complex32) -> Self {
         Self {
             c_ref,
-            cdf_orbit: Vec::new(),
+            c32_orbit: Vec::new(),
         }
     }
 }

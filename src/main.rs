@@ -48,7 +48,7 @@ use std::sync::Arc;
 use std::process;
 use std::time::Instant;
 
-const TITLE: &str = "Mandelbrot Scout";
+pub const TITLE: &str = "Mandelbrot Scout";
 
 #[allow(clippy::large_enum_variant)]
 enum Runner {
@@ -139,7 +139,7 @@ impl ApplicationHandler for Runner {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format,
                 width: physical_size.width,
                 height: physical_size.height,
-                present_mode: wgpu::PresentMode::Fifo,
+                present_mode: wgpu::PresentMode::AutoVsync,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2});
@@ -239,7 +239,7 @@ impl ApplicationHandler for Runner {
                             }
 
                             // Draw the scene (contains both fragment render and compute passes)
-                            s.draw(&device, &queue, &view);
+                            s.render(&device, &queue, &view);
                         }
 
                         // Draw Iced on top
@@ -472,11 +472,7 @@ pub fn main() -> Result<(), winit::error::EventLoopError> {
         .init();
 
     // Load app settings from settings file
-    let settings = Settings::new().map_err(|e| {
-        error!("Unable to load settings: {}", e);
-        return e;
-    }).unwrap();
-
+    let settings = Settings::new().unwrap();
     info!("Loaded application settings");
 
     // Initialize winit

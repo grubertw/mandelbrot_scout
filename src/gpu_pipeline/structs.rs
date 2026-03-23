@@ -3,24 +3,21 @@ use bytemuck;
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SceneUniform {
-    pub center_x_hi:        f32,
-    pub center_x_lo:        f32,
-    pub center_y_hi:        f32,
-    pub center_y_lo:        f32,
-    pub scale_hi:           f32,
-    pub scale_lo:           f32,
-    pub max_iter:           u32,
-    pub ref_orb_count:      u32,
-    pub screen_width:       u32,
-    pub screen_height:      u32,
-    pub grid_size:          u32,
-    pub grid_width:         u32,
-    pub palette_frequency:  f32,
-    pub palette_offset:     f32,
-    pub palette_gamma:      f32,
-    pub render_flags:       u32,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub scale: f32,
+    pub max_iter: u32,
+    pub ref_orb_count: u32,
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub grid_size: u32,
+    pub grid_width: u32,
+    pub palette_frequency: f32,
+    pub palette_offset: f32,
+    pub palette_gamma: f32,
+    pub render_flags: u32,
     pub distance_multiplier: f32,
-    pub glow_intensity:     f32,
+    pub glow_intensity: f32,
     pub neighbor_scale_multiplier: f32,
     pub ambient_intensity: f32,
     pub key_light_intensity: f32,
@@ -94,16 +91,16 @@ pub struct GridFeedbackOut {
     pub max_iter_count:         u32,
 }
 
-pub const ORBIT_ITERS_MASK: u32         = 0x0000FFFF;
-pub const ORBIT_ESCAPED: u32            = 1 << 16;
-pub const ORBIT_PERTURBED: u32          = 1 << 17;
-pub const ORBIT_PERTURB_ERR: u32        = 1 << 18;
-pub const ORBIT_MAX_ITER_REACHED: u32   = 1 << 19;
+pub const ORBIT_ESCAPED: u32            = 1 << 0;
+pub const ORBIT_PERTURBED: u32          = 1 << 1;
+//pub const PERTURB_ERR_INNER: u32        = 1 << 2;
+//pub const PERTURB_ERR_OUTER: u32        = 1 << 3;
+pub const ORBIT_MAX_ITER_REACHED: u32   = 1 << 4;
 pub const ORBIT_SHIFT: u32              = 20;
 
 impl GridFeedbackOut {
     pub fn iter(&self) -> u32 {
-        self.best_pixel_flags & ORBIT_ITERS_MASK
+        self.max_iter_count
     }
 
     pub fn escaped(&self) -> bool {
@@ -113,11 +110,7 @@ impl GridFeedbackOut {
     pub fn perturbed(&self) -> bool {
         (self.best_pixel_flags & ORBIT_PERTURBED) != 0
     }
-
-    pub fn perturb_err(&self) -> bool {
-        (self.best_pixel_flags & ORBIT_PERTURB_ERR) != 0
-    }
-
+    
     pub fn max_iters_reached(&self) -> bool {
         (self.best_pixel_flags & ORBIT_MAX_ITER_REACHED) != 0
     }
@@ -134,35 +127,31 @@ pub struct OrbitFeedbackOut {
     pub max_iter_count:     u32,    // Max iters per pixel, per ref_orb
 
     // --- Flag counts ---
-    pub escaped_count:          u32,
-    pub perurb_error_count:     u32,
-    pub max_iter_reached_count: u32,
+    pub escaped_count:              u32,
+    pub perurb_error_inner_count:   u32,
+    pub perurb_error_outer_count:   u32,
+    pub max_iter_reached_count:     u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DebugOut {
-    pub center_x_hi:        f32,
-    pub center_x_lo:        f32,
-    pub center_y_hi:        f32,
-    pub center_y_lo:        f32,
+    pub center_x:           f32,
+    pub center_y:           f32,
     pub max_iters:          u32,
-    pub iter:               u32,
-    pub nu_iter:            f32,
+    pub fi:                 f32,
     pub distance:           f32,
-    pub t:                  f32,
+    pub stripe_avg:         f32,
+    pub flags:              u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuRefOrbitLocation {
-    pub c_ref_re_hi:            f32,
-    pub c_ref_re_lo:            f32,
-    pub c_ref_im_hi:            f32,
-    pub c_ref_im_lo:            f32,
-    pub max_ref_iters:          u32,
-    pub center_offset_re_hi:    f32,
-    pub center_offset_re_lo:    f32,
-    pub center_offset_im_hi:    f32,
-    pub center_offset_im_lo:    f32,
+    pub c_ref_re:           f32,
+    pub c_ref_im:           f32,
+    pub r_valid:            f32,
+    pub max_ref_iters:      u32,
+    pub center_offset_re:   f32,
+    pub center_offset_im:   f32,
 }
