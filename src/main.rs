@@ -3,6 +3,8 @@ mod controls;
 mod scene;
 mod gpu_pipeline;
 
+mod export;
+
 #[allow(dead_code)]
 mod numerics;
 
@@ -57,8 +59,6 @@ enum Runner {
     },
     Ready {
         window: Arc<Window>,
-        queue: wgpu::Queue,
-        device: wgpu::Device,
         surface: wgpu::Surface<'static>,
         format: wgpu::TextureFormat,
         renderer: Renderer,
@@ -75,6 +75,7 @@ enum Runner {
         prev_pos: (f64, f64),
         mouse_lb_state: ElementState,
         mouse_rb_state: ElementState,
+        is_panning: bool,
     },
 }
 
@@ -146,7 +147,7 @@ impl ApplicationHandler for Runner {
 
             // Initialize scene and GUI controls
             let scene = Rc::new(RefCell::new(
-                Scene::new(window.clone(), &device, format,
+                Scene::new(window.clone(), device, queue, format,
                     physical_size.width.into(),
                     physical_size.height.into(),
                    &settings
@@ -161,8 +162,8 @@ impl ApplicationHandler for Runner {
             let renderer = {
                 let engine = Engine::new(
                     &adapter,
-                    device.clone(),
-                    queue.clone(),
+                    scene.borrow().device().clone(),
+                    scene.borrow().queue().clone(),
                     format,
                     None,
                     Shell::headless(),
@@ -179,18 +180,20 @@ impl ApplicationHandler for Runner {
             let mouse_rb_state = ElementState::Released;
 
             info!("ApplicationHandler Runner Initialized");
-            *self = Self::Ready {window, device, queue, surface, format, renderer,
+            *self = Self::Ready {window, surface, format, renderer,
                 scene: Rc::clone(&scene), controls, events: Vec::new(), cursor: mouse::Cursor::Unavailable,
                 cache: user_interface::Cache::new(), modifiers: ModifiersState::default(),
-                clipboard, viewport, resized: false, prev_pos, mouse_lb_state, mouse_rb_state};
+                clipboard, viewport, resized: false, prev_pos, mouse_lb_state, mouse_rb_state,
+                is_panning: false};
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop,
             _window_id: WindowId, event: WindowEvent) {
-        let Self::Ready {window, device, queue, surface, format, renderer, scene,
+        let Self::Ready {window, surface, format, renderer, scene,
             controls, events, viewport, cursor, cache, modifiers, clipboard, resized,
-            mouse_lb_state, mouse_rb_state, prev_pos} = self
+            mouse_lb_state, mouse_rb_state, prev_pos,
+            is_panning} = self
         else {
             return;
         };
@@ -203,11 +206,10 @@ impl ApplicationHandler for Runner {
                     scene.borrow_mut().set_window_size(
                         size.width.into(), 
                         size.height.into());
-
                     *viewport = Viewport::with_physical_size(Size::new(size.width, size.height),
                         window.scale_factor() as f32);
 
-                    surface.configure(device, &wgpu::SurfaceConfiguration {
+                    surface.configure(scene.borrow().device(), &wgpu::SurfaceConfiguration {
                             format: *format,
                             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                             width: size.width,
@@ -229,7 +231,7 @@ impl ApplicationHandler for Runner {
                             let mut s = scene.borrow_mut();
 
                             // Ask ScoutEngine for it's current tile orbits and push to the GPU
-                            s.query_qualified_orbits(queue);
+                            s.query_qualified_orbits();
 
                             let scout_diags = s.read_scout_diagnostics();
                             let mut scout_diags_g = scout_diags.lock();
@@ -238,8 +240,18 @@ impl ApplicationHandler for Runner {
                                 scout_diags_g.consumed = true;
                             }
 
+                            let size = window.inner_size();
+                            let (w, h) = if *is_panning {
+                                (size.width as f64 * s.render_res_factor_during_pan(),
+                                 size.height as f64 * s.render_res_factor_during_pan())
+                            }
+                            else {
+                                (size.width as f64 * s.render_res_factor(),
+                                 size.height as f64 * s.render_res_factor())
+                            };
+
                             // Draw the scene (contains both fragment render and compute passes)
-                            s.render(&device, &queue, &view);
+                            s.render(w as u32, h as u32, Some(&view));
                         }
 
                         // Draw Iced on top
@@ -319,6 +331,7 @@ impl ApplicationHandler for Runner {
 
                 match mouse_rb_state {
                     ElementState::Pressed => {
+                        *is_panning = true;
                         if prev_pos.0 > 0.0 {
                             let diff = ((position.x - prev_pos.0) as f64,
                                         (position.y - prev_pos.1) as f64);
@@ -328,17 +341,20 @@ impl ApplicationHandler for Runner {
 
                             scene.borrow_mut().change_center(diff);
                         } else {
+                            scene.borrow_mut().recalculate();
                             debug!("CursorMoved & ElementState::Pressed starting pos={:?}", position);
                         }
 
                         prev_pos.0 = position.x;
                         prev_pos.1 = position.y;
-                        
                         window.request_redraw();
                     }
                     ElementState::Released => {
                         if prev_pos.0 > 0.0 {
+                            *is_panning = false;
+                            scene.borrow_mut().recalculate();
                             scene.borrow_mut().take_camera_snapshot();
+                            window.request_redraw();
                         }
 
                         *prev_pos = (-1.0, -1.0);

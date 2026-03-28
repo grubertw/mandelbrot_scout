@@ -28,7 +28,6 @@ pub async fn scout_worker(
     let mut orbit_obvs_rx = orbit_observations_rx.fuse();
     let mut explore_rx = explore_rx.fuse();
 
-    context.write_diagnostics("Scout Engine Ready!".to_string());
     loop {
         select! {
             cs_res = snap_rx.next() => {

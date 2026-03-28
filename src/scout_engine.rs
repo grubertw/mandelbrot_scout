@@ -103,6 +103,10 @@ impl ScoutEngineContext {
         window: Arc<Window>, 
         snapshot: CameraSnapshot
     ) -> Self {
+        // Prevent scout engine from overwriting initial warning diags when program starts
+        let init_diag = Arc::new(Mutex::new(ScoutDiagnostics::new("".to_string())));
+        init_diag.lock().consumed = true;
+        
         Self {
             config: Arc::new(Mutex::new(config)),
             living_orbits: Arc::new(Mutex::new(Vec::new())),
@@ -111,9 +115,7 @@ impl ScoutEngineContext {
             grid_samples: Arc::new(Mutex::new(Vec::new())),
             context_changed: Arc::new(AtomicBool::new(false)),
             window,
-            diagnostics: Arc::new(Mutex::new(ScoutDiagnostics::new(
-                "Scout Engine initializing...".to_string()))
-            ),
+            diagnostics: init_diag
         }
     }
     
@@ -250,5 +252,19 @@ impl ScoutEngine {
         trace!("{}", trace_str);
 
         df_orbits
+    }
+
+    /// Api for a lightweight task/job submission system, for allowing parts of the program
+    /// external to ScoutEngine to leverage the same thread pool and diagnostics display
+    /// onto the screen.
+    pub fn spawn_external_task<F>(&self, f: F)
+    where
+        F: FnOnce() -> String + Send + 'static {
+        let context = self.context.clone();
+
+        self.thread_pool.spawn_ok(async move {
+            let msg = f();
+            context.write_diagnostics(msg);
+        });
     }
 }

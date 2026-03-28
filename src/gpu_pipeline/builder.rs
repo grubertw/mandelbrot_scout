@@ -18,14 +18,18 @@ pub struct PipelineBundle {
     pub rank_one_orbit_buf: wgpu::Buffer,
     pub rank_two_orbit_buf: wgpu::Buffer,
     pub palette_texture: wgpu::Texture,
+    pub render_texture: wgpu::Texture,
+    pub render_readback_buf: wgpu::Buffer,
     pub clear_bg: wgpu::BindGroup,
     pub calc_bg: wgpu::BindGroup,
     pub debug_bg: wgpu::BindGroup,
     pub color_bg: wgpu::BindGroup,
+    pub display_bg: wgpu::BindGroup,
     pub reduce_bg: wgpu::BindGroup,
     pub clear_pipeline: wgpu::ComputePipeline,
     pub calc_mandel_pipeline: wgpu::ComputePipeline,
-    pub color_pipeline: wgpu::RenderPipeline,
+    pub color_pipeline: wgpu::ComputePipeline,
+    pub display_pipeline: wgpu::RenderPipeline,
     pub reduce_pipeline: wgpu::ComputePipeline
 }
 
@@ -36,7 +40,9 @@ impl PipelineBundle {
         texture_format: wgpu::TextureFormat,
         settings: &Settings
     ) -> Self {
-        let (uniform_buff, mandel_out_tex, grid_feedback_buffer, orbit_feedback_buffer) =
+        let (uniform_buff,
+            mandel_out_tex, render_texture,
+            render_readback_buf, grid_feedback_buffer, orbit_feedback_buffer) =
             create_shared_buffers(device, uniform, settings);
 
         //
@@ -44,11 +50,12 @@ impl PipelineBundle {
         // --- 
         // The functions below can best be thought of as a memory contract for each
         // shader pass, where the wgsl source executes on the GPU. Note the buffers 
-        // above are shared with each shader stage, acting as imputs and outputs.
+        // above are shared with each shader stage, acting as inputs and outputs.
         //
         let (
             clear_bg, clear_pipeline
-        ) = build_clear_pipeline(device, &mandel_out_tex, &grid_feedback_buffer, &orbit_feedback_buffer);
+        ) = build_clear_pipeline(device,
+                 &mandel_out_tex, &render_texture, &grid_feedback_buffer, &orbit_feedback_buffer);
 
         let (
             ref_orbit_location_buf, rank_one_orbit_buf, rank_two_orbit_buf,
@@ -61,7 +68,12 @@ impl PipelineBundle {
             palette_texture,
             color_bg,
             color_pipeline
-        ) = build_color_pipeline(device, &uniform_buff, &mandel_out_tex, texture_format, &settings);
+        ) = build_color_pipeline(device,
+                 &uniform_buff, &mandel_out_tex, &render_texture, &settings);
+
+        let (
+            display_bg, display_pipeline
+        ) = build_display_pipeline(device, &uniform_buff, &render_texture, texture_format);
 
         let (
             grid_feedback_readback, orbit_feedback_readback,
@@ -77,10 +89,11 @@ impl PipelineBundle {
             orbit_feedback_readback,
             debug_buffer, debug_readback,
             ref_orbit_location_buf, rank_one_orbit_buf, rank_two_orbit_buf,
-            palette_texture,
-            clear_bg, calc_bg, debug_bg, color_bg, reduce_bg,
+            palette_texture, render_texture,
+            render_readback_buf,
+            clear_bg, calc_bg, debug_bg, color_bg, display_bg, reduce_bg,
             clear_pipeline,
-            calc_mandel_pipeline, color_pipeline, reduce_pipeline
+            calc_mandel_pipeline, color_pipeline, display_pipeline, reduce_pipeline
         }
     }
 }
@@ -89,7 +102,9 @@ impl PipelineBundle {
 // Create WGPU Buffers & Textures to be shared accorss three piplines 
 //
 fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings: &Settings)
--> (wgpu::Buffer, wgpu::Texture, wgpu::Buffer, wgpu::Buffer) {
+-> (wgpu::Buffer,
+    wgpu::Texture, wgpu::Texture,
+    wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
     // Allocate Scene Uniforms buffer, where most shader settings reside
     let uniform_buff = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,
@@ -101,8 +116,8 @@ fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings
     let mandel_out_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("mandel_out_tex"),
         size: wgpu::Extent3d {
-            width: settings.max_screen_width,
-            height: settings.max_screen_height,
+            width: settings.render_tex_width,
+            height: settings.render_tex_height,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -114,10 +129,36 @@ fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings
         view_formats: &[],
     });
 
+    // Render texture, the output of the color/compute shader.
+    // This makes the fragment shader stupid simple, with no compute, only sampling of this texture
+    let render_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Render Texture"),
+        size: wgpu::Extent3d {
+            width: settings.render_tex_width,
+            height: settings.render_tex_height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    let render_readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Render Readback Buffer"),
+        size: (settings.render_tex_width * settings.render_tex_height * 4) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
     // --- Reduce output buffer ---
     let grid_feedback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("grid_feedback_buffer"),
-        size: ((settings.max_screen_width / settings.screen_grid_size) * (settings.max_screen_height / settings.screen_grid_size)) as u64
+        size: ((settings.render_tex_width / settings.screen_grid_size) * (settings.render_tex_height / settings.screen_grid_size)) as u64
             * std::mem::size_of::<GridFeedbackOut>() as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
@@ -131,7 +172,9 @@ fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings
         mapped_at_creation: false,
     });
 
-    (uniform_buff, mandel_out_tex, grid_feedback_buffer, orbit_feedback_buffer)
+    (uniform_buff,
+     mandel_out_tex, render_texture,
+     render_readback_buffer, grid_feedback_buffer, orbit_feedback_buffer)
 }
 
 //
@@ -140,6 +183,7 @@ fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings
 fn build_clear_pipeline(
     device: &wgpu::Device,
     mandel_out_tex: &wgpu::Texture,
+    render_texture: &wgpu::Texture,
     grid_feedback_buffer: &wgpu::Buffer,
     orbit_feedback_buffer: &wgpu::Buffer,
 ) -> (wgpu::BindGroup, wgpu::ComputePipeline) {
@@ -160,9 +204,20 @@ fn build_clear_pipeline(
                 },
                 count: None,
             },
-            // grid feedback
+            // render texture (final image)
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            // grid feedback
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -173,7 +228,7 @@ fn build_clear_pipeline(
             },
             // orbit feedback
             wgpu::BindGroupLayoutEntry {
-                binding: 2,
+                binding: 3,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -197,10 +252,16 @@ fn build_clear_pipeline(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: grid_feedback_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::TextureView(
+                    &render_texture.create_view(&Default::default())
+                ),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
+                resource: grid_feedback_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
                 resource: orbit_feedback_buffer.as_entire_binding(),
             },
         ],
@@ -421,18 +482,18 @@ fn build_shader_calc_pipeline(
 }
 
 //
-// Pipeline 3 color (vert+fragment) shader pipeline
+// Pipeline 3 color (compute) shader pipeline
 //
 fn build_color_pipeline(
     device: &wgpu::Device,
     uniform_buff: &wgpu::Buffer,
     mandel_calc_tex: &wgpu::Texture,
-    texture_format: wgpu::TextureFormat,
+    render_texture: &wgpu::Texture,
     settings: &Settings
 ) -> (
     wgpu::Texture,
     wgpu::BindGroup,
-    wgpu::RenderPipeline
+    wgpu::ComputePipeline
 ) {
     // Shader for the Render (vertex + fragment) pipeline
     let color_shader = device.create_shader_module(wgpu::include_wgsl!("color.wgsl"));
@@ -454,24 +515,12 @@ fn build_color_pipeline(
         view_formats: &[],
     });
 
-    let palette_view = palette_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-    let palette_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::FilterMode::Nearest,
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        ..Default::default()
-    });
-
     let color_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Color bind group layout"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -482,7 +531,7 @@ fn build_color_pipeline(
             // mandel calc output 2d (per-pixel) texture
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -493,20 +542,25 @@ fn build_color_pipeline(
             // Color palette 1d texture
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
                 count: None,
             },
+            // render texture (final image)
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
                 count: None,
-            }
+            },
         ],
     });
 
@@ -527,12 +581,14 @@ fn build_color_pipeline(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::TextureView(
-                    &palette_view
+                    &palette_texture.create_view(&wgpu::TextureViewDescriptor::default())
                 ),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: wgpu::BindingResource::Sampler(&palette_sampler),
+                resource: wgpu::BindingResource::TextureView(
+                    &render_texture.create_view(&Default::default())
+                ),
             },
         ],
     });
@@ -545,17 +601,115 @@ fn build_color_pipeline(
         ],
     });
 
-    let color_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Color Pipeline"),
-        layout: Some(&color_pipeline_layout),
-        vertex: wgpu::VertexState {
+    let color_pipeline =
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("color_pipeline"),
+            layout: Some(&color_pipeline_layout),
             module: &color_shader,
+            entry_point: Option::from("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+    (palette_texture, color_bg, color_pipeline)
+}
+
+//
+// Pipeline 4 display (vert+fragment) shader pipeline
+//
+fn build_display_pipeline(
+    device: &wgpu::Device,
+    uniform_buff: &wgpu::Buffer,
+    render_texture: &wgpu::Texture,
+    texture_format: wgpu::TextureFormat
+) -> (
+    wgpu::BindGroup,
+    wgpu::RenderPipeline
+) {
+    // Shader for the Render (vertex + fragment) pipeline
+    let display_shader = device.create_shader_module(wgpu::include_wgsl!("display.wgsl"));
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        ..Default::default()
+    });
+
+    let display_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Display bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None
+                },
+                count: None,
+            },
+            // render texture (final image)
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            }
+        ],
+    });
+
+    let display_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("display_bg"),
+        layout: &display_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buff.as_entire_binding()
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(
+                    &render_texture.create_view(&Default::default())
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+
+    let display_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("display_pipeline_layout"),
+        push_constant_ranges: &[],
+        bind_group_layouts: &[
+            &display_bgl,
+        ],
+    });
+
+    let display_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Color Pipeline"),
+        layout: Some(&display_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &display_shader,
             entry_point: Option::from("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[],
         },
         fragment: Some(wgpu::FragmentState {
-            module: &color_shader,
+            module: &display_shader,
             entry_point: Option::from("fs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
@@ -578,11 +732,11 @@ fn build_color_pipeline(
         cache: None,
     });
 
-    (palette_texture, color_bg, color_pipeline)
+    (display_bg, display_pipeline)
 }
 
 //
-// Pipeline 4 reduce (compute) shader
+// Pipeline 5 reduce (compute) shader
 //
 fn build_reduce_pipeline(
     device: &wgpu::Device,
@@ -597,7 +751,7 @@ fn build_reduce_pipeline(
 
     let grid_feedback_readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("grid_feedback_readback"),
-        size: (((settings.max_screen_width / settings.screen_grid_size) * (settings.max_screen_height / settings.screen_grid_size)) as usize
+        size: (((settings.render_tex_width / settings.screen_grid_size) * (settings.render_tex_height / settings.screen_grid_size)) as usize
             * std::mem::size_of::<GridFeedbackOut>()) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,

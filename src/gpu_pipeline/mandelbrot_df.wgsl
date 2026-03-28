@@ -176,17 +176,15 @@ fn cdf_mul(a: ComplexDf, b: ComplexDf) -> ComplexDf {
 // -------------------------------
 struct Uniforms {
     center_x_hi:        f32,
-    center_x_lo:        f32,
     center_y_hi:        f32,
-    center_y_lo:        f32,
     scale_hi:           f32,
-    scale_lo:           f32,
     max_iter:           u32,
     ref_orb_count:      u32,
     screen_width:       u32,
     screen_height:      u32,
     grid_size:          u32,
     grid_width:         u32,
+    palette_size:       u32,
     palette_frequency:  f32,
     palette_offset:     f32,
     palette_gamma:      f32,

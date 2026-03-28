@@ -8,8 +8,12 @@ struct Uniforms {
     scale:              f32,
     max_iter:           u32,
     ref_orb_count:      u32,
-    screen_width:       u32,
-    screen_height:      u32,
+    view_width:         f32,
+    view_height:        f32,
+    render_width:       u32,
+    render_height:      u32,
+    render_tex_width:   f32,
+    render_tex_height:  f32,
     grid_size:          u32,
     grid_width:         u32,
 };
@@ -55,7 +59,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let pix = vec2i(i32(gid.x), i32(gid.y));
 
     // Bounds checking based on real screen size
-    if (pix.x >= i32(uni.screen_width) || pix.y >= i32(uni.screen_height)) {
+    if (pix.x >= i32(uni.render_width) || pix.y >= i32(uni.render_height)) {
         return;
     }
 

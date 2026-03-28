@@ -40,6 +40,24 @@ complex_span = 3.0
 # computation 'early' - i.e. until an anchor orbit is found, at which point
 # the remainder of the orbit will be computed
 max_user_iter = 500
+# When value is 1.0, this is a direct pixel-to-pixel mapping between
+# the render_texture and display
+# Descreasing the value resuces it's 'quality', meaning that the texture
+# sampler will interpolate pixels for upscaling.
+# Increasing the value beyond one is effectivly supersamling, or samlpling
+# more than one value per-pixel. While not the same as anti-alising or 
+# 'adapive' super-sampling (i.e. driven by fractal calculation), this is
+# essentialy 'free' GPU capability.
+render_res_factor = 1.0
+# Same as above, applied when panning the camera. This becomes very helpfull
+# for deep-zoom scenerios with high iteration counts, making navigation FAR 
+# faster (or really even possible).
+render_res_factor_during_pan = 0.85
+# Program will pre-pend with $HOME enviornment variable when forming the full
+# file path to export
+default_export_directory = "/Pictures/Fractals"
+# Note, the file extension is added automatically (either png or jpeg)
+default_export_filename = "fractal"
 
 #
 # Controls WGPU texture allocation
@@ -48,10 +66,10 @@ max_user_iter = 500
 max_orbits_per_frame = 4
 # Max iterations for reference orbits sent to GPU
 max_ref_orbit = 65536
-# Support for 4k display
-max_screen_width = 3840
-# Support for 4k display
-max_screen_height = 2160
+# Render texture size
+# Controls both how large the viewport can be, and the max size of image export
+render_tex_width = 8000
+render_tex_height = 8000
 # Pixel size of GPU sample grid segmments, used in the reduce shader to find
 # best/deepest escape pixel.
 screen_grid_size = 64

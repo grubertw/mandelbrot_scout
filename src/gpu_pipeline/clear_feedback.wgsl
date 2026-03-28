@@ -1,6 +1,9 @@
 @group(0) @binding(0)
 var mandel_out_tex : texture_storage_2d<rgba32float, write>;
 
+@group(0) @binding(1)
+var render_tex : texture_storage_2d<rgba8unorm, write>;
+
 // Aggregated screen-grid output (atomics)
 struct GridFeedback {
     best_pixel_x:           atomic<i32>, // Pixel location of deepest iteration in the sample grid
@@ -9,7 +12,7 @@ struct GridFeedback {
     max_iter_count:         atomic<u32>, // Also needed here to find best pixel
 };
 
-@group(0) @binding(1)
+@group(0) @binding(2)
 var<storage, read_write> grid_feedback : array<GridFeedback>;
 
 struct OrbitFeedback {
@@ -20,7 +23,7 @@ struct OrbitFeedback {
     perurb_error_outer_count:   atomic<u32>,
     max_iter_reached_count:     atomic<u32>,
 };
-@group(0) @binding(2)
+@group(0) @binding(3)
 var<storage, read_write> tile_feedback : array<OrbitFeedback>;
 
 const MAX_U32 : u32 = 0xFFFFFFFFu;
@@ -32,6 +35,7 @@ fn cs_main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     // Clear per-pixel textures
     textureStore(mandel_out_tex, vec2i(x, y), vec4f(0.0, 0.0, 0.0, 0.0));
+    textureStore(render_tex, vec2i(x, y), vec4f(0.0, 0.0, 0.0, 0.0));
 
     // Clear feedback (1D mapping)
     let grid_idx = gid.y * 65536u + gid.x;

@@ -1,16 +1,22 @@
 use super::scene::{Scene};
 
 use iced_wgpu::Renderer;
-use iced_widget::{text_input, column, row, text, button, space, Row, slider, pick_list, checkbox, container, Column};
+use iced_widget::{text_input, column, row, text, button, space, Row, slider, pick_list, checkbox, container, Column, radio};
 use iced_widget::core::{Alignment, Color, Element, Theme, Length, border, color, Font};
 
-use log::{trace};
+use log::{debug, info, trace, warn};
 
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::env;
+use std::fs::File;
 use iced_wgpu::core::font;
 use iced_wgpu::core::text::Wrapping;
+use png::Compression;
+use rfd::FileDialog;
 use rug::{Complex, Float};
+use crate::export::{render_scene_to_jpeg, render_scene_to_png};
+use crate::scene::import::load_metadata_from_png;
 use crate::scout_engine::ScoutSignal;
 use crate::settings::Settings;
 
@@ -37,13 +43,39 @@ impl std::fmt::Display for PaletteSelection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq )]
+pub enum ExportImgFormat {
+    Png,
+    Jpeg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PngCompression {
+    None,
+    Fast,
+    Default,
+    Best,
+}
+impl From<PngCompression> for Compression {
+    fn from(c: PngCompression) -> Self {
+        match c {
+            PngCompression::None => Compression::NoCompression,
+            PngCompression::Fast => Compression::Fast,
+            PngCompression::Default => Compression::Balanced,
+            PngCompression::Best => Compression::High,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Controls {
     // Bools that show/hide rows
     editing_iters: bool,
     editing_location: bool,
+    editing_resolution: bool,
     editing_color: bool,
     editing_scout: bool,
+    editing_export: bool,
 
     // Iterations config
     iter_step: u32,
@@ -55,6 +87,10 @@ pub struct Controls {
     center_x: String,
     center_y: String,
     scale: String,
+
+    // Render resolution settings
+    render_res_factor: f64,
+    render_res_factor_during_pan: f64,
 
     // Color config
     palettes: Vec<PaletteSelection>,
@@ -107,6 +143,16 @@ pub struct Controls {
     num_qualified_orbits: String,
     glitch_fix: bool,
 
+    // Export/save config
+    export_img_format: Option<ExportImgFormat>,
+    export_img_dir: String,
+    export_img_file_name: String,
+    export_img_png_compression: Option<PngCompression>,
+    export_img_jpeg_quality: u8,
+    use_alternate_dimensions: bool,
+    export_img_width: String,
+    export_img_height: String,
+
     debug_msg: String,
     info_text: String,
     scene: Rc<RefCell<Scene>>
@@ -117,8 +163,10 @@ pub enum Message {
     DisplayInfo,
     EditingItersChanged(bool),
     EditingLocationChanged(bool),
+    EditingResolutionChanged(bool),
     EditingColorChanged(bool),
     EditingScoutConfigChanged(bool),
+    EditingExportChanged(bool),
 
     IterStepChanged(String),
     IterRangeMinChanged(String),
@@ -130,6 +178,10 @@ pub enum Message {
     ScaleChanged(String),
     PollFromScene,
     ApplyCenterScale,
+    RestoreFromPng,
+
+    RenderResFactorChanged(f64),
+    RenderResFactorDuringPanChanged(f64),
 
     SelectedPaletteChanged(PaletteSelection),
     FrequencyChanged(f32),
@@ -163,12 +215,23 @@ pub enum Message {
     EnableRimChanged(bool),
     RimIntensityChanged(f32),
     RimPowerChanged(f32),
+
     ResetScoutEngine,
     GoScout,
     RefItersMultiplierChanged(String),
     SpawnPerEvalChanged(String),
     NumQualifiedOrbits(String),
     GlitchFixChanged(bool),
+
+    ExportImgFormatChanged(ExportImgFormat),
+    ExportImgDirChanged(String),
+    ExportImgFileNameChanged(String),
+    ExportImgPngCompressionChanged(PngCompression),
+    ExportImgJpegQualityChanged(u8),
+    UseAlternateDimensionsChanged(bool),
+    ExportImgWidthChanged(String),
+    ExportImgHeightChanged(String),
+    ExportImage,
 
     UpdateDebugText(String),
 }
@@ -201,15 +264,28 @@ impl Controls {
             built_info::RUSTC_VERSION,
         );
 
+        let default_export_directory = match env::var("HOME") {
+            Ok(val) => format!("{}{}", val, settings.default_export_directory),
+            Err(_) => "".to_string(),
+        };
+
+        let debug_msg = if settings.palettes.len() == 1 {
+            "settings.toml was not found. Starting with only one color palette!"
+        } else {""};
+
         Controls {
             editing_iters: false,
             editing_location: false,
+            editing_resolution: false,
             editing_color: false,
             editing_scout: false,
+            editing_export: false,
             iter_step: 10,
             iter_range_min: 0, iter_range_max: settings.max_user_iter * 2,
             max_iterations: settings.max_user_iter,
             center_x, center_y, scale,
+            render_res_factor: settings.render_res_factor,
+            render_res_factor_during_pan: settings.render_res_factor_during_pan,
             palettes,
             selected_palette: Some(palette_selection),
             frequency: palette.frequency,
@@ -252,7 +328,15 @@ impl Controls {
             spawn_per_eval: settings.num_seeds_to_spawn_per_eval.to_string(),
             num_qualified_orbits: settings.num_qualified_orbits.to_string(),
             glitch_fix: false,
-            debug_msg: "debug info loading...".to_string(), info_text,
+            export_img_format: Some(ExportImgFormat::Png),
+            export_img_dir: default_export_directory,
+            export_img_file_name: settings.default_export_filename.clone(),
+            export_img_png_compression: Some(PngCompression::Default),
+            export_img_jpeg_quality: 90,
+            use_alternate_dimensions: false,
+            export_img_width: scene.borrow().width().to_string(),
+            export_img_height: scene.borrow().height().to_string(),
+            debug_msg: debug_msg.to_string(), info_text,
             scene: scene.clone()
         }
     }
@@ -274,11 +358,21 @@ impl Controls {
             Message::EditingLocationChanged(toggle) => {
                 self.editing_location = toggle;
             }
+            Message::EditingResolutionChanged(toggle) => {
+                self.editing_resolution = toggle;
+            }
             Message::EditingColorChanged(toggle) => {
                 self.editing_color = toggle;
             }
             Message::EditingScoutConfigChanged(toggle) => {
                 self.editing_scout = toggle;
+            }
+            Message::EditingExportChanged(toggle) => {
+                self.editing_export = toggle;
+                if !self.use_alternate_dimensions {
+                    self.export_img_width = self.scene.borrow().width().to_string();
+                    self.export_img_height = self.scene.borrow().height().to_string();
+                }
             }
             Message::IterStepChanged(iter_inc) => {
                 if let Ok(v) = iter_inc.parse::<u32>() {
@@ -336,6 +430,38 @@ impl Controls {
                 scene_b.set_scale(scale);
                 // Update scout engine with new position
                 scene_b.take_camera_snapshot();
+            }
+            Message::RestoreFromPng => {
+                if let Some(path) = FileDialog::new()
+                    .add_filter("PNG Image", &["png"])
+                    .pick_file() {
+                    info!("Attempting to restore scene from PNG file: {:?}", path);
+                    if let Some(meta) = load_metadata_from_png(path.to_str().unwrap()) {
+                        debug!("Found metadata in PNG: {:?}", meta);
+                        let mut scene_b = self.scene.borrow_mut();
+
+                        scene_b.apply_metadata(meta);
+                        self.debug_msg = format!("Successfully restored scene from PNG file {:?}!", path);
+                        info!("{}", self.debug_msg);
+                        self.center_x = scene_b.center().real().to_string_radix(10, Some(10));
+                        self.center_y = scene_b.center().imag().to_string_radix(10, Some(10));
+                        self.scale = scene_b.scale().to_string_radix(10, Some(6));
+                    }
+                    else {
+                        self.debug_msg =
+                            format!("Failed to restore scene from selected file {:?}\n\tPNG text header metadata may not be present.\n\tNOTE, only PNG files saved by this program can be restored in this manor.",
+                                    path);
+                        warn!("{}", self.debug_msg);
+                    }
+                }
+            }
+            Message::RenderResFactorChanged(res_fac) => {
+                self.render_res_factor = res_fac;
+                self.scene.borrow_mut().set_render_res_factor(res_fac);
+            }
+            Message::RenderResFactorDuringPanChanged(res_fac) => {
+                self.render_res_factor_during_pan = res_fac;
+                self.scene.borrow_mut().set_render_res_factor_during_pan(res_fac);
             }
             Message::SelectedPaletteChanged(selected_palette) => {
                 let key = selected_palette.key.clone();
@@ -508,6 +634,78 @@ impl Controls {
                 self.glitch_fix = glitch_fix;
                 self.scene.borrow_mut().set_glitch_fix(glitch_fix);
             }
+            Message::ExportImgFormatChanged(img_format) => {
+                self.export_img_format = Some(img_format);
+            }
+            Message::ExportImgDirChanged(img_dir) => {
+                self.export_img_dir = img_dir;
+            }
+            Message::ExportImgFileNameChanged(img_file_name) => {
+                self.export_img_file_name = img_file_name;
+            }
+            Message::ExportImgPngCompressionChanged(png_compression) => {
+                self.export_img_png_compression = Some(png_compression);
+            }
+            Message::ExportImgJpegQualityChanged(jpeg_quality) => {
+                self.export_img_jpeg_quality = jpeg_quality;
+            }
+            Message::UseAlternateDimensionsChanged(use_alt_dims) => {
+                self.use_alternate_dimensions = use_alt_dims;
+                if !use_alt_dims {
+                    self.export_img_width = self.scene.borrow().width().to_string();
+                    self.export_img_height = self.scene.borrow().height().to_string();
+                }
+            }
+            Message::ExportImgWidthChanged(width) => {
+                self.export_img_width = width;
+            }
+            Message::ExportImgHeightChanged(height) => {
+                self.export_img_height = height;
+            }
+            Message::ExportImage => {
+                let file_ext =  if let Some(img_fmt) = self.export_img_format && img_fmt == ExportImgFormat::Png {
+                    "png".to_string()
+                } else if let Some(img_fmt) = self.export_img_format && img_fmt == ExportImgFormat::Jpeg {
+                    "jpg".to_string()
+                } else {"".to_string()};
+
+                let full_filename = format!("{}/{}.{}", self.export_img_dir, self.export_img_file_name, file_ext);
+                match File::create(full_filename.as_str()) {
+                    Ok(file) => {
+                        let mut img_width = match self.export_img_width.parse::<u32>() {
+                            Ok(w) => w,
+                            Err(e) => {
+                                self.debug_msg =
+                                    format!("Provided image width is invalid: {}", e.to_string());
+                                return;
+                            }
+                        };
+                        let mut img_height = match self.export_img_height.parse::<u32>() {
+                            Ok(h) => h,
+                            Err(e) => {
+                                self.debug_msg = format!("Provided image height is invalid: {}", e.to_string());
+                                return;
+                            }
+                        };
+
+                        img_width = self.scene.borrow().max_width().min(img_width);
+                        img_height = self.scene.borrow().max_height().min(img_height);
+                        self.debug_msg = format!("Exporting image with width {} and height {} to image file {}\n\texport will run in the background...",
+                             img_width, img_height, full_filename);
+                        info!("{}", self.debug_msg);
+
+                        if let Some(img_fmt) = self.export_img_format && img_fmt == ExportImgFormat::Png {
+                            render_scene_to_png(self.scene.clone(), img_width, img_height, file, self.export_img_png_compression.unwrap().into())
+                        }
+                        else if let Some(img_fmt) = self.export_img_format && img_fmt == ExportImgFormat::Jpeg {
+                            render_scene_to_jpeg(self.scene.clone(), img_width, img_height, file, self.export_img_jpeg_quality)
+                        }
+                    }
+                    Err(e) => {
+                        self.debug_msg = e.to_string();
+                    }
+                }
+            }
             Message::UpdateDebugText(dbg_msg) => {
                 self.debug_msg = dbg_msg;
             }
@@ -537,6 +735,10 @@ impl Controls {
                 .on_press(Message::EditingLocationChanged(!self.editing_location))
                 .style(if self.editing_location {button::primary} else {button::text}),
             space().width(Length::Fixed(20.0)),
+            button("Res")
+                .on_press(Message::EditingResolutionChanged(!self.editing_resolution))
+                .style(if self.editing_resolution {button::primary} else {button::text}),
+            space().width(Length::Fixed(20.0)),
             button("Color")
                 .on_press(Message::EditingColorChanged(!self.editing_color))
                 .style(if self.editing_color {button::primary} else {button::text}),
@@ -544,6 +746,10 @@ impl Controls {
             button("Scout")
                 .on_press(Message::EditingScoutConfigChanged(!self.editing_scout))
                 .style(if self.editing_scout {button::primary} else {button::text}),
+            space().width(Length::Fixed(20.0)),
+            button("Save")
+                .on_press(Message::EditingExportChanged(!self.editing_export))
+                .style(if self.editing_export {button::primary} else {button::text}),
         ]
         .align_y(Alignment::Start);
 
@@ -573,6 +779,13 @@ impl Controls {
                     .padding(10)
             );
         }
+        if self.editing_resolution {
+            primary_panel = primary_panel.push(
+                container(self.render_edit_render_resolution_row())
+                    .style(outer_container_style)
+                    .padding(10)
+            )
+        }
         if self.editing_color {
             primary_panel = primary_panel.push(
                 container(self.render_color_controls())
@@ -583,6 +796,13 @@ impl Controls {
         if self.editing_scout {
             primary_panel = primary_panel.push(
                 container(self.render_scout_config_row())
+                    .style(outer_container_style)
+                    .padding(10)
+            );
+        }
+        if self.editing_export {
+            primary_panel = primary_panel.push(
+                container(self.render_export_config())
                     .style(outer_container_style)
                     .padding(10)
             );
@@ -636,7 +856,7 @@ impl Controls {
                 .width(Length::Fixed(50.0)),
 
             text("real: ")
-                .width(Length::Fixed(60.0))
+                .width(Length::Fixed(50.0))
                 .align_y(Alignment::Center)
                 .align_x(Alignment::End),
             text_input("Placeholder...", &self.center_x)
@@ -659,12 +879,55 @@ impl Controls {
                 .on_input(Message::ScaleChanged)
                 .width(Length::Fixed(110.0)),
 
-            space().width(Length::Fixed(20.0)),
+            space().width(Length::Fixed(10.0)),
 
             button("Apply")
                 .on_press(Message::ApplyCenterScale)
-                .width(Length::Fixed(65.0))
-                .height(Length::Shrink),
+                .width(Length::Fixed(65.0)),
+
+            space().width(Length::Fixed(10.0)),
+
+            button(
+                text("Restore From Png")
+                .wrapping(Wrapping::Word)
+                .align_x(Alignment::Center)
+                .size(9))
+            .on_press(Message::RestoreFromPng)
+            .width(Length::Fixed(90.0))
+        ]
+            .align_y(Alignment::Center)
+    }
+
+    fn render_edit_render_resolution_row(&self) -> Row<'_, Message, Theme, Renderer> {
+        row![
+            text("Resolution Factor")
+                .width(Length::Fixed(140.0))
+                .align_y(Alignment::Center)
+                .align_x(Alignment::Center),
+            space().width(Length::Fixed(5.0)),
+            slider(0.25..=2.0,
+                self.render_res_factor, Message::RenderResFactorChanged)
+                .step(0.05)
+                .width(Length::Fixed(100.0)),
+            space().width(Length::Fixed(5.0)),
+            text(format!("{:<3.2}", self.render_res_factor))
+                .width(Length::Fixed(30.0))
+                .align_y(Alignment::Center),
+            space().width(Length::Fixed(15.0)),
+
+            text("RF during pan")
+                .width(Length::Fixed(120.0))
+                .align_y(Alignment::Center)
+                .align_x(Alignment::Center),
+            space().width(Length::Fixed(5.0)),
+            slider(0.1..=1.0,
+                self.render_res_factor_during_pan, Message::RenderResFactorDuringPanChanged)
+                .step(0.05)
+                .width(Length::Fixed(100.0)),
+            space().width(Length::Fixed(5.0)),
+            text(format!("{:<3.2}", self.render_res_factor_during_pan))
+                .width(Length::Fixed(30.0))
+                .align_y(Alignment::Center),
         ]
             .align_y(Alignment::Center)
     }
@@ -826,7 +1089,6 @@ impl Controls {
             text("ref iters multiplier: ")
                 .width(Length::Fixed(65.0))
                 .wrapping(Wrapping::Word)
-                .size(12)
                 .align_y(Alignment::Center)
                 .align_x(Alignment::End),
             space().width(Length::Fixed(5.0)),
@@ -837,7 +1099,6 @@ impl Controls {
             text("spawn count per eval: ")
                 .width(Length::Fixed(75.0))
                 .wrapping(Wrapping::Word)
-                .size(12)
                 .align_y(Alignment::Center)
                 .align_x(Alignment::End),
             space().width(Length::Fixed(5.0)),
@@ -848,7 +1109,6 @@ impl Controls {
             text("max ref orbs: ")
                 .width(Length::Fixed(70.0))
                 .wrapping(Wrapping::Word)
-                .size(12)
                 .align_y(Alignment::Center)
                 .align_x(Alignment::End),
             space().width(Length::Fixed(5.0)),
@@ -863,7 +1123,6 @@ impl Controls {
             text("Rebase")
                 .width(Length::Fixed(35.0))
                 .wrapping(Wrapping::Word)
-                .size(11)
                 .align_y(Alignment::Center),
 
             space().width(Length::Fixed(20.0)),
@@ -874,6 +1133,131 @@ impl Controls {
         ]
             .align_y(Alignment::Center)
             .wrap().vertical_spacing(10)
+    }
+
+    fn render_export_config(&self) -> Column<'_, Message, Theme, Renderer> {
+        let mut export_controls = column![
+            row![
+                text("Save Directory:")
+                    .width(Length::Fixed(120.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::End),
+                space().width(Length::Fixed(10.0)),
+                text_input("Placeholder...", &self.export_img_dir)
+                    .on_input(Message::ExportImgDirChanged)
+                    .align_x(Alignment::Start)
+                    .width(Length::Fixed(300.0)),
+                space().width(Length::Fixed(15.0)),
+                text("(file extension will be added automatically)")
+                .width(Length::Fixed(100.0))
+                    .size(9)
+                    .wrapping(Wrapping::Word)
+                    .align_y(Alignment::Center),
+            ],
+            row![
+                text("Filename:")
+                    .width(Length::Fixed(120.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::End),
+                space().width(Length::Fixed(10.0)),
+                text_input("Placeholder...", &self.export_img_file_name)
+                    .on_input(Message::ExportImgFileNameChanged)
+                    .align_x(Alignment::Start)
+                    .width(Length::Fixed(300.0)),
+                space().width(Length::Fixed(25.0)),
+                radio("Png", ExportImgFormat::Png, self.export_img_format, Message::ExportImgFormatChanged),
+                space().width(Length::Fixed(15.0)),
+                radio("Jpeg", ExportImgFormat::Jpeg, self.export_img_format, Message::ExportImgFormatChanged),
+
+            ]
+        ];
+
+        if let Some(img_fmt) = self.export_img_format && img_fmt == ExportImgFormat::Png {
+            export_controls = export_controls.push(
+                row![
+                    text("Compression:")
+                    .align_y(Alignment::Center),
+                    space().width(Length::Fixed(20.0)),
+                    radio("None", PngCompression::None, self.export_img_png_compression, Message::ExportImgPngCompressionChanged),
+                    space().width(Length::Fixed(15.0)),
+                    radio("Fast", PngCompression::Fast, self.export_img_png_compression, Message::ExportImgPngCompressionChanged),
+                    space().width(Length::Fixed(15.0)),
+                    radio("Default", PngCompression::Default, self.export_img_png_compression, Message::ExportImgPngCompressionChanged),
+                    space().width(Length::Fixed(15.0)),
+                    radio("Best", PngCompression::Best, self.export_img_png_compression, Message::ExportImgPngCompressionChanged)
+                ]
+            );
+        }
+        else if let Some(img_fmt) = self.export_img_format && img_fmt == ExportImgFormat::Jpeg {
+            export_controls = export_controls.push(
+                row![
+                    text("Quality").align_y(Alignment::Center),
+                    space().width(Length::Fixed(20.0)),
+                    slider(10..=100,
+                       self.export_img_jpeg_quality, Message::ExportImgJpegQualityChanged)
+                    .step(1)
+                    .width(Length::Fixed(75.0)),
+                    space().width(Length::Fixed(10.0)),
+                    text(format!("{:<3}", self.export_img_jpeg_quality))
+                    .width(Length::Fixed(30.0))
+                    .align_y(Alignment::Center),
+                ]
+            );
+        }
+
+        let mut dimensions_row = row![
+            checkbox(self.use_alternate_dimensions)
+                .on_toggle(Message::UseAlternateDimensionsChanged),
+            space().width(Length::Fixed(10.0)),
+            text("Use alternate dimensions (from current window size)")
+                .size(9)
+                .width(Length::Fixed(100.0))
+                .wrapping(Wrapping::Word)
+                .align_y(Alignment::Center),
+            space().width(Length::Fixed(10.0))
+        ];
+        if self.use_alternate_dimensions {
+            dimensions_row = dimensions_row.push(
+                text("width").align_y(Alignment::Center)
+            );
+            dimensions_row = dimensions_row.push(
+                space().width(Length::Fixed(10.0))
+            );
+            dimensions_row = dimensions_row.push(
+                text_input("Placeholder...", &self.export_img_width)
+                    .on_input(Message::ExportImgWidthChanged)
+                    .width(Length::Fixed(75.0)),
+            );
+            dimensions_row = dimensions_row.push(
+                space().width(Length::Fixed(10.0))
+            );
+            dimensions_row = dimensions_row.push(
+                text("height").align_y(Alignment::Center)
+            );
+            dimensions_row = dimensions_row.push(
+                space().width(Length::Fixed(10.0))
+            );
+            dimensions_row = dimensions_row.push(
+                text_input("Placeholder...", &self.export_img_height)
+                    .on_input(Message::ExportImgHeightChanged)
+                    .width(Length::Fixed(75.0)),
+            );
+            dimensions_row = dimensions_row.push(
+                space().width(Length::Fixed(10.0))
+            );
+        }
+
+        dimensions_row = dimensions_row.push(
+            button("Save")
+                .on_press(Message::ExportImage)
+                .width(Length::Fixed(65.0)),
+        );
+
+        export_controls = export_controls.push(
+            dimensions_row
+        );
+        export_controls
+            .spacing(5)
     }
     
     fn render_de_controls(&self) -> Column<'_, Message, Theme, Renderer> {

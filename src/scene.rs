@@ -1,3 +1,5 @@
+pub mod import;
+
 use std::collections::HashMap;
 use crate::settings::Settings;
 use crate::gpu_pipeline::builder::*;
@@ -18,6 +20,8 @@ use log::{trace, debug, info, warn};
 use std::sync::Arc;
 use std::time;
 use parking_lot::Mutex;
+use crate::scene::import::{FractalMetadata, RefOrbitMetadata, META_VERSION};
+use crate::TITLE;
 
 #[derive(Debug, Clone)]
 struct LoadedOrbit {
@@ -41,6 +45,8 @@ pub struct ColorPalette {
 #[derive(Debug)]
 pub struct Scene {
     window: Arc<Window>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     frame_id: u64,
     frame_timestamp: time::Instant,
     center: Complex, // scaled and shifted with mouse drag
@@ -48,6 +54,8 @@ pub struct Scene {
     scale_factor: Float,
     width: f64,
     height: f64,
+    render_res_factor: f64,
+    render_res_factor_during_pan: f64,
     max_orbits_per_frame: u32,
     max_palette_colors: u32,
     scout_engine: ScoutEngine,
@@ -58,10 +66,14 @@ pub struct Scene {
     palette_changed: bool,
     color_palettes: HashMap<String, ColorPalette>,
     recalc_fractal: bool,
+    recalc_color: bool
 }
 
 impl Scene {
-    pub fn new(window: Arc<Window>, device: &wgpu::Device, 
+    pub fn new(
+        window: Arc<Window>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
         texture_format: wgpu::TextureFormat,
         width: f64, height: f64,
         settings: &Settings
@@ -99,12 +111,17 @@ impl Scene {
             center_x: center.real().to_f32(),
             center_y: center.imag().to_f32(),
             scale: scale.to_f32(),
-            screen_width: width as u32,
-            screen_height: height as u32,
+            view_width: width as f32,
+            view_height: height as f32,
+            render_width: width as u32,
+            render_height: height as u32,
+            render_tex_width: settings.render_tex_width as f32,
+            render_tex_height: settings.render_tex_height as f32,
             max_iter: settings.max_user_iter,
             ref_orb_count: 0,
             grid_size: settings.screen_grid_size,
             grid_width: width as u32 / settings.screen_grid_size,
+            palette_size: settings.max_palette_colors,
             palette_frequency: default_palette.frequency,
             palette_offset: 0.0,
             palette_gamma: 1.0,
@@ -131,33 +148,60 @@ impl Scene {
 
         // Configure and initialize all WGPU resources for render passes.
         let pipeline = PipelineBundle::build_pipelines(
-            device, &uniform, texture_format, settings);
+            &device, &uniform, texture_format, settings);
 
         Scene {
-            window, frame_id: 0, frame_timestamp: time::Instant::now(),
+            window, device, queue,
+            frame_id: 0, frame_timestamp: time::Instant::now(),
             center, scale, scale_factor: Float::with_val(settings.init_rug_precision, 1.05),
             width, height,
+            render_res_factor: settings.render_res_factor,
+            render_res_factor_during_pan: settings.render_res_factor_during_pan,
             max_orbits_per_frame: settings.max_orbits_per_frame,
             max_palette_colors: settings.max_palette_colors,
             scout_engine,
             loaded_orbits: Vec::new(),
             uniform, pipeline,
             selected_palette: "default".to_string(),
-            palette_changed: true, color_palettes, recalc_fractal: true,
+            palette_changed: true, color_palettes,
+            recalc_fractal: true, recalc_color: true,
         }
     }
 
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::TextureView) {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+    pub fn render(
+        &mut self,
+        width: u32,
+        height: u32,
+        target: Option<&wgpu::TextureView>
+    ) {
+        // set the render size and compute shader workgroup size depending on desired size for this
+        // render pass. If target texture is None, it is assumed that a read for image data in the
+        // render texture will be performed after (i.e. an invocation from the export module).
+        self.uniform.render_width = width.min(self.uniform.render_tex_width as u32);
+        self.uniform.render_height = height.min(self.uniform.render_tex_height as u32);
+        self.uniform.grid_width = width / self.uniform.grid_size;
+        let gx = (self.uniform.render_width  + 15) / 16;
+        let gy = (self.uniform.render_height + 15) / 16;
+
+        // If invoked from export (i.e. target=None), ensure render & view dimensions match
+        if target.is_none() {
+            self.uniform.view_width = self.uniform.render_width as f32;
+            self.uniform.view_height = self.uniform.render_height as f32;
+        }
+
+        // Upload color palette texture, if changed.
+        self.upload_color_palette();
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render encoder"),
         });
 
-        trace!("Draw with uniform={:?}", self.uniform);
+        trace!("Render width={} height={} with uniform={:?}", 
+            self.uniform.render_width, self.uniform.render_height, self.uniform);
         // Uniforms must be updated on every draw operation.
-        queue.write_buffer(&self.pipeline.uniform_buff, 0, bytemuck::cast_slice(&[self.uniform]));
+        self.queue.write_buffer(&self.pipeline.uniform_buff, 0, bytemuck::cast_slice(&[self.uniform]));
+
         if self.recalc_fractal {
-            let gx = (self.width as u32 + 15) / 16;
-            let gy = (self.height as u32 + 15) / 16;
             {
                 trace!("Compute pass clear storage textures. gx={} gy={}", gx, gy);
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -177,7 +221,7 @@ impl Scene {
                 });
 
                 // Update/refresh orbit locations before use.
-                self.upload_orbit_locations(queue);
+                self.upload_orbit_locations();
                 cpass.set_pipeline(&self.pipeline.calc_mandel_pipeline);
                 cpass.set_bind_group(0, &self.pipeline.calc_bg, &[]);
                 cpass.set_bind_group(1, &self.pipeline.debug_bg, &[]);
@@ -195,12 +239,24 @@ impl Scene {
                 rpass.dispatch_workgroups(gx, gy, 1);
             }
         }
-        {
-            trace!("Begin render/color pass");
+        if self.recalc_color || self.recalc_fractal {
+            self.recalc_color = false;
+            trace!("Begin color pass");
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("color pass"),
+                timestamp_writes: None
+            });
+
+            cpass.set_pipeline(&self.pipeline.color_pipeline);
+            cpass.set_bind_group(0, &self.pipeline.color_bg, &[]);
+            cpass.dispatch_workgroups(gx, gy, 1);
+        }
+        if let Some(t) = target {
+            trace!("Begin display pass");
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
+                label: Some("Display pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: t,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -215,40 +271,41 @@ impl Scene {
                 occlusion_query_set: None,
             });
 
-            // Upload color palette texture, if changed.
-            self.upload_color_palette(queue);
-
-            render_pass.set_pipeline(&self.pipeline.color_pipeline);
-            render_pass.set_bind_group(0, &self.pipeline.color_bg, &[]);
+            render_pass.set_pipeline(&self.pipeline.display_pipeline);
+            render_pass.set_bind_group(0, &self.pipeline.display_bg, &[]);
             render_pass.draw(0..3, 0..1);
         }
-        queue.submit(Some(encoder.finish()));
+        self.queue.submit(Some(encoder.finish()));
         self.stamp_frame();
 
         if self.recalc_fractal {
             self.recalc_fractal = false;
 
-            self.read_debug(&device, &queue);
-            self.read_grid_feedback(&device, &queue);
-            self.read_orbit_feedback(device, &queue);
+            self.read_debug();
+            self.read_grid_feedback();
+            self.read_orbit_feedback();
+        }
+
+        // Reset the view dimensions when finished
+        if target.is_none() {
+            self.uniform.view_width = self.width as f32;
+            self.uniform.view_height = self.height as f32;
+            // Ensure export does not affect the viewport
+            self.recalc_fractal = true;
         }
     }
 
-    pub fn read_grid_feedback(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) {
+    pub fn read_grid_feedback(&mut self) {
         let byte_size = 
             (self.uniform.grid_width
-            * (self.uniform.screen_height / self.uniform.grid_size)) as u64
+            * (self.uniform.render_height / self.uniform.grid_size)) as u64
             * std::mem::size_of::<GridFeedbackOut>() as u64;
         if byte_size == 0 {
             warn!("This frame had no grid feedback!");
             return;
         }
 
-        let mut encoder = device.create_command_encoder(
+        let mut encoder = self.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
                 label: Some("grid feedback copy encoder"),
             },
@@ -262,7 +319,7 @@ impl Scene {
             byte_size,
         );
 
-        queue.submit(Some(encoder.finish()));
+        self.queue.submit(Some(encoder.finish()));
 
         let buffer_slice = self.pipeline.grid_feedback_readback.slice(0..byte_size);
 
@@ -271,7 +328,7 @@ impl Scene {
             sender.send(res).ok();
         });
 
-        device.poll(wgpu::PollType::Wait{submission_index: None, timeout: None})
+        self.device.poll(wgpu::PollType::Wait{submission_index: None, timeout: None})
             .expect("Failed to poll grid feedback");
 
         let feedback = executor::block_on(async {
@@ -352,18 +409,14 @@ impl Scene {
         self.scout_engine.set_grid_samples(grid_samples)
     }
 
-    pub fn read_orbit_feedback(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) {
+    pub fn read_orbit_feedback(&mut self) {
         let byte_size = self.uniform.ref_orb_count as u64 * size_of::<OrbitFeedbackOut>() as u64;
         if byte_size == 0 {
             trace!("This frame had no orbit feedback. Tile count was zero!");
             return;
         }
 
-        let mut encoder = device.create_command_encoder(
+        let mut encoder = self.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
                 label: Some("orbit feedback copy encoder"),
             },
@@ -377,7 +430,7 @@ impl Scene {
             byte_size,
         );
 
-        queue.submit(Some(encoder.finish()));
+        self.queue.submit(Some(encoder.finish()));
 
         let buffer_slice = self.pipeline.orbit_feedback_readback.slice(0..byte_size);
 
@@ -386,10 +439,10 @@ impl Scene {
             sender.send(res).ok();
         });
 
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
             .expect("Failed to poll orbit feedback");
 
-        let feedback = futures::executor::block_on(async {
+        let feedback = executor::block_on(async {
             match receiver.await {
                 Ok(Ok(())) => {
                     let data = buffer_slice.get_mapped_range();
@@ -427,9 +480,69 @@ impl Scene {
         }
     }
 
-    pub fn read_debug(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+    pub fn read_render_feedback(&mut self, width: u32, height: u32) -> Vec<u8> {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render buffer copy encoder"),
+        });
+
+        let padded_bytes_per_row = ((4 * width + 255) / 256) * 256;
+
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.pipeline.render_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.pipeline.render_readback_buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // submit the copy
+        self.queue.submit(Some(encoder.finish()));
+
+        let buffer_slice = self.pipeline.render_readback_buf.slice(..);
+
+        let (sender, receiver) = channel::oneshot::channel::<Result<(), BufferAsyncError>>();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
+            sender.send(v).unwrap();
+        });
+
+        self.device.poll(wgpu::PollType::Wait{submission_index: None, timeout: None})
+            .expect("Failed to poll render copy buffer");
+
+        executor::block_on(async {
+            match receiver.await {
+                Ok(Ok(())) => {
+                    let data = buffer_slice.get_mapped_range();
+                    let slice : &[u8] = bytemuck::cast_slice(&data);
+                    let result = slice.to_vec();
+                    drop(data);
+                    self.pipeline.render_readback_buf.unmap();
+                    result
+                }
+                _ => {
+                    self.pipeline.render_readback_buf.unmap();
+                    Vec::new()
+                }
+            }
+        })
+    }
+
+    pub fn read_debug(&self) {
         // 1) create encoder, copy storage -> readback
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("debug copy encoder"),
         });
 
@@ -442,7 +555,7 @@ impl Scene {
         );
 
         // submit the copy
-        queue.submit(Some(encoder.finish()));
+        self.queue.submit(Some(encoder.finish()));
 
         let buffer_slice = self.pipeline.debug_readback.slice(..);
 
@@ -451,7 +564,7 @@ impl Scene {
             sender.send(v).unwrap();
         });
 
-        device.poll(wgpu::PollType::Wait{submission_index: None, timeout: None})
+        self.device.poll(wgpu::PollType::Wait{submission_index: None, timeout: None})
             .expect("Failed to poll debug copy buffer");
 
         executor::block_on(async {
@@ -477,6 +590,18 @@ impl Scene {
         });
     }
 
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    pub fn scout(&self) -> &ScoutEngine {
+        &self.scout_engine
+    }
+
     pub fn scout_config(&self) -> ScoutConfig {
         self.scout_engine.config()
     }
@@ -489,12 +614,50 @@ impl Scene {
         &self.scale
     }
 
+    pub fn width(&self) -> u32 {
+        self.uniform.render_width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.uniform.render_height
+    }
+    
+    pub fn max_width(&self) -> u32 {
+        self.uniform.render_tex_width as u32
+    }
+    
+    pub fn max_height(&self) -> u32 {
+        self.uniform.render_tex_height as u32
+    }
+
+    pub fn render_res_factor(&self) -> f64 {
+        self.render_res_factor
+    }
+
+    pub fn render_res_factor_during_pan(&self) -> f64 {
+        self.render_res_factor_during_pan
+    }
+
     pub fn send_scout_signal(&mut self, signal: ScoutSignal) {
         self.scout_engine.submit_scout_signal(signal);
     }
 
     pub fn read_scout_diagnostics(&self) -> Arc<Mutex<ScoutDiagnostics>> {
         self.scout_engine.read_diagnostics()
+    }
+    
+    pub fn set_render_res_factor(&mut self, res_factor: f64) {
+        self.render_res_factor = res_factor;
+        self.recalc_fractal = true;
+    }
+    
+    pub fn set_render_res_factor_during_pan(&mut self, res_factor: f64) {
+        self.render_res_factor_during_pan = res_factor;
+        self.recalc_fractal = true;
+    }
+
+    pub fn recalculate(&mut self) {
+        self.recalc_fractal = true;
     }
 
     pub fn set_max_iterations(&mut self, max_iterations: u32) {
@@ -506,9 +669,8 @@ impl Scene {
     pub fn set_window_size(&mut self, width: f64, height: f64) {
         self.width = width;
         self.height = height;
-        self.uniform.screen_width = width as u32;
-        self.uniform.screen_height = height as u32;
-        self.uniform.grid_width = width as u32 / self.uniform.grid_size;
+        self.uniform.view_width = width as f32;
+        self.uniform.view_height = height as f32;
         self.recalc_fractal = true;
         self.update_window_title();
         debug!("Window size changed w={} h={}", width, height);
@@ -574,6 +736,7 @@ impl Scene {
     }
     pub fn set_debug_coloring(&mut self, debug_coloring: bool) {
         self.uniform.set_debug_coloring(debug_coloring);
+        self.recalc_color = true;
     }
     
     pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
@@ -598,26 +761,32 @@ impl Scene {
 
     pub fn set_enable_glow(&mut self, enable_glow: bool) {
         self.uniform.set_enable_glow(enable_glow);
+        self.recalc_color = true;
     }
 
     pub fn set_enable_key_light(&mut self, enable_key_light: bool) {
         self.uniform.set_enable_key_light(enable_key_light);
+        self.recalc_color = true;
     }
 
     pub fn set_enable_fill_light(&mut self, enable_fill_light: bool) {
         self.uniform.set_enable_fill_light(enable_fill_light);
+        self.recalc_color = true;
     }
 
     pub fn set_enable_specular(&mut self, enable_specular: bool) {
         self.uniform.set_enable_specular(enable_specular);
+        self.recalc_color = true;
     }
 
     pub fn set_enable_ao(&mut self, enable_ao: bool) {
         self.uniform.set_enable_ao(enable_ao);
+        self.recalc_color = true;
     }
 
     pub fn set_enable_rim(&mut self, enable_rim: bool) {
         self.uniform.set_enable_rim(enable_rim);
+        self.recalc_color = true;
     }
     
     // Obtain an enumerated list/mapping of color palettes
@@ -638,73 +807,90 @@ impl Scene {
     pub fn set_selected_palette(&mut self, key: &String) {
         self.selected_palette = key.clone();
         self.palette_changed = true;
+        self.recalc_color = true;
     }
 
     pub fn set_palette_frequency(&mut self, key: &String, frequency: f32) {
         self.color_palettes.get_mut(key).unwrap().frequency = frequency;
         self.uniform.palette_frequency = frequency;
+        self.recalc_color = true;
     }
     
     pub fn set_palette_offset(&mut self, key: &String, offset: f32) {
         self.color_palettes.get_mut(key).unwrap().offset = offset;
         self.uniform.palette_offset = offset;
+        self.recalc_color = true;
     }
     
     pub fn set_palette_gamma(&mut self, key: &String, gamma: f32) {
         self.color_palettes.get_mut(key).unwrap().gamma = gamma;
         self.uniform.palette_gamma = gamma;
+        self.recalc_color = true;
     }
 
     pub fn set_distance_multiplier(&mut self, distance_multiplier: f32) {
         self.uniform.distance_multiplier = distance_multiplier;
+        self.recalc_color = true;
     }
 
     pub fn set_glow_intensity(&mut self, glow_intensity: f32) {
         self.uniform.glow_intensity = glow_intensity;
+        self.recalc_color = true;
     }
 
     pub fn set_neighbor_scale(&mut self, neighbor_scale: f32) {
         self.uniform.neighbor_scale_multiplier = neighbor_scale;
+        self.recalc_color = true;
     }
 
     pub fn set_ambient_intensity(&mut self, ambient_intensity: f32) {
         self.uniform.ambient_intensity = ambient_intensity;
+        self.recalc_color = true;
     }
 
     pub fn set_key_light_intensity(&mut self, key_light_intensity: f32) {
         self.uniform.key_light_intensity = key_light_intensity;
+        self.recalc_color = true;
     }
 
     pub fn set_key_light_azimuth(&mut self, key_light_azimuth: f32) {
         self.uniform.key_light_azimuth = key_light_azimuth;
+        self.recalc_color = true;
     }
 
     pub fn set_key_light_elevation(&mut self, key_light_elevation: f32) {
         self.uniform.key_light_elevation = key_light_elevation;
+        self.recalc_color = true;
     }
 
     pub fn set_fill_light_intensity(&mut self, fill_light_intensity: f32) {
         self.uniform.fill_light_intensity = fill_light_intensity;
+        self.recalc_color = true;
     }
 
     pub fn set_fill_light_azimuth(&mut self, fill_light_azimuth: f32) {
         self.uniform.fill_light_azimuth = fill_light_azimuth;
+        self.recalc_color = true;
     }
 
     pub fn set_fill_light_elevation(&mut self, fill_light_elevation: f32) {
         self.uniform.fill_light_elevation = fill_light_elevation;
+        self.recalc_color = true;
     }
 
     pub fn set_specular_intensity(&mut self, specular_intensity: f32) {
         self.uniform.specular_intensity = specular_intensity;
+        self.recalc_color = true;
     }
 
     pub fn set_specular_power(&mut self, specular_power: f32) {
         self.uniform.specular_power = specular_power;
+        self.recalc_color = true;
     }
 
     pub fn set_ao_darkness(&mut self, ao_darkness: f32) {
         self.uniform.ao_darkness = ao_darkness;
+        self.recalc_color = true;
     }
 
     pub fn set_stripe_density(&mut self, stripe_density: f32) {
@@ -724,10 +910,12 @@ impl Scene {
     
     pub fn set_rim_intensity(&mut self, rim_intensity: f32) {
         self.uniform.rim_intensity = rim_intensity;
+        self.recalc_color = true;
     }
     
     pub fn set_rim_power(&mut self, rim_power: f32) {
         self.uniform.rim_power = rim_power;
+        self.recalc_color = true;
     }
 
     pub fn stamp_frame(&mut self) {
@@ -752,25 +940,25 @@ impl Scene {
         self.scout_engine.submit_camera_snapshot(snapshot);
     }
 
-    pub fn query_qualified_orbits(&mut self, queue: &wgpu::Queue) {
+    pub fn query_qualified_orbits(&mut self) {
         // First check if ScoutEngine's context has changed. 
         if self.scout_engine.context_changed() {
             self.recalc_fractal = true;
             let orbits = self.scout_engine.query_qualified_orbits();
 
             // Upload qualified orbits to a Texture2D
-            self.upload_orbits(&orbits, queue);
+            self.upload_orbits(&orbits);
 
             // Build GPU-specific orbit locations from scout-engine's tile-orbit pairs
             self.loaded_orbits =
                 build_gpu_orbit_loadout_from_qualified_orbits(&orbits, self.center());
             info!("Rebuilt orbit loadout! len={}", self.loaded_orbits.len());
 
-            self.upload_orbit_locations(queue);
+            self.upload_orbit_locations();
         }
     }
 
-    fn upload_orbits(&mut self, orbits: &Vec<QualifiedOrbit>, queue: &wgpu::Queue) {
+    fn upload_orbits(&mut self, orbits: &Vec<QualifiedOrbit>) {
         if orbits.len() == 0 {
             trace!("Orbit Count reduced to zero! Scout likely shutdown!");
             self.uniform.ref_orb_count = 0;
@@ -780,7 +968,7 @@ impl Scene {
         let mut orbit_count: u32 = 0;
         if orbits.len() > 0 {
             let ranked_orb = &orbits[0];
-            queue.write_buffer(&self.pipeline.rank_one_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
+            self.queue.write_buffer(&self.pipeline.rank_one_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
             orbit_count += 1;
             trace!("Wrote Rank One RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
                 ranked_orb.orbit.len() * 8, ranked_orb.orbit.len());
@@ -788,7 +976,7 @@ impl Scene {
 
         if orbits.len() > 1 {
             let ranked_orb = &orbits[1];
-            queue.write_buffer(&self.pipeline.rank_two_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
+            self.queue.write_buffer(&self.pipeline.rank_two_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
             orbit_count += 1;
             trace!("Wrote Rank Two RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
                 ranked_orb.orbit.len() * 8, ranked_orb.orbit.len());
@@ -797,7 +985,7 @@ impl Scene {
         self.uniform.ref_orb_count = orbit_count;
     }
 
-    fn upload_orbit_locations(&self, queue: &wgpu::Queue) {
+    fn upload_orbit_locations(&self) {
         if self.loaded_orbits.len() > 0 && self.loaded_orbits.len() <= self.max_orbits_per_frame as usize {
             let mut trace_str = String::from(
                 format!("Orbit Loadout has {} orbits. Mapping follows...\n",
@@ -817,11 +1005,11 @@ impl Scene {
                 .iter()
                 .map(|l| l.gpu_orb_loc_info)
                 .collect();
-            queue.write_buffer(&self.pipeline.ref_orbit_location_buf, 0, bytemuck::cast_slice(&orb_locations));
+            self.queue.write_buffer(&self.pipeline.ref_orbit_location_buf, 0, bytemuck::cast_slice(&orb_locations));
         }
     }
 
-    pub fn upload_color_palette(&mut self, queue: &wgpu::Queue) {
+    pub fn upload_color_palette(&mut self) {
         if let Some(palette) = self.color_palettes.get(&self.selected_palette)
                 && self.palette_changed {
             self.palette_changed = false;
@@ -847,7 +1035,7 @@ impl Scene {
                 self.uniform.render_flags,
                 self.max_palette_colors, palette_bytes.len());
 
-            queue.write_texture(
+            self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.pipeline.palette_texture,
                     mip_level: 0,
@@ -873,40 +1061,58 @@ impl Scene {
     // being taken to high precision. Otherwise, the collected sample is NOT being
     // faithful to 'c' that underwent escape-time calculation using its f32 arithmetic.
     fn build_c_from_scene(&self, pix_x: i32, pix_y: i32) -> Complex {
-        let half_width = self.width / 2.0;
-        let half_height = self.height / 2.0;
+        let rw = self.uniform.render_width as f32;
+        let rh = self.uniform.render_height as f32;
 
-        let dx = pix_x - half_width as i32;
-        let dy = half_height as i32 - pix_y;
-        
-        let off_x = self.uniform.scale * dx as f32;
-        let off_y = self.uniform.scale * dy as f32;
-        
+        let vw = self.uniform.view_width;
+        let vh = self.uniform.view_height;
+
+        let u = (pix_x as f32 + 0.5) / rw;
+        let v = (pix_y as f32 + 0.5) / rh;
+
+        let cu = u - 0.5;
+        //let cv = 0.5 - v;
+        let cv = v - 0.5;
+
+        let off_x = cu * vw * self.uniform.scale;
+        let off_y = cv * vh * self.uniform.scale;
+
         let c_re = off_x + self.uniform.center_x;
         let c_im = off_y + self.uniform.center_y;
 
         let prec = self.scale.prec();
-        // No high precision math here, just conversion at the end!
         Complex::with_val(prec, (c_re, c_im))
     }
 
     // Under perturbation, f32 math must be specifically avoided.
     // GPU is using CPU-derived deltas anyway, so stay in high precision
-    fn build_delta_c_from_orbit_location(&self, pix_x: i32, pix_y: i32, orbit_idx: u32) -> Option<Complex> {
-        let half_width = self.width / 2.0;
-        let half_height = self.height / 2.0;
+    fn build_delta_c_from_orbit_location(
+        &self,
+        pix_x: i32,
+        pix_y: i32,
+        orbit_idx: u32
+    ) -> Option<Complex> {
+        let rw = self.uniform.render_width as f32;
+        let rh = self.uniform.render_height as f32;
 
-        let dx = pix_x - half_width as i32;
-        let dy = half_height as i32 - pix_y;
+        let vw = self.uniform.view_width;
+        let vh = self.uniform.view_height;
 
-        let mut off_x = self.scale.clone();
-        off_x *= dx;
+        let u = (pix_x as f32 + 0.5) / rw;
+        let v = (pix_y as f32 + 0.5) / rh;
 
-        let mut off_y = self.scale.clone();
-        off_y *= dy;
+        let cu = u - 0.5;
+        //let cv = 0.5 - v;
+        let cv = v - 0.5;
 
+        let off_x_f32 = (cu * vw) * self.uniform.scale;
+        let off_y_f32 = (cv * vh) * self.uniform.scale;
 
-        if let Some (loadout_loc) = self.loaded_orbits.get(orbit_idx as usize) {
+        let prec = self.scale.prec();
+        let off_x = Float::with_val(prec, off_x_f32);
+        let off_y = Float::with_val(prec, off_y_f32);
+
+        if let Some(loadout_loc) = self.loaded_orbits.get(orbit_idx as usize) {
             let mut c_re = loadout_loc.center_offset.real().clone();
             c_re += &off_x;
 
@@ -916,12 +1122,8 @@ impl Scene {
             c_re += loadout_loc.orbit_c_ref.real();
             c_im += loadout_loc.orbit_c_ref.imag();
 
-            let prec = self.scale.prec();
-            Some (
-                Complex::with_val(prec, (c_re, c_im))
-            )
-        }
-        else {
+            Some(Complex::with_val(prec, (c_re, c_im)))
+        } else {
             None
         }
     }
@@ -935,6 +1137,49 @@ impl Scene {
                 self.width.to_string(), self.height.to_string()
             );
         self.window.set_title(&title_str);
+    }
+
+    pub fn build_metadata(&self) -> FractalMetadata {
+        let center_re = self.center.real().to_string_radix(10, None);
+        let center_im = self.center.imag().to_string_radix(10, None);
+        let scale = self.scale.to_string_radix(10, None);
+
+        let ref_orbit = self.loaded_orbits.first().map(|orb| {
+            let c_ref_re = orb.orbit_c_ref.real().to_string_radix(10, None);
+            let c_ref_im = orb.orbit_c_ref.imag().to_string_radix(10, None);
+
+            let center_offset_re = orb.center_offset.real().to_string_radix(10, None);
+            let center_offset_im = orb.center_offset.imag().to_string_radix(10, None);
+
+            RefOrbitMetadata {
+                c_ref_re, c_ref_im,
+                center_offset_re, center_offset_im,
+                max_ref_iters: orb.gpu_orb_loc_info.max_ref_iters,
+            }
+        });
+
+        FractalMetadata {
+            program_name: TITLE.to_string(),
+            version: META_VERSION.to_string(),
+            center_re, center_im, scale,
+            max_iter: self.uniform.max_iter,
+            ref_orbit,
+        }
+    }
+
+    pub fn apply_metadata(&mut self, meta: FractalMetadata) {
+        let re = Float::parse(meta.center_re).unwrap();
+        let im = Float::parse(meta.center_im).unwrap();
+
+        self.center = Complex::with_val(self.scale.prec(), (re, im));
+        self.update_center_offsets();
+        
+        self.scale = Float::with_val(self.scale.prec(), Float::parse(meta.scale).unwrap());
+        self.uniform.scale = self.scale.to_f32();
+        
+        self.uniform.max_iter = meta.max_iter;
+        self.update_window_title();
+        self.recalc_fractal = true;
     }
 }
 

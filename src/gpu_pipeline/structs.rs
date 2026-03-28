@@ -8,10 +8,15 @@ pub struct SceneUniform {
     pub scale: f32,
     pub max_iter: u32,
     pub ref_orb_count: u32,
-    pub screen_width: u32,
-    pub screen_height: u32,
+    pub view_width: f32,
+    pub view_height: f32,
+    pub render_width: u32,
+    pub render_height: u32,
+    pub render_tex_width: f32,
+    pub render_tex_height: f32,
     pub grid_size: u32,
     pub grid_width: u32,
+    pub palette_size: u32,
     pub palette_frequency: f32,
     pub palette_offset: f32,
     pub palette_gamma: f32,
@@ -155,3 +160,4 @@ pub struct GpuRefOrbitLocation {
     pub center_offset_re:   f32,
     pub center_offset_im:   f32,
 }
+

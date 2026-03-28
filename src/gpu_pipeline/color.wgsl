@@ -7,10 +7,15 @@ struct Uniforms {
     scale:              f32,
     max_iter:           u32,
     ref_orb_count:      u32,
-    screen_width:       u32,
-    screen_height:      u32,
+    view_width:         f32,
+    view_height:        f32,
+    render_width:       u32,
+    render_height:      u32,
+    render_tex_width:   f32,
+    render_tex_height:  f32,
     grid_size:          u32,
     grid_width:         u32,
+    palette_size:       u32,
     palette_frequency:  f32,
     palette_offset:     f32,
     palette_gamma:      f32,
@@ -57,11 +62,40 @@ var calc_tex: texture_2d<f32>;
 var palette_tex: texture_2d<f32>;
 
 @group(0) @binding(3)
-var palette_sampler: sampler;
+var render_tex : texture_storage_2d<rgba8unorm, write>;
 
-fn palette_lookup(t: f32) -> vec3f {
-    return textureSample(palette_tex, palette_sampler,
-        vec2f(t * uni.palette_frequency + uni.palette_offset, 0.5)).rgb;
+fn palette_lookup(t_in: f32) -> vec3f {
+    let palette_size = f32(uni.palette_size);
+    var t = t_in * uni.palette_frequency + uni.palette_offset;
+
+    // Repeat behavior (like sampler address_mode = Repeat)
+    t = fract(t);
+
+    // Scale to texel space
+    let x = t * (palette_size - 1.0);
+
+    let i0 = i32(floor(x));
+    let i1 = i32(min(f32(i0 + 1), palette_size - 1.0));
+    //let i1 = (i0 + 1) % i32(uni.palette_size);
+
+    //let frac = fract(x);
+    let frac = smoothstep(0.0, 1.0, fract(x));
+
+    // Fetch texels
+    let c0 = textureLoad(palette_tex, vec2<i32>(i0, 0), 0).rgb;
+    let c1 = textureLoad(palette_tex, vec2<i32>(i1, 0), 0).rgb;
+
+    // Optional: simulate hardware a bit better
+    let frac_smooth = frac * frac * (3.0 - 2.0 * frac); // smootherstep-lite
+
+    // Linear interpolation (same as hardware filtering)
+    return mix(c0, c1, frac_smooth);
+
+    // Gamma correct interpolation
+    //let c0_lin = pow(c0, vec3f(2.2));
+    //let c1_lin = pow(c1, vec3f(2.2));
+    //let mixed = mix(c0_lin, c1_lin, frac);
+    //return pow(mixed, vec3f(1.0 / 2.2));
 }
 
 fn calculate_surface_normals(pix: vec2i) -> vec3f {
@@ -127,27 +161,20 @@ fn calculate_diffuse(d: f32, N: vec3f) -> f32 {
     return clamp(diffuse, 0.0, 4.0);
 }
 
-// -------------------------------
-// Fullscreen triangle VS
-// -------------------------------
-@vertex
-fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4f {
-    var pos: vec2f;
-    switch (vid) {
-        case 0u: { pos = vec2f(-1.0, -1.0); }
-        case 1u: { pos = vec2f( 3.0, -1.0); }
-        case 2u: { pos = vec2f(-1.0,  3.0); }
-        default: { pos = vec2f(0.0, 0.0); }
-    }
-    return vec4f(pos, 0.0, 1.0);
-}
+const OVERSAMPLE_GUARD = 50;
 
-// -------------------------------
-// Fragment shader
-// -------------------------------
-@fragment
-fn fs_main(@builtin(position) coords: vec4f) -> @location(0) vec4f {
-    let pix = vec2i(i32(coords.x), i32(coords.y));
+// ---------------------------------------------
+// Compute entry point
+// ---------------------------------------------
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let pix = vec2i(i32(gid.x), i32(gid.y));
+
+    // Bounds checking based on real screen size
+    if (pix.x >= i32(uni.render_width + OVERSAMPLE_GUARD) || pix.y >= i32(uni.render_height + OVERSAMPLE_GUARD)) {
+        return;
+    }
+
     var f_max_iters = f32(uni.max_iter);
 
     // Load results of the mandelbrot computation, stored in the rgba32float texture.
@@ -169,8 +196,9 @@ fn fs_main(@builtin(position) coords: vec4f) -> @location(0) vec4f {
         t = mix(t, t + (stripe_avg - 0.5), uni.stripe_strength);
     }
 
-    t = pow(t, uni.palette_gamma);
+    //t = pow(t, uni.palette_gamma);
     var color = palette_lookup(t);
+    color = pow(color, vec3f(1.0 / uni.palette_gamma));
 
     if ((uni.render_flags & DEBUG_COLORING) != 0) {
         color = vec3f(t, t*t, pow(t, 0.5));
@@ -199,5 +227,5 @@ fn fs_main(@builtin(position) coords: vec4f) -> @location(0) vec4f {
         color = vec3f(0.0, 0.0, 0.0);
     }
 
-    return vec4f(color, 1.0);
+    textureStore(render_tex, pix, vec4f(color, 1.0));
 }

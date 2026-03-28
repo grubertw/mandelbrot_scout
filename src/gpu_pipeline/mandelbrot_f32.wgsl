@@ -17,10 +17,15 @@ struct Uniforms {
     scale:              f32,
     max_iter:           u32,
     ref_orb_count:      u32,
-    screen_width:       u32,
-    screen_height:      u32,
+    view_width:         f32,
+    view_height:        f32,
+    render_width:       u32,
+    render_height:      u32,
+    render_tex_width:   f32,
+    render_tex_height:  f32,
     grid_size:          u32,
     grid_width:         u32,
+    palette_size:       u32,
     palette_frequency:  f32,
     palette_offset:     f32,
     palette_gamma:      f32,
@@ -59,19 +64,24 @@ const ENABLE_AO: u32        = 1u << 9;
 const ENABLE_RIM: u32       = 1u << 10;
 
 fn build_c_from_scene(pix: vec2i) -> vec2f {
-    let half_w = f32(uni.screen_width) * 0.5;
-    let half_h = f32(uni.screen_height) * 0.5;
+    let rw = f32(uni.render_width);
+    let rh = f32(uni.render_height);
 
-    let dx_i = pix.x - i32(half_w);
-    let dy_i = i32(half_h) - pix.y; // y-axis increases downward, so must flip!
+    let vw = uni.view_width;
+    let vh = uni.view_height;
 
-    let scale = uni.scale;
-    let offset = vec2f(f32(dx_i) * scale, f32(dy_i) * scale);
+    // Normalize pixel → [0,1]
+    let u = (f32(pix.x) + 0.5) / rw;
+    let v = (f32(pix.y) + 0.5) / rh;
 
-    // Scene/Viewport center
-    let center = vec2f(uni.center_x, uni.center_y);
-    let c = center + offset;
-    return c;
+    // Center → [-0.5, 0.5]
+    let cu = u - 0.5;
+    let cv = v - 0.5;
+
+    // Map into world space using VIEW size
+    let offset = vec2f(cu * vw, cv * vh) * uni.scale;
+
+    return vec2f(uni.center_x, uni.center_y) + offset;
 }
 
 const ESCAPED_BIT: u32              = 1u << 0u;
@@ -193,25 +203,28 @@ var<storage, read> rank_one_orbit: array<vec2f>;
 @group(0) @binding(4)
 var<storage, read> rank_two_orbit: array<vec2f>;
 
-// delta_c - along with Zref-n0 - are needed to start pertubation.
 fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32) -> vec2f {
-    let half_w = f32(uni.screen_width) * 0.5;
-    let half_h = f32(uni.screen_height) * 0.5;
-    let scale = uni.scale;
+    let rw = f32(uni.render_width);
+    let rh = f32(uni.render_height);
 
+    let vw = uni.view_width;
+    let vh = uni.view_height;
+
+    let u = (f32(pix.x) + 0.5) / rw;
+    let v = (f32(pix.y) + 0.5) / rh;
+
+    let cu = u - 0.5;
+    let cv = v - 0.5;
+
+    let offset = vec2f(cu * vw, cv * vh) * uni.scale;
     let orbit = orbit_location[orbit_idx];
 
-    let dx_i = pix.x - i32(half_w);
-    let dy_i = i32(half_h) - pix.y;
-
-    let offset = vec2f(f32(dx_i) * scale, f32(dy_i) * scale);
-
     let delta_from_center_to_ref_orb = vec2f(
-        orbit.center_offset_re, orbit.center_offset_im
+        orbit.center_offset_re,
+        orbit.center_offset_im
     );
 
-    let delta_c = delta_from_center_to_ref_orb + offset;
-    return delta_c;
+    return delta_from_center_to_ref_orb + offset;
 }
 
 fn load_ref_orbit(orbit_idx: u32, it: u32) -> vec2f {
@@ -332,15 +345,20 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
     return vec4f(fi, distance, stripe_avg, f32(flags));
 }
 
+// The texture sampler in display.wgsl likes to have a few more pixels to interplolate
+// especially when oversampling (i.e. res_factor > 1)
+const OVERSAMPLE_GUARD = 50;
+
 // ---------------------------------------------
 // Compute entry point
 // ---------------------------------------------
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let pix = vec2i(i32(gid.x), i32(gid.y));
+    var c_for_log = vec2f(0.0, 0.0);
 
     // Bounds checking based on real screen size
-    if (pix.x >= i32(uni.screen_width) || pix.y >= i32(uni.screen_height)) {
+    if (pix.x >= i32(uni.render_width + OVERSAMPLE_GUARD) || pix.y >= i32(uni.render_height + OVERSAMPLE_GUARD)) {
         return;
     }
 
@@ -352,18 +370,22 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         // Attempt perturbance with the 1st qualified orbit
         let delta_c = build_delta_c_from_orbit_location(pix, 0u);
         results = mandelbrot_perturb(delta_c);
+        c_for_log = delta_c;
 
     }
     else {
         let c = build_c_from_scene(pix);
         results = mandelbrot(c);
+        c_for_log = c;
     }
 
     textureStore(calc_out_tex, pix, results);
 
     // -- DEBUG --
-    if (   pix.x == i32(f32(uni.screen_width) * 0.5)
-        && pix.y == i32(f32(uni.screen_height) * 0.5) ) {
+    if (   pix.x == i32(f32(uni.render_width) * 0.5)
+        && pix.y == i32(f32(uni.render_height) * 0.5) ) {
+        debug_out.center_x = c_for_log.x;
+        debug_out.center_y = c_for_log.y;
         debug_out.max_iters = uni.max_iter;
         debug_out.fi = results.x;
         debug_out.distance = results.y;

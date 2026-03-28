@@ -29,12 +29,16 @@ pub struct Settings {
     pub center: (f64, f64),
     pub complex_span: f64,
     pub max_user_iter: u32,
+    pub render_res_factor: f64,
+    pub render_res_factor_during_pan: f64,
+    pub default_export_directory: String,
+    pub default_export_filename: String,
 
     // Controls WGPU texture allocation
     pub max_orbits_per_frame: u32,
     pub max_ref_orbit: u32,
-    pub max_screen_width: u32,
-    pub max_screen_height: u32,
+    pub render_tex_width: u32,
+    pub render_tex_height: u32,
     pub screen_grid_size: u32,
     pub max_palette_colors: u32,
     
@@ -147,10 +151,14 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("center", vec![-0.75, 0.0])?
         .set_default("complex_span", 3.0)?
         .set_default("max_user_iter", 500)?
+        .set_default("render_res_factor", 1.0)?
+        .set_default("render_res_factor_during_pan", 0.85)?
+        .set_default("default_export_directory", "/Pictures")?
+        .set_default("default_export_filename", "fractal")?
         .set_default("max_orbits_per_frame", 4)?
         .set_default("max_ref_orbit", 65535)?
-        .set_default("max_screen_width", 3840)?
-        .set_default("max_screen_height", 2160)?
+        .set_default("render_tex_width", 8000)?
+        .set_default("render_tex_height", 8000)?
         .set_default("screen_grid_size", 64)?
         .set_default("max_palette_colors", 1024)?
         .set_default("distance_multiplier", 1.0)?
