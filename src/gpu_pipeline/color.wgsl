@@ -15,11 +15,17 @@ struct Uniforms {
     render_tex_height:  f32,
     grid_size:          u32,
     grid_width:         u32,
-    palette_size:       u32,
-    palette_frequency:  f32,
+    render_flags:       u32,
+    stripe_density:     f32,
+    stripe_strength:    f32,
+    stripe_gamma:       f32,
+    color_scalar_mapping_mode:      u32,
+    color_scaler_mapping_strength:  f32,
+    palette_tex_width:  u32,
+    palette_len:        u32,
+    palette_cycles:     f32,
     palette_offset:     f32,
     palette_gamma:      f32,
-    render_flags:       u32,
     distance_multiplier:        f32,
     glow_intensity:             f32,
     neighbor_scale_multiplier:  f32,
@@ -33,9 +39,6 @@ struct Uniforms {
     specular_intensity:         f32,
     specular_power:             f32,
     ao_darkness:                f32,
-    stripe_density:             f32,
-    stripe_strength:            f32,
-    stripe_gamma:               f32,
     rim_intensity:              f32,
     rim_power:                  f32,
 };
@@ -64,32 +67,48 @@ var palette_tex: texture_2d<f32>;
 @group(0) @binding(3)
 var render_tex : texture_storage_2d<rgba8unorm, write>;
 
+fn map_color_scalar(t: f32) -> f32 {
+    let k = uni.color_scaler_mapping_strength;
+
+    switch (uni.color_scalar_mapping_mode) {
+        case 0u: { // Linear
+            return t;
+        }
+        case 1u: { // Power
+            return pow(t, k);
+        }
+        case 2u: { // Log
+            return log(1.0 + k * t) / log(1.0 + k);
+        }
+        case 3u: { // Atan
+            return atan(k * t) / atan(k);
+        }
+        default: {
+            return t;
+        }
+    }
+}
+
 fn palette_lookup(t_in: f32) -> vec3f {
-    let palette_size = f32(uni.palette_size);
-    var t = t_in * uni.palette_frequency + uni.palette_offset;
+    let tex_width = f32(uni.palette_tex_width);
+    let palette_len = f32(uni.palette_len);
 
-    // Repeat behavior (like sampler address_mode = Repeat)
-    t = fract(t);
+    var t = t_in * palette_len * uni.palette_cycles + (uni.palette_offset * palette_len);
+    t = t % tex_width;
 
-    // Scale to texel space
-    let x = t * (palette_size - 1.0);
+    let i0 = i32(floor(t));
+    let i1 = i32(min(f32(i0 + 1), tex_width - 1.0));
 
-    let i0 = i32(floor(x));
-    let i1 = i32(min(f32(i0 + 1), palette_size - 1.0));
-    //let i1 = (i0 + 1) % i32(uni.palette_size);
-
-    //let frac = fract(x);
-    let frac = smoothstep(0.0, 1.0, fract(x));
+    let frac = fract(t);
+    //let frac = smoothstep(0.0, 1.0, fract(x));
+    //let frac_smooth = frac * frac * (3.0 - 2.0 * frac); // smootherstep-lite
 
     // Fetch texels
     let c0 = textureLoad(palette_tex, vec2<i32>(i0, 0), 0).rgb;
     let c1 = textureLoad(palette_tex, vec2<i32>(i1, 0), 0).rgb;
 
-    // Optional: simulate hardware a bit better
-    let frac_smooth = frac * frac * (3.0 - 2.0 * frac); // smootherstep-lite
-
-    // Linear interpolation (same as hardware filtering)
-    return mix(c0, c1, frac_smooth);
+    // Linear interpolation
+    return mix(c0, c1, frac);
 
     // Gamma correct interpolation
     //let c0_lin = pow(c0, vec3f(2.2));
@@ -196,13 +215,16 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         t = mix(t, t + (stripe_avg - 0.5), uni.stripe_strength);
     }
 
-    //t = pow(t, uni.palette_gamma);
+    // User-costimizable mapping functions on normalized escape-time - i.e color scalar
+    t = map_color_scalar(t);
+    
     var color = palette_lookup(t);
-    color = pow(color, vec3f(1.0 / uni.palette_gamma));
 
     if ((uni.render_flags & DEBUG_COLORING) != 0) {
         color = vec3f(t, t*t, pow(t, 0.5));
     }
+
+    color = pow(color, vec3f(1.0 / uni.palette_gamma));
 
     if ((uni.render_flags & USE_DE) != 0) {
         var diffuse = calculate_diffuse(d, N);

@@ -33,13 +33,9 @@ struct LoadedOrbit {
 }
 
 #[derive(Debug, Clone)]
-pub struct ColorPalette {
+pub struct Rgba8Palette {
     pub name: String,
     palette: Vec<[u8; 4]>,
-    pub offset: f32,
-    pub frequency: f32,
-    pub frequency_range: (f32, f32),
-    pub gamma: f32,
 }
 
 #[derive(Debug)]
@@ -64,7 +60,7 @@ pub struct Scene {
     pipeline: PipelineBundle,
     selected_palette: String,
     palette_changed: bool,
-    color_palettes: HashMap<String, ColorPalette>,
+    color_palettes: HashMap<String, Rgba8Palette>,
     recalc_fractal: bool,
     recalc_color: bool
 }
@@ -121,11 +117,17 @@ impl Scene {
             ref_orb_count: 0,
             grid_size: settings.screen_grid_size,
             grid_width: width as u32 / settings.screen_grid_size,
-            palette_size: settings.max_palette_colors,
-            palette_frequency: default_palette.frequency,
+            render_flags: 0,
+            stripe_density: settings.stripe_density,
+            stripe_strength: settings.stripe_strength,
+            stripe_gamma: settings.stripe_gamma,
+            color_scalar_mapping_mode: 0,
+            color_scaler_mapping_strength: 1.0,
+            palette_tex_width: settings.max_palette_colors,
+            palette_len: default_palette.palette.len() as u32,
+            palette_cycles: 1.0,
             palette_offset: 0.0,
             palette_gamma: 1.0,
-            render_flags: 0,
             distance_multiplier: settings.distance_multiplier,
             glow_intensity: settings.glow_intensity,
             neighbor_scale_multiplier: settings.neighbor_scale_multiplier,
@@ -139,9 +141,6 @@ impl Scene {
             specular_intensity: settings.specular_intensity,
             specular_power: settings.specular_power,
             ao_darkness: settings.ao_darkness,
-            stripe_density: settings.stripe_density,
-            stripe_strength: settings.stripe_strength,
-            stripe_gamma: settings.stripe_gamma,
             rim_intensity: settings.rim_intensity,
             rim_power: settings.rim_power,
         };
@@ -799,9 +798,10 @@ impl Scene {
         });
         palette_list
     }
-    
-    pub fn get_palette(&self, key: &String) -> &ColorPalette {
-        &self.color_palettes[key]
+
+    pub fn add_palette(&mut self, key: &String, palette: Rgba8Palette) {
+        self.color_palettes.insert(key.clone(), palette);
+        self.set_selected_palette(key);
     }
 
     pub fn set_selected_palette(&mut self, key: &String) {
@@ -810,21 +810,28 @@ impl Scene {
         self.recalc_color = true;
     }
 
-    pub fn set_palette_frequency(&mut self, key: &String, frequency: f32) {
-        self.color_palettes.get_mut(key).unwrap().frequency = frequency;
-        self.uniform.palette_frequency = frequency;
+    pub fn set_palette_cycles(&mut self, cycles: f32) {
+        self.uniform.palette_cycles = cycles;
         self.recalc_color = true;
     }
     
-    pub fn set_palette_offset(&mut self, key: &String, offset: f32) {
-        self.color_palettes.get_mut(key).unwrap().offset = offset;
+    pub fn set_palette_offset(&mut self, offset: f32) {
         self.uniform.palette_offset = offset;
         self.recalc_color = true;
     }
     
-    pub fn set_palette_gamma(&mut self, key: &String, gamma: f32) {
-        self.color_palettes.get_mut(key).unwrap().gamma = gamma;
+    pub fn set_palette_gamma(&mut self, gamma: f32) {
         self.uniform.palette_gamma = gamma;
+        self.recalc_color = true;
+    }
+
+    pub fn set_color_scalar_mapping_mode(&mut self, mode: u32) {
+        self.uniform.color_scalar_mapping_mode = mode;
+        self.recalc_color = true;
+    }
+
+    pub fn set_color_scalar_mapping_strength(&mut self, strength: f32) {
+        self.uniform.color_scaler_mapping_strength = strength;
         self.recalc_color = true;
     }
 
@@ -1013,27 +1020,28 @@ impl Scene {
         if let Some(palette) = self.color_palettes.get(&self.selected_palette)
                 && self.palette_changed {
             self.palette_changed = false;
-            self.uniform.palette_frequency = palette.frequency;
-            self.uniform.palette_offset = palette.offset;
-            self.uniform.palette_gamma = palette.gamma;
 
-            let max = self.max_palette_colors as usize;
+            let tex_width = self.max_palette_colors as usize;
             let src = &palette.palette;
+            self.uniform.palette_len = src.len() as u32;
 
             // Create a repeating cycle of the palette within the texture. This works best
             // for texture color sampling, and for frequency/offset changes.
-            let mut full_palette = Vec::<[u8; 4]>::with_capacity(max);
-            for i in 0..max {
+            let mut full_palette = Vec::<[u8; 4]>::with_capacity(tex_width);
+            for i in 0..tex_width {
                 full_palette.push(src[i % src.len()]);
             }
 
             let palette_bytes: &[u8] = bytemuck::cast_slice(&full_palette);
 
-            trace!("Uploading color palette {}. freq={} offset={} gamma={} render_flags={} len={} bytes={}",
-                palette.name, self.uniform.palette_frequency,
-                self.uniform.palette_offset, self.uniform.palette_gamma,
+            trace!("Uploading rgba8 palette {}. len={} cycles={} offset={} gamma={} render_flags={} tex_width={} total_bytes={}",
+                palette.name, self.uniform.palette_len,
+                self.uniform.palette_cycles,
+                self.uniform.palette_offset,
+                self.uniform.palette_gamma,
                 self.uniform.render_flags,
-                self.max_palette_colors, palette_bytes.len());
+                self.max_palette_colors,
+                palette_bytes.len());
 
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -1208,8 +1216,8 @@ fn build_gpu_orbit_loadout_from_qualified_orbits(
         .collect()
 }
 
-fn build_color_palettes_from_settings(settings: &Settings) -> HashMap<String, ColorPalette> {
-    let mut color_palettes: HashMap<String, ColorPalette> = HashMap::new();
+fn build_color_palettes_from_settings(settings: &Settings) -> HashMap<String, Rgba8Palette> {
+    let mut color_palettes: HashMap<String, Rgba8Palette> = HashMap::new();
     settings.palettes.iter().for_each(|(key, palette)| {
         // First validate the palette is well-formed
         if palette.array.len() % 3 != 0 {
@@ -1218,7 +1226,7 @@ fn build_color_palettes_from_settings(settings: &Settings) -> HashMap<String, Co
         else {
             color_palettes.insert(
                 key.clone(),
-                ColorPalette {
+                Rgba8Palette {
                     name: palette.name.clone(),
                     palette: palette.array
                         .iter()
@@ -1226,10 +1234,6 @@ fn build_color_palettes_from_settings(settings: &Settings) -> HashMap<String, Co
                         .chunks(3)
                         .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                         .collect(),
-                    offset: 0.0,
-                    frequency: palette.frequency,
-                    frequency_range: palette.frequency_range,
-                    gamma: 1.0,
                 }
             );
         }

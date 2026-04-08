@@ -6,11 +6,9 @@ use log::{trace, warn};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
-pub struct Palette {
+pub struct RgbPalette {
     pub name: String,
     pub array: Vec<u8>,
-    pub frequency: f32,
-    pub frequency_range: (f32, f32),
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +41,9 @@ pub struct Settings {
     pub max_palette_colors: u32,
     
     // Color scene uniform settings
+    pub scalar_mapping_power_range: (f32, f32),
+    pub scalar_mapping_log_range: (f32, f32),
+    pub scalar_mapping_atan_range: (f32, f32),
     pub distance_multiplier: f32,
     pub distance_multiplier_range: (f32, f32),
     pub glow_intensity:     f32,
@@ -69,7 +70,7 @@ pub struct Settings {
     pub rim_power: f32,
     pub rim_power_range: (f32, f32),
     
-    pub palettes: Map<String, Palette>,
+    pub palettes: Map<String, RgbPalette>,
 }
 
 impl Settings {
@@ -134,8 +135,6 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
     let mut default_palette = HashMap::new();
     default_palette.insert("name".to_string(), Value::from("Default"));
     default_palette.insert("array".to_string(), Value::from(vec![255, 0, 0, 0, 255, 0, 0, 0, 255]));
-    default_palette.insert("frequency".to_string(), Value::from(0.03));
-    default_palette.insert("frequency_range".to_string(), Value::from(vec![0.0, 0.075]));
     let mut palettes_map = HashMap::new();
     palettes_map.insert("default".to_string(), Value::from(default_palette));
 
@@ -161,6 +160,9 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("render_tex_height", 8000)?
         .set_default("screen_grid_size", 64)?
         .set_default("max_palette_colors", 1024)?
+        .set_default("scalar_mapping_power_range", vec![0.2, 5.0])?
+        .set_default("scalar_mapping_log_range", vec![1.0, 100.0])?
+        .set_default("scalar_mapping_atan_range", vec![1.0, 50.0])?
         .set_default("distance_multiplier", 1.0)?
         .set_default("distance_multiplier_range", vec![0.1, 50.0])?
         .set_default("glow_intensity", 0.3)?

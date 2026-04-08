@@ -15,8 +15,11 @@ use iced_wgpu::core::text::Wrapping;
 use png::Compression;
 use rfd::FileDialog;
 use rug::{Complex, Float};
+use strum::IntoEnumIterator;
+use strum_macros::{Display, EnumIter};
+
 use crate::export::{render_scene_to_jpeg, render_scene_to_png};
-use crate::scene::import::load_metadata_from_png;
+use crate::scene::import::{load_metadata_from_png, ExtPalette};
 use crate::scout_engine::ScoutSignal;
 use crate::settings::Settings;
 
@@ -40,6 +43,29 @@ impl PaletteSelection {
 impl std::fmt::Display for PaletteSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.name)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display )]
+pub enum ColorScalarMappingMode {
+    #[strum(to_string="Linear")]
+    Linear,
+    #[strum(to_string="Power")]
+    Power,
+    #[strum(to_string="Log")]
+    Log,
+    #[strum(to_string="Atan")]
+    Atan,
+}
+
+impl From<ColorScalarMappingMode> for u32 {
+    fn from(m: ColorScalarMappingMode) -> Self {
+        match m {
+            ColorScalarMappingMode::Linear => 0,
+            ColorScalarMappingMode::Power => 1,
+            ColorScalarMappingMode::Log => 2,
+            ColorScalarMappingMode::Atan => 3,
+        }
     }
 }
 
@@ -95,11 +121,15 @@ pub struct Controls {
     // Color config
     palettes: Vec<PaletteSelection>,
     selected_palette: Option<PaletteSelection>,
-    frequency: f32,
-    frequency_min: f32,
-    frequency_max: f32,
+    cycles: f32,
+    cycles_max: f32,
     offset: f32,
     gamma: f32,
+    color_scalar_mapping_mode: Option<ColorScalarMappingMode>,
+    color_scaler_mapping_strength: f32,
+    scalar_mapping_power_range: (f32, f32),
+    scalar_mapping_log_range: (f32, f32),
+    scalar_mapping_atan_range: (f32, f32),
     smooth_coloring: bool,
     use_de: bool,
     use_stripes: bool,
@@ -184,9 +214,13 @@ pub enum Message {
     RenderResFactorDuringPanChanged(f64),
 
     SelectedPaletteChanged(PaletteSelection),
-    FrequencyChanged(f32),
+    ImportPalette,
+    CyclesChanged(f32),
+    CyclesMaxChanged(String),
     OffsetChanged(f32),
     GammaChanged(f32),
+    ColorScalarMappingModeChanged(ColorScalarMappingMode),
+    ColorScalerMappingStrengthChanged(f32),
     SmoothColoringChanged(bool),
     UseDEChanged(bool),
     UseStripesChanged(bool),
@@ -253,7 +287,6 @@ impl Controls {
 
         let palette_selection =
             PaletteSelection::new("default".to_string(), "Default".to_string());
-        let palette = scene_b.get_palette(&palette_selection.key);
 
         let info_text = format!("pkg_name={}\n\tpkg_version={}\n\tauthors={}\n\trepository={}\n\n\
         rustc_version={}",
@@ -288,10 +321,14 @@ impl Controls {
             render_res_factor_during_pan: settings.render_res_factor_during_pan,
             palettes,
             selected_palette: Some(palette_selection),
-            frequency: palette.frequency,
-            frequency_min: palette.frequency_range.0,
-            frequency_max: palette.frequency_range.1,
-            offset: 0.0, gamma: 1.0, smooth_coloring: false,
+            cycles: 1.0, cycles_max: 10.0,
+            offset: 0.0, gamma: 1.0,
+            color_scalar_mapping_mode: Some(ColorScalarMappingMode::Linear),
+            color_scaler_mapping_strength: 1.0,
+            scalar_mapping_power_range: settings.scalar_mapping_power_range,
+            scalar_mapping_log_range: settings.scalar_mapping_log_range,
+            scalar_mapping_atan_range: settings.scalar_mapping_atan_range,
+            smooth_coloring: false,
             use_de: false, use_stripes: false, debug_coloring: false,
             enable_glow: false,
             distance_multiplier: settings.distance_multiplier,
@@ -468,31 +505,58 @@ impl Controls {
                 let mut scene_b = self.scene.borrow_mut();
                 self.selected_palette = Some(selected_palette);
                 scene_b.set_selected_palette(&key);
-                // Must overwrite GUI settings with stored values from Scene
-                let incoming_palette = scene_b.get_palette(&key);
-                self.frequency = incoming_palette.frequency;
-                self.frequency_min = incoming_palette.frequency_range.0;
-                self.frequency_max = incoming_palette.frequency_range.1;
-                self.offset = incoming_palette.offset;
-                self.gamma = incoming_palette.gamma;
             }
-            Message::FrequencyChanged(frequency) => {
-                self.frequency = frequency;
-                if let Some(palette) = self.selected_palette.as_ref() {
-                    self.scene.borrow_mut().set_palette_frequency(&palette.key, frequency);
+            Message::ImportPalette => {
+                if let Some(path) = FileDialog::new()
+                    .add_filter("MAP palette", &["map"])
+                    .set_title("Select a MAP color palette file")
+                    .pick_file() {
+                    info!("Attempting to import MAP palette: {:?}", path);
+                    let map_palette =
+                        ExtPalette::parse_map(&path);
+                    match map_palette {
+                        Ok(palette) => {
+                            let key = path.file_name().unwrap().to_str().unwrap().to_string();
+                            let selection = PaletteSelection{
+                                key: key.clone() , name: palette.name.clone()
+                            };
+                            self.palettes.push(selection.clone());
+                            self.selected_palette = Some(selection.clone());
+                            self.scene.borrow_mut().add_palette(&key, palette.to_color_palette());
+                            self.debug_msg = format!("Successfully imported MAP palette with name {} and {} colors",
+                                 selection.name, palette.colors.len());
+                            info!("{}", self.debug_msg);
+                        }
+                        Err(e) => {
+                            warn!("Failed to import palette: {:?}", e);
+                        }
+                    }
+                }
+            }
+            Message::CyclesChanged(cycles) => {
+                self.cycles = cycles;
+                self.scene.borrow_mut().set_palette_cycles(cycles);
+            }
+            Message::CyclesMaxChanged(cyc_max) => {
+                if let Ok(v) = cyc_max.parse::<f32>() {
+                    self.cycles_max = v;
                 }
             }
             Message::OffsetChanged(offset) => {
                 self.offset = offset;
-                if let Some(palette) = self.selected_palette.as_ref() {
-                    self.scene.borrow_mut().set_palette_offset(&palette.key, offset);
-                }
+                self.scene.borrow_mut().set_palette_offset(offset);
             }
             Message::GammaChanged(gamma) => {
                 self.gamma = gamma;
-                if let Some(palette) = self.selected_palette.as_ref() {
-                    self.scene.borrow_mut().set_palette_gamma(&palette.key, gamma);
-                }
+                self.scene.borrow_mut().set_palette_gamma(gamma);
+            }
+            Message::ColorScalarMappingModeChanged(mode) => {
+                self.color_scalar_mapping_mode = Some(mode);
+                self.scene.borrow_mut().set_color_scalar_mapping_mode(mode.into());
+            }
+            Message::ColorScalerMappingStrengthChanged(strength) => {
+                self.color_scaler_mapping_strength = strength;
+                self.scene.borrow_mut().set_color_scalar_mapping_strength(strength);
             }
             Message::SmoothColoringChanged(coloring) => {
                 self.smooth_coloring = coloring;
@@ -933,6 +997,14 @@ impl Controls {
     }
 
     fn render_color_controls(&self) -> Column<'_, Message, Theme, Renderer> {
+        let color_scalar_mappings: Vec<ColorScalarMappingMode> = ColorScalarMappingMode::iter().collect();
+        let scalar_mapping_strength_range = match self.color_scalar_mapping_mode.unwrap() {
+            ColorScalarMappingMode::Linear => self.scalar_mapping_power_range,
+            ColorScalarMappingMode::Power => self.scalar_mapping_power_range,
+            ColorScalarMappingMode::Log => self.scalar_mapping_log_range,
+            ColorScalarMappingMode::Atan => self.scalar_mapping_atan_range,
+        };
+
         let mut color_controls = column![
             container(row![
                 checkbox(self.use_de)
@@ -967,25 +1039,62 @@ impl Controls {
             container(row![
                 column![
                     row![
-                        text("palette: ")
-                            .align_y(Alignment::Center),
-                        pick_list(self.palettes.clone(), self.selected_palette.clone(), Message::SelectedPaletteChanged)
-                            .width(Length::Fixed(200.0))
-                            .placeholder("Select palette"),
+                        text("Palette")
+                            .width(Length::Fixed(100.0))
+                            .align_y(Alignment::Center)
+                            .align_x(Alignment::Center),
+                        pick_list(self.palettes.clone(),
+                            self.selected_palette.clone(),
+                            Message::SelectedPaletteChanged)
+                            .width(Length::Fixed(220.0)),
+                        space().width(Length::Fixed(10.0)),
+                        button(text("Import").size(11))
+                            .on_press(Message::ImportPalette)
                         ]
-                    .align_y(Alignment::Center),
+                    .padding(5),
+                    row![
+                        text("Scalar Mapping")
+                            .width(Length::Fixed(100.0))
+                            .align_y(Alignment::Center)
+                            .align_x(Alignment::Center),
+                        pick_list(color_scalar_mappings,
+                            self.color_scalar_mapping_mode,
+                            Message::ColorScalarMappingModeChanged)
+                            .width(Length::Fixed(220.0))
                     ].padding(5),
+                    row![
+                        text("Mapping Strength")
+                            .width(Length::Fixed(100.0))
+                            .align_y(Alignment::Center)
+                            .align_x(Alignment::Center),
+                        slider(scalar_mapping_strength_range.0..=scalar_mapping_strength_range.1,
+                                self.color_scaler_mapping_strength, Message::ColorScalerMappingStrengthChanged)
+                            .step((scalar_mapping_strength_range.1 - scalar_mapping_strength_range.0) / 1000.0)
+                            .width(Length::Fixed(160.0)),
+                        space().width(Length::Fixed(5.0)),
+                        text(format!("{:<4.2}", self.color_scaler_mapping_strength))
+                            .width(Length::Fixed(40.0))
+                            .align_y(Alignment::Center),
+                    ].padding(5),
+                ]
+                .padding(5),
                 column![
                     row![
-                        text("frequency: ")
+                        text("cycles: ")
                             .width(Length::Fixed(90.0))
                             .align_y(Alignment::Center)
                             .align_x(Alignment::End),
-                        slider(self.frequency_min..=self.frequency_max, self.frequency, Message::FrequencyChanged)
-                            .step((self.frequency_max - self.frequency_min) / 1000.0)
-                            .width(Length::Fixed(180.0)),
+                        slider(0.0..=self.cycles_max, self.cycles, Message::CyclesChanged)
+                            .step(self.cycles_max / 1000.0)
+                            .width(Length::Fixed(120.0)),
                         space().width(Length::Fixed(5.0)),
-                        text(format!("{:<4.3}", self.frequency))
+                        text_input("...", &self.cycles_max.to_string())
+                            .on_input(Message::CyclesMaxChanged)
+                            .width(Length::Fixed(40.0))
+                            .align_x(Alignment::Start),
+                        space().width(Length::Fixed(10.0)),
+                        text(format!("{:<4.2}", self.cycles))
+                            .width(Length::Fixed(35.0))
                             .align_y(Alignment::Center)
                     ].padding(5),
                     row![
@@ -995,7 +1104,7 @@ impl Controls {
                             .align_x(Alignment::End),
                         slider(0.0..=1.0, self.offset, Message::OffsetChanged)
                             .step(0.001)
-                            .width(Length::Fixed(180.0)),
+                            .width(Length::Fixed(160.0)),
                         space().width(Length::Fixed(5.0)),
                         text(format!("{:<3.2}", self.offset))
                             .align_y(Alignment::Center),
@@ -1004,9 +1113,9 @@ impl Controls {
                         text("gamma: ")
                             .width(Length::Fixed(90.0))
                             .align_x(Alignment::End),
-                        slider(0.3..=2.5, self.gamma, Message::GammaChanged)
-                            .step(0.001)
-                            .width(Length::Fixed(180.0)),
+                        slider(0.01..=2.0, self.gamma, Message::GammaChanged)
+                            .step(0.01)
+                            .width(Length::Fixed(160.0)),
                         space().width(Length::Fixed(5.0)),
                         text(format!("{:<3.2}", self.gamma))
                             .width(Length::Fixed(40.0))
