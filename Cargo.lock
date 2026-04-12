@@ -1604,6 +1604,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "250cc0802408e8c077986ec56c7d07c65f423ee658a4b9fd795a1f2aae5dac05"
 dependencies = [
  "iced_graphics",
+ "iced_wgpu",
  "log",
  "thiserror 2.0.17",
 ]
