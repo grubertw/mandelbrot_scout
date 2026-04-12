@@ -25,6 +25,9 @@ struct Uniforms {
     render_tex_height:  f32,
     grid_size:          u32,
     grid_width:         u32,
+    sample_count:       u32,
+    jitter_strength:    f32,
+    sample_avg_bias:    f32,
     render_flags:       u32,
     stripe_density:     f32,
     stripe_strength:    f32,
@@ -44,16 +47,18 @@ const ENABLE_SPEC: u32      = 1u << 8;
 const ENABLE_AO: u32        = 1u << 9;
 const ENABLE_RIM: u32       = 1u << 10;
 
-fn build_c_from_scene(pix: vec2i) -> vec2f {
+fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> vec2f {
     let rw = f32(uni.render_width);
     let rh = f32(uni.render_height);
 
     let vw = uni.view_width;
     let vh = uni.view_height;
 
+    let jittered_pix = vec2f(pix) + jitter * uni.jitter_strength;
+
     // Normalize pixel → [0,1]
-    let u = (f32(pix.x) + 0.5) / rw;
-    let v = (f32(pix.y) + 0.5) / rh;
+    let u = (f32(jittered_pix.x) + 0.5) / rw;
+    let v = (f32(jittered_pix.y) + 0.5) / rh;
 
     // Center → [-0.5, 0.5]
     let cu = u - 0.5;
@@ -184,15 +189,45 @@ var<storage, read> rank_one_orbit: array<vec2f>;
 @group(0) @binding(4)
 var<storage, read> rank_two_orbit: array<vec2f>;
 
-fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32) -> vec2f {
+@group(0) @binding(5)
+var noise_tex: texture_2d<f32>;
+
+fn wrap(coord: vec2i, size: vec2i) -> vec2i {
+    return vec2i(
+        ((coord.x % size.x) + size.x) % size.x,
+        ((coord.y % size.y) + size.y) % size.y
+    );
+}
+
+fn hash2(p: vec2i, s: u32) -> vec2i {
+    let h = u32(p.x) * 1664525u + u32(p.y) * 1013904223u + s * 374761393u;
+    return vec2i(
+        i32((h >> 8u) & 127u),
+        i32((h >> 16u) & 127u)
+    );
+}
+
+fn get_jitter(pix: vec2i, sample_idx: u32) -> vec2f {
+    let tex_size = vec2i(textureDimensions(noise_tex));
+
+    let offset = hash2(pix, sample_idx);
+
+    let coord = wrap(pix + offset, tex_size);
+    let noise = textureLoad(noise_tex, coord, 0).xy;
+    return noise * 2.0 - 1.0; // map [0,1] → [-1,1]
+}
+
+fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32, jitter: vec2f) -> vec2f {
     let rw = f32(uni.render_width);
     let rh = f32(uni.render_height);
 
     let vw = uni.view_width;
     let vh = uni.view_height;
 
-    let u = (f32(pix.x) + 0.5) / rw;
-    let v = (f32(pix.y) + 0.5) / rh;
+    let jittered_pix = vec2f(pix) + jitter * uni.jitter_strength;
+
+    let u = (f32(jittered_pix.x) + 0.5) / rw;
+    let v = (f32(jittered_pix.y) + 0.5) / rh;
 
     let cu = u - 0.5;
     let cv = v - 0.5;
@@ -329,6 +364,7 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
 // The texture sampler in display.wgsl likes to have a few more pixels to interplolate
 // especially when oversampling (i.e. res_factor > 1)
 const OVERSAMPLE_GUARD = 50;
+const OVERSAMPLE_EPSILON = 1e-4;
 
 // ---------------------------------------------
 // Compute entry point
@@ -343,24 +379,48 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         return;
     }
 
-    var results = vec4f(0.0, 0.0, 0.0, 0.0);
+    var sample_idx: u32 = 0u;
+    var max_iters: f32 = 0.0;
+    var min_iters: f32 = 1e27;
 
-    // Check if there is a (qualified) reference orbit available and,
-    // use the perturbance path, if found.
-    if (uni.ref_orb_count > 0) {
-        // Attempt perturbance with the 1st qualified orbit
-        let delta_c = build_delta_c_from_orbit_location(pix, 0u);
-        results = mandelbrot_perturb(delta_c);
-        c_for_log = delta_c;
+    var accum_dist = 0.0;
+    var accum_stripe = 0.0;
+    var accum_flags = 0u;
 
+    for (sample_idx = 0; sample_idx < uni.sample_count; sample_idx++) {
+        var results = vec4f(0.0, 0.0, 0.0, 0.0);
+        let jitter = get_jitter(pix, sample_idx);
+
+        // Check if there is a (qualified) reference orbit available and,
+        // use the perturbance path, if found.
+        if (uni.ref_orb_count > 0) {
+            // Attempt perturbance with the 1st qualified orbit
+            let delta_c = build_delta_c_from_orbit_location(pix, 0u, jitter);
+            results = mandelbrot_perturb(delta_c);
+            c_for_log = delta_c;
+        }
+        else {
+            let c = build_c_from_scene(pix, jitter);
+            results = mandelbrot(c);
+            c_for_log = c;
+        }
+
+        max_iters = max(results.x, max_iters);
+        min_iters = min(results.x, min_iters);
+     
+        accum_dist += results.y;
+        accum_stripe += results.z;
+        accum_flags |= u32(results.w);
     }
-    else {
-        let c = build_c_from_scene(pix);
-        results = mandelbrot(c);
-        c_for_log = c;
-    }
 
-    textureStore(calc_out_tex, pix, results);
+    // Average
+    let sc = f32(uni.sample_count);
+    let accum_iters = mix(min_iters, max_iters, uni.sample_avg_bias);
+    accum_dist /= sc;
+    accum_stripe /= sc;
+
+    textureStore(calc_out_tex, pix,
+        vec4f(accum_iters, accum_dist, accum_stripe, f32(accum_flags)));
 
     // -- DEBUG --
     if (   pix.x == i32(f32(uni.render_width) * 0.5)
@@ -368,10 +428,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         debug_out.center_x = c_for_log.x;
         debug_out.center_y = c_for_log.y;
         debug_out.max_iters = uni.max_iter;
-        debug_out.fi = results.x;
-        debug_out.distance = results.y;
-        debug_out.stripe_avg = results.z;
-        debug_out.flags = u32(results.w);
+        debug_out.fi = accum_iters;
+        debug_out.distance = accum_dist;
+        debug_out.stripe_avg = accum_stripe;
+        debug_out.flags = u32(accum_flags);
     }
 }
 

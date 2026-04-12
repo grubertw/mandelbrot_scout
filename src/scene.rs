@@ -16,6 +16,9 @@ use iced_wgpu::wgpu::BufferAsyncError;
 use iced_winit::winit::window::Window;
 
 use rug::{Float, Complex};
+use rand::Rng;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use log::{trace, debug, info, warn};
 use std::sync::Arc;
 use std::time;
@@ -117,6 +120,9 @@ impl Scene {
             ref_orb_count: 0,
             grid_size: settings.screen_grid_size,
             grid_width: width as u32 / settings.screen_grid_size,
+            sample_count: 1,
+            jitter_strength: 0.0,
+            sample_avg_bias: 0.9,
             render_flags: 0,
             stripe_density: settings.stripe_density,
             stripe_strength: settings.stripe_strength,
@@ -148,6 +154,9 @@ impl Scene {
         // Configure and initialize all WGPU resources for render passes.
         let pipeline = PipelineBundle::build_pipelines(
             &device, &uniform, texture_format, settings);
+
+        init_noise_texture(&queue, &pipeline.noise_texture,
+                           settings.noise_tex_width, settings.noise_tex_height);
 
         Scene {
             window, device, queue,
@@ -652,6 +661,21 @@ impl Scene {
     
     pub fn set_render_res_factor_during_pan(&mut self, res_factor: f64) {
         self.render_res_factor_during_pan = res_factor;
+        self.recalc_fractal = true;
+    }
+    
+    pub fn set_sample_count(&mut self, sample_count: u32) {
+        self.uniform.sample_count = sample_count;
+        self.recalc_fractal = true;
+    }
+    
+    pub fn set_jitter_strength(&mut self, jitter_strength: f32) {
+        self.uniform.jitter_strength = jitter_strength;
+        self.recalc_fractal = true;
+    }
+    
+    pub fn set_sample_avg_bias(&mut self, sample_avg_bias: f32) {
+        self.uniform.sample_avg_bias = sample_avg_bias;
         self.recalc_fractal = true;
     }
 
@@ -1239,4 +1263,49 @@ fn build_color_palettes_from_settings(settings: &Settings) -> HashMap<String, Rg
         }
     });
     color_palettes
+}
+
+pub fn generate_noise_rg8(width: u32, height: u32) -> Vec<u8> {
+    let mut rng = ChaCha8Rng::seed_from_u64(0xDEADBEEF);
+
+    let mut data = Vec::with_capacity((width * height * 2) as usize);
+
+    for _ in 0..(width * height) {
+        let x = rng.r#gen::<f32>();
+        let y = rng.r#gen::<f32>();
+
+        data.push((x * 255.0) as u8);
+        data.push((y * 255.0) as u8);
+    }
+
+    data
+}
+
+fn init_noise_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32
+) {
+    let data = generate_noise_rg8(width, height);
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(2 * width), // 2 bytes per pixel (RG8)
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
 }

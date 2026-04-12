@@ -76,6 +76,9 @@ screen_grid_size = 64
 # Max number of RGBa (i.e. vec4<u8>) color vectors.
 # When adding new palettes, make sure arrays are under this size (x3)
 max_palette_colors = 1024
+# Noise texture used during supersampling
+noise_tex_width = 128
+noise_tex_height = 128
 
 #
 # Other color settings/defaults mapping to GPU scene uniforms

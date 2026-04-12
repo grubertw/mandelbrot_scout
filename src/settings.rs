@@ -39,6 +39,8 @@ pub struct Settings {
     pub render_tex_height: u32,
     pub screen_grid_size: u32,
     pub max_palette_colors: u32,
+    pub noise_tex_width: u32,
+    pub noise_tex_height: u32,
     
     // Color scene uniform settings
     pub scalar_mapping_power_range: (f32, f32),
@@ -160,6 +162,8 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("render_tex_height", 8000)?
         .set_default("screen_grid_size", 64)?
         .set_default("max_palette_colors", 1024)?
+        .set_default("noise_tex_width", 128)?
+        .set_default("noise_tex_height", 128)?
         .set_default("scalar_mapping_power_range", vec![0.2, 5.0])?
         .set_default("scalar_mapping_log_range", vec![1.0, 100.0])?
         .set_default("scalar_mapping_atan_range", vec![1.0, 50.0])?

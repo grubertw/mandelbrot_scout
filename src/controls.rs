@@ -117,6 +117,9 @@ pub struct Controls {
     // Render resolution settings
     render_res_factor: f64,
     render_res_factor_during_pan: f64,
+    render_sample_count: u32,
+    render_jitter_strength: f32,
+    render_sample_avg_bias: f32,
 
     // Color config
     palettes: Vec<PaletteSelection>,
@@ -212,6 +215,9 @@ pub enum Message {
 
     RenderResFactorChanged(f64),
     RenderResFactorDuringPanChanged(f64),
+    RenderSampleCountChanged(u32),
+    RenderJitterStrengthChanged(f32),
+    RenderSampleAvgBiasChanged(f32),
 
     SelectedPaletteChanged(PaletteSelection),
     ImportPalette,
@@ -319,6 +325,9 @@ impl Controls {
             center_x, center_y, scale,
             render_res_factor: settings.render_res_factor,
             render_res_factor_during_pan: settings.render_res_factor_during_pan,
+            render_sample_count: 1,
+            render_jitter_strength: 0.0,
+            render_sample_avg_bias: 0.9,
             palettes,
             selected_palette: Some(palette_selection),
             cycles: 1.0, cycles_max: 10.0,
@@ -499,6 +508,18 @@ impl Controls {
             Message::RenderResFactorDuringPanChanged(res_fac) => {
                 self.render_res_factor_during_pan = res_fac;
                 self.scene.borrow_mut().set_render_res_factor_during_pan(res_fac);
+            }
+            Message::RenderSampleCountChanged(count) => {
+                self.render_sample_count = count;
+                self.scene.borrow_mut().set_sample_count(count);
+            }
+            Message::RenderJitterStrengthChanged(strength) => {
+                self.render_jitter_strength = strength;
+                self.scene.borrow_mut().set_jitter_strength(strength);
+            }
+            Message::RenderSampleAvgBiasChanged(bias) => {
+                self.render_sample_avg_bias = bias;
+                self.scene.borrow_mut().set_sample_avg_bias(bias);
             }
             Message::SelectedPaletteChanged(selected_palette) => {
                 let key = selected_palette.key.clone();
@@ -845,7 +866,7 @@ impl Controls {
         }
         if self.editing_resolution {
             primary_panel = primary_panel.push(
-                container(self.render_edit_render_resolution_row())
+                container(self.render_edit_render_resolution())
                     .style(outer_container_style)
                     .padding(10)
             )
@@ -952,7 +973,7 @@ impl Controls {
             space().width(Length::Fixed(10.0)),
 
             button(
-                text("Restore From Png")
+                text("Restore From PNG")
                 .wrapping(Wrapping::Word)
                 .align_x(Alignment::Center)
                 .size(9))
@@ -962,38 +983,94 @@ impl Controls {
             .align_y(Alignment::Center)
     }
 
-    fn render_edit_render_resolution_row(&self) -> Row<'_, Message, Theme, Renderer> {
-        row![
-            text("Resolution Factor")
-                .width(Length::Fixed(140.0))
-                .align_y(Alignment::Center)
-                .align_x(Alignment::Center),
-            space().width(Length::Fixed(5.0)),
-            slider(0.25..=2.0,
-                self.render_res_factor, Message::RenderResFactorChanged)
-                .step(0.05)
-                .width(Length::Fixed(100.0)),
-            space().width(Length::Fixed(5.0)),
-            text(format!("{:<3.2}", self.render_res_factor))
-                .width(Length::Fixed(30.0))
-                .align_y(Alignment::Center),
-            space().width(Length::Fixed(15.0)),
+    fn render_edit_render_resolution(&self) -> Column<'_, Message, Theme, Renderer> {
+        column![
+            container(row![
+                text("Resolution Factor")
+                    .width(Length::Fixed(140.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(0.25..=2.0,
+                    self.render_res_factor, Message::RenderResFactorChanged)
+                    .step(0.05)
+                    .width(Length::Fixed(100.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<3.2}", self.render_res_factor))
+                    .width(Length::Fixed(30.0))
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(15.0)),
 
-            text("RF during pan")
-                .width(Length::Fixed(120.0))
+                text("RF During Pan")
+                    .width(Length::Fixed(120.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(0.1..=1.0,
+                    self.render_res_factor_during_pan, Message::RenderResFactorDuringPanChanged)
+                    .step(0.05)
+                    .width(Length::Fixed(100.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<3.2}", self.render_res_factor_during_pan))
+                    .width(Length::Fixed(30.0))
+                    .align_y(Alignment::Center),
+                ]
                 .align_y(Alignment::Center)
-                .align_x(Alignment::Center),
-            space().width(Length::Fixed(5.0)),
-            slider(0.1..=1.0,
-                self.render_res_factor_during_pan, Message::RenderResFactorDuringPanChanged)
-                .step(0.05)
-                .width(Length::Fixed(100.0)),
-            space().width(Length::Fixed(5.0)),
-            text(format!("{:<3.2}", self.render_res_factor_during_pan))
-                .width(Length::Fixed(30.0))
-                .align_y(Alignment::Center),
+            )
+            .style(inner_container_style)
+            .padding(10),
+            container(row![
+                text("Samples")
+                    .width(Length::Fixed(80.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(1..=16,
+                    self.render_sample_count, Message::RenderSampleCountChanged)
+                    .step(1_u32)
+                    .width(Length::Fixed(60.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<2}", self.render_sample_count))
+                    .width(Length::Fixed(10.0))
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(10.0)),
+
+                text("Jitter")
+                    .width(Length::Fixed(60.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(0.0..=1.0,
+                    self.render_jitter_strength, Message::RenderJitterStrengthChanged)
+                    .step(0.01)
+                    .width(Length::Fixed(60.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<1.2}", self.render_jitter_strength))
+                    .width(Length::Fixed(30.0))
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(10.0)),
+
+                text("Averaging Bias")
+                    .width(Length::Fixed(120.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(0.0..=1.0,
+                    self.render_sample_avg_bias, Message::RenderSampleAvgBiasChanged)
+                    .step(0.01)
+                    .width(Length::Fixed(60.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<1.2}", self.render_sample_avg_bias))
+                    .width(Length::Fixed(30.0))
+                    .align_y(Alignment::Center),
+                ]
+                .align_y(Alignment::Center)
+            )
+            .style(inner_container_style)
+            .padding(10)
         ]
-            .align_y(Alignment::Center)
+            .spacing(5)
+            .padding(5)
     }
 
     fn render_color_controls(&self) -> Column<'_, Message, Theme, Renderer> {
@@ -1193,10 +1270,10 @@ impl Controls {
         row![
             button("Reset Scout")
             .on_press(Message::ResetScoutEngine)
-            .width(Length::Fixed(110.0)),
+            .width(Length::Fixed(60.0)),
 
             text("ref iters multiplier: ")
-                .width(Length::Fixed(65.0))
+                .width(Length::Fixed(90.0))
                 .wrapping(Wrapping::Word)
                 .align_y(Alignment::Center)
                 .align_x(Alignment::End),
@@ -1230,8 +1307,7 @@ impl Controls {
                 .on_toggle(Message::GlitchFixChanged),
             space().width(Length::Fixed(5.0)),
             text("Rebase")
-                .width(Length::Fixed(35.0))
-                .wrapping(Wrapping::Word)
+                .width(Length::Fixed(40.0))
                 .align_y(Alignment::Center),
 
             space().width(Length::Fixed(20.0)),

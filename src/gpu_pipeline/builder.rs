@@ -17,6 +17,7 @@ pub struct PipelineBundle {
     pub ref_orbit_location_buf: wgpu::Buffer,
     pub rank_one_orbit_buf: wgpu::Buffer,
     pub rank_two_orbit_buf: wgpu::Buffer,
+    pub noise_texture: wgpu::Texture,
     pub palette_texture: wgpu::Texture,
     pub render_texture: wgpu::Texture,
     pub render_readback_buf: wgpu::Buffer,
@@ -59,6 +60,7 @@ impl PipelineBundle {
 
         let (
             ref_orbit_location_buf, rank_one_orbit_buf, rank_two_orbit_buf,
+            noise_texture,
             debug_buffer, debug_readback,
             calc_bg, debug_bg,
             calc_mandel_pipeline
@@ -89,6 +91,7 @@ impl PipelineBundle {
             orbit_feedback_readback,
             debug_buffer, debug_readback,
             ref_orbit_location_buf, rank_one_orbit_buf, rank_two_orbit_buf,
+            noise_texture,
             palette_texture, render_texture,
             render_readback_buf,
             clear_bg, calc_bg, debug_bg, color_bg, display_bg, reduce_bg,
@@ -297,6 +300,7 @@ fn build_shader_calc_pipeline(
     settings: &Settings
 ) -> (
     wgpu::Buffer, wgpu::Buffer, wgpu::Buffer,
+    wgpu::Texture,
     wgpu::Buffer, wgpu::Buffer,
     wgpu::BindGroup, wgpu::BindGroup,
     wgpu::ComputePipeline,
@@ -322,6 +326,22 @@ fn build_shader_calc_pipeline(
         size: (settings.max_ref_orbit as usize * size_of::<f32>()) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    });
+
+    let noise_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Blue Noise (Pseudo)"),
+        size: wgpu::Extent3d {
+            width: settings.noise_tex_width,
+            height: settings.noise_tex_height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rg8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
     });
 
     let debug_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -395,6 +415,17 @@ fn build_shader_calc_pipeline(
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+       
         ]}
     );
 
@@ -440,6 +471,12 @@ fn build_shader_calc_pipeline(
                 binding: 4,
                 resource: rank_two_orbit_buf.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(
+                    &noise_texture.create_view(&Default::default())
+                ),
+            },
         ],
     });
 
@@ -475,6 +512,7 @@ fn build_shader_calc_pipeline(
 
     (
         orbit_location_buf, rank_one_orbit_buf, rank_two_orbit_buf,
+        noise_texture,
         debug_buffer, debug_readback,
         calc_bg, debug_bg,
         calc_mandel_pipeline,
@@ -630,8 +668,9 @@ fn build_display_pipeline(
     let display_shader = device.create_shader_module(wgpu::include_wgsl!("display.wgsl"));
 
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        mag_filter: wgpu::FilterMode::Nearest,
-        min_filter: wgpu::FilterMode::Nearest,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         ..Default::default()

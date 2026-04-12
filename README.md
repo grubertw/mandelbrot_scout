@@ -35,6 +35,7 @@ That being said, my foremost goal with the project has always been: Make it fast
    1. Now using 4-neighbors strategy, after computing the distance derivative inside the Mandelbrot iteration loop!
 5. UI-driven color palette selection 
    1. Color palettes are IN, and now configurable in settings.toml!
+   2. Import MAP palettes also IN!
 6. Julia sets & cubic Mandelbrot 
 
 I've been iterating with ChatGPT on the 'Scout Engine' concept for a while now, and sometimes, if I am being honest, I wonder what the heck I was thinking to trust the AI to help me with design. It took me down some frightenting over-enginering paths - and this probably happened because of my own lack of understanding of perturbance - which created a hot-soup of complexity that I should have questened earlier on. That being said, it did help me understand the math better, and was useful for pouring through 10,000+ line log output.
@@ -53,16 +54,21 @@ While the GUI is still being heavily worked-on - and is highly subject to change
 2) Color Controls
    1) Color Palette PickList
       1) Choose a color palette to use
-      2) Color palettes are loaded from the disk! All palettes (along with other program settings) are in settings/settings.toml
-         1) New palettes can be added without re-compile!
-   2) Frequency slider
-      1) The min/max values of this slider are bounded by settings in settings.toml, and are specific to the palette being used.
-      2) A frequency of 1.0 means that, if say, the fractal has 500 iterations, then these will be "stretched" across the palette. The palette length is NOT the size of 'array' in the Palette struct, however, as the GPU is given a fixed-size Texture that is sized according to 'settings.max_palette_colors', which is NOT hardcoded, and can be changed in settings.toml. Be aware however that this is controlling GPU texture allocation, and will be bounded by the capabilities of your graphics card (which is usually either 8192 or 16535). Also note that Palette.array is REPEATED across the texture, which provides the smoother gradients. If you want the palette color sampling to be even 'smoother', then a longer palette should be used (rather than my current default, which is a dinky little RGB array of 3 that is repeated over and over!). 
+      2) Starting Color palettes are loaded from the disk! All palettes (along with other program settings) are in settings/settings.toml
+         1) New palettes using MAP file format can be added on-the-fly with the 'Import' button, which opens a file browser dialog. The new MAP palette will be added to color palette pick-list. 
+   2) Palette Cycles slider
+      1) A cycle of 1.0 means that no repetition of palette colors occurs. For the default 3-color R-G-B palette, these 3 colors would stretch across the (normalized) iteration count (t).
+         1) The best way to think about this is normalized fractal iter count 't' against normalized color count 'c' - i.e. `t = iter / max_iter` & `c = c_iter / palette_len`.
    3) Offset slider
-      1) Shift fractal iterations across the color palette. This value is always bounded between 0-1, 0 is the beginning, 1 is the end. Again note, the palette length is max_palette_colors, NOT the length of the palette array.
+      1) Shift fractal iterations across the color palette. This value is always bounded between 0-1, and is relative to Palette Cycles.
    4) Gamma slider
-      3) Allows for non-liner interpolation of color. In the shader, this is essentially `t = pow(t, gamma)`. For a power-of-two fractal like the Mandelbrot, a good value to use is 2 - but ranges in-between also look nice!
-   5) Distance Estimation controls 
+      1) Applies a non-linear function (Pow) *after* a color has been picked from the palette - i.e. to the vec3 RGB value used directly by the GPU rasterizer.
+   5) Color Scalar Mapping
+      1) Choose between mapping functions applied to normalized fractal iteration count before the palette color is selected
+         1) Choices are: Linear, Pow, Log, and Atan
+      2) Mapping Strength allows the user to control the 'k' variable in the mapping functions - i.e `t = pow(t, k)` | `t = log(1.0 + k * t) / log(1.0 + k)` | `t = atan(k * t) / atan(k)`
+         1) Note, the ranges of this value change depending on which mapping function is selected, allowing for the user to pick 'sane' values for functions, and affect the most aesthetically pleasing band of iteration counts with an appropriate change of color. 
+   6) Distance Estimation controls 
       1) There are a LOT of additions here, and another complete overhaul of the UI. The best place to look for docs is in `settings.toml`
 3) Scout Controls
    1) "Reset Scout" button will delete from program memory all reference orbits, and stop perturbation mode
@@ -82,7 +88,30 @@ While the GUI is still being heavily worked-on - and is highly subject to change
    3) Enter the Imaginary complex coordinate for the desired viewport center
    4) Enter the desired viewport scale. 
    5) "Apply" button will take the values in the three text-boxes, and apply them to the GPU.
-      1) Note that either scientific notation or decimal notation can be used inside these boxes. String validation of these values does not occur until the Apply button is clicked. 
+      1) Note that either scientific notation or decimal notation can be used inside these boxes. String validation of these values does not occur until the Apply button is clicked.
+   6) "Restore From PNG" the scene from a PNG created by Mandelbrot Scout!
+      1) See the section below on Saved Images
+5) Save Controls
+   1) Export the current scene/viewport as a PNG or JPEG
+   2) If PNG is selected, the user may choose between None, Default, Fast, and Best compression.
+      1) Default compression is what PNGs are typically saved with, and is considered a good balance.
+      2) Fast is the lightest compression
+      3) Best is the heaviest compression and will make the smallest file (for PNG), but comes with the cost of being slow!
+   3) If JPEG is selected, the user is provided with a quality slider with values between 10 and 100 percent.
+   4) If 'Use Alternate Dimensions' is checked, the user may enter an alternate resolution to save the image. 
+      1) When using this feature, the user should pay careful attention to the current complex center and scale. Note that scale in the program is the complex space 'per-pixel', and NOT the viewport span - as is found in some fractal programs. For image export, this means that when the resolution is changed, more of the complex space can be seen, and effectively increases how much of the fractal appears in the image - i.e. the image will show more of the fractal that is currently cut-off by the viewport window. 
+6) Resolution Controls
+   1) "Resolution Factor" - i.e. 'RF' of 1.0 means that the fractal compute shader samples at pixel resolution, so if the viewport window is 1200/900, this means 1,080,000 fractal (mandelbrot) calculations are performed, per frame. 
+      1) Using a value less-than 1.0 will apply the value as a multiplier to the current width and height of the viewport window, and effectively lower the resolution/quality of the image. WGPUs 'mag_filter' is then used to perform a linear blend/mix on render_tex, which the color shader writes. i.e. linearized subsampling. Using sub-one values here isn't really recommended, unless your GPU is really struggling, and you still want to keep a large window size. 
+      2) Using a value greater-than 1.0 is where things get interesting! This is effectively supersampling, as more samples are taken than pixels in the viewport. with a value of 2.0, 4 samples are taken for every pixel. Here, WGPUs 'min_filter' within the texture sampler will perform a linear interpolation on these 4 values (which are stored in the texture-2d as rgb8unorm).
+   2) "RF During Pan" is the resolution factor to use during pan operation. 
+      1) It is especially handy to use values lower than 1.0 here if GPU appears sluggish, and can help a lot to increase responsiveness of the application. Using values greater than one make no sense here, as that would be supersampling during pan!
+   3) "Samples" - Indicates the number of samples taken for a pixel-c value directly in the computation stage. This value is meant to be used with Jitter, and when both values are set greater than one, more fractal computations are performed, at jittered offsets from the pixel's exact center. When set to 4, for instance, then mandelbrot() will be called 4 times, at 4 different jittered offsets. These 4 samples will then be averaged together so that the color shader stage still only sees one (set) of fractal computations, when choosing the final color.
+      1) In essence, ResFactor can be used to average color, and samples can be used to average the arithmetic (iters) calculations. Using all these sliders in the "Res" tab, you can effectively combine these averaging methods! It should be noted though that image export does not use the texture sampler, as it directly takes from the output color/render texture to PNG encode.  
+   4) "Jitter" - the amount of Jitter applied to normalized pixel-c, where +-0.5 is the pixel's boundary. Keeping this in mind, applying a jitter strength of less 0.5 will keep samples 'inside' the pixel's 'box', and using values greater than 0.5 will force pixel samples outside this box, which effectively blurs/smooths the image!
+      1) Note that pixel jitter is computed using a 128x128 PRNG (ChaCha8) white-noise texture, and is NOT blue noise (i.e. Poisson Disk). In later implementations, I may improve on this, and migrate to using true blue noise, and a geometric median for sample averages.
+   5) "Averaging Bias" - Rather than take a basic average of iterations across samples, a mix() invocation is used. The bias is then used to mix between min_iters and max_iters found across samples.
+      1) Effectively, this slider acts as sharpness. With Jitter and Bias both set to 1.0, the shader more aggressively includes pixels "into the set", making the image appear "sharper". Conversely, with Jitter left at 1 and Bias at 0, the set and it's filaments become "thinner". Ultimately, this is NOT sharpness, and depending on the color palette use, and how colors are mapped across iterations, using a bias of 0.0 may seem to "sharpen" the image - which was why I decided to make a slider for this value, as opposite extremes of this value may better suit the current color mapping. 
 
 ## Helpful environment variables to use on CLI while running
 The RUST_LOG environment variable controls all the logging output, which is essential for debugging. Also, many other library dependencies (critically, WGPU) use the Rust logger, so this turns into the most essential environment variable for debugging!
@@ -101,22 +130,56 @@ If you want to know more about what WGPU can support, look [here](https://github
 # Basic Use
 I made this GIF to show how easy this program is to use!
 
-Concerning settings.toml, while in v3.1, it was a hard requirement to have this file (and in a directory alongside the program called 'settings'), moving forward, it will no longer be necessary. That being said, this file is still useful for supplying overrides to the program, and making changes to its small set of initial color palettes. The file can now be placed directly next to the EXE, or put in a 'settings' dir (similar to repo structure), or you can also set a SETTINGS_DIR environment variable. If the program starts without this file however, there will only be one color palette available, the default RGB (repeating) palette.
+Concerning settings.toml, while in v3.1, it was a hard requirement to have this file (and in a directory alongside the program called 'settings'), in versions 3.2 and further, it will no longer be necessary. That being said, this file is still useful for supplying overrides to the program, and making changes to its small set of initial color palettes. The file can now be placed directly next to the EXE, or put in a 'settings' dir (similar to repo structure), or you can also set a SETTINGS_DIR environment variable. If the program starts without this file however, there will only be one color palette available, the default RGB palette.
 
 ![Basic Use](screenshots/basic_use.gif)
 
-# Screenshots
-Here a few recent ones that demonstrate what happens at the precision wall, and then where I am so far with Scout's reference orbit creation.
+# Image Export
+Starting in version 3.2, you can now export/save the current Scene as a PNG or JPEG image. If PNG is selected, the program automatically writes a JSON file header. Information in this header can then be used to restore the Scene to the same complex location and scale! If you want to see the JSON text that is written to the PNG header, there is a handy little program you can use called 'pngcheck'. Here is an example of it's use and output (on Linux):
 
-What happens when you zoom too far on the GPU!
-![Pixalization at moderate zoom](screenshots/Screenshot_2026-03-01_12-30-51.png)
-Note, even with my 'Double Float' values (i.e. 2x f32 rounded hi + residual lo), it does not push the zoom boundary much further than GPU native f32.
+```
+ ➜  pngcheck -t fractal.png
+File: fractal.png (205372 bytes)
+FractalMetadata:
+    {"program_name":"Mandelbrot Scout","version":"1","center_re":"-9.864719622747442105567579431875481177930e-3","center_im":"1.029624344701343542604038494832493881498","scale":"1.232924115364685679889029198474463259543e-7","max_iter":500,"ref_orbit":null}
+OK: fractal.png (1385x1000, 32-bit RGB+alpha, non-interlaced, static, 96.3%).
+```
 
-Now, with those exact same coordinates, after pressing the "Scout!" button...
-![First Scout Attempt Success](screenshots/Screenshot_2026-03-01_12-31-00.png)
-Note that I have a tile coloring diagnostic in the shader, and that's why the interior looks blue! Tiles are misaligned because they are using two different reference orbits. NOTE, I am NO LONGER USING TILES! Better to just have one good reference orbit, and then rebase with a secondary orbit, but ONLY for pixels that glitched.
+# Screenshots (Latest)
+Perturbation Theory still stands as the greatest contributor to quality on the GPU. Not even super-sampling can help with the fundamental problem that float-32 values cannot carry enough precision to avoid the rounding error that occurs at scales lower than 1e-7 (i.e. forcing the representation between pixel-c values into less than 4 bits). With a good reference orbit, perturbation math comes to save the day, restoring how GPU f32 values can represent pixel-c - i.e. by detas to the reference orbit, rather than the absolute pixel-c values themselves!
+![Pixelation at f32 precision boundary](screenshots/Screenshot_2026-04-11_11-52-59.png)
 
-3.1 Update - Distance Estimation is working now!
+Below you can see that supersampling without perturbation doesn't help much, and that is because we lack enough bits (significant digits) to distinguish the difference between pixel-c 'boxes' (which are painfully visible in this render).
+![Pixelated supersampling](screenshots/Screenshot_2026-04-12_06-53-52.png)
+
+Here is what these exact same coordinates and scale look like after the "Scout!" button is pressed! With a single reference orbit that is 625 iterations in length - which is slightly longer than max_iters rendered by the GPU - we can faithfully approximate iterations for pixel-c based on delta-c and the reference orbit.
+![Scout solution](screenshots/Screenshot_2026-04-11_11-53-41.png)
+
+From here, there is still more we can do to enhance the quality of the image (mathematically), and that is super-sampling, which I have been working on and introduce with version 3.2! Perturbation Theory now gives us plenty of breathing room for adding samples in 'boxes' of pixel-c, which for this current scene, is a span of 5.4e-10. The first form of super-sampling I used leveraged a texture sampler and an "oversized" render texture, which I make independent of screen resolution, meaning that I can write more image data than pixels on the screen. The texture sampler gives a hardware based approach to perform liner interpolation of rgba8 integer values for the case of minification. The texture sampler also uses mip-mapping, which does provide some benefit for fractals, but is far better suited to anti-alias 3d images.
+![Super-sampling using Texture Sampler](screenshots/Screenshot_2026-04-12_07-01-15.png)
+Looking closely, you can notice less 'artifacts' in the image - i.e. the black pixels that are close but not inside the minibrot, which are not actually 'in the set'. The texture sampler here averages/smooths the colors for us, resulting in a cleaner aesthetic!
+
+A better form of supersampling is to more tightly control where our iterations from pixel center occur. With the "pure resolution" based supersampling above, "sub-pixel-c" values become laid out in a grid-like pattern (think of graph paper), and still doesn't solve well the occurrence of 'Moiré patterns'. Rather than relying on a simple scale factor of the sampling grid, a better way is to use jittered offsets from pixel-c. Calculating the angle and distance of the jittered pixel can be tricky, and there are lots of different ways to do this. The approach I decided to take (at least for the screenshot below) is to use a procedurally generated noise texture, i.e. u8 values generated by the ChaCha8 PRNG algorithm. The 'text book' ideal is to use a blue-noise texture, but with a careful selection of values from this texture, we still easily avoid the problem of correlation artifacts (which is the primary purpose of using noise for jitter offsets). The other important difference is how samples are averaged. If only color is averaged, this hides iteration counts, which is the best indicator for how samples can best be combined. After fiddling with a few different averaging algorithms, I had the thought to introduce yet another slider, which is the "Averaging Bias". 
+
+![Super-sampling with max_iters bias](screenshots/Screenshot_2026-04-12_07-13-44.png)
+At least for my debug coloring - which is purely algorithmic: `color = vec3f(t, t*t, pow(t, 0.5))` where `t = it / max_it` (i.e. normalized iterations count) - taking a high sample count (i.e. 16 samples per pixel-c) - and then applying jitter with a strength of 1.0 (which forces some samples taken outside the pixel's 'box' (any jitter > 0.5 will do this)) - and with an averaging bias of 1.0, which effectively changes the average to a max of iter counts for all samples taken, we get the above (maybe a bit too aggressively) sharpened image! 
+
+Below is when we switch the Averaging bias to 0 instead, which translates to the min of iter counts for all samples.
+![Super-sampling with min_iters bias](screenshots/Screenshot_2026-04-12_07-31-02.png)
+
+Surprisingly, I find myself liking a bias toward min_iters for most 256-color MAP palettes that find popular use on fractalforums, as it does a better job of smoothing what would otherwise be (perhaps) too busy level of detail. 
+![FarDareisMaiRainbows](screenshots/Screenshot_2026-04-12_08-45-55.png)
+
+![FarDareisMaiPainting](screenshots/Screenshot_2026-04-12_08-47-56.png)
+
+![FarDareisMaiPainting max_iters](screenshots/Screenshot_2026-04-12_08-48-36.png)
+
+And the final PNG export.
+![FarDareisMayPainting export](screenshots/screenshot1.png)
+
+Ultimately, it all comes down to finding the right aesthetic appeal, which is why I like sliders so much. With a good range of values, these sliders give users highly interactive and highly responsive feedback, especially when making very small changes to values, which would be nearly impossible to see the difference otherwise. Rendering on the GPU is also what makes these kinds of successive coloring+calculation changes even possible - at least at high frame-rates - and I feel like that matters a lot for these types of fine-tuning.   
+
+## 3.1 Update - Distance Estimation is working now!
 
 ![De demo 1](screenshots/de_demo.gif)
 
@@ -136,16 +199,14 @@ Here are a dew DE renders that are working with perturbation!
 
 ![De Perturb Screenshot 3](screenshots/Screenshot_2026-03-15_23-37-28.jpg)
 
-Here is another quick demo on Stripe Averaging. At first I wasn't sure how much I liked the effect, but with some tuning and playing around with the sliders, I was able to make some very nice renders!
-
-![Stripe Demo](screenshots/stripe_demo.gif)
+Here are a rew renders that show stripe averaging!
 
 ![Stripe De Perturb 1](screenshots/Screenshot_2026-03-16_00-05-08.jpg)
 
 ![Stripe De Perturb 2](screenshots/Screenshot_2026-03-16_00-21-36.jpg)
 
-
-Here is some craziness that ChatGPT was having me do, hunting for an orbit with a perfect 'r_valid' for linerized perturbation (which is NOT necessary when you keep the quadratic term).
+## Older screenshots
+Here is some craziness that ChatGPT was having me do while attempting to get pertubation working. It had me hunting for orbits with a perfect 'r_valid' for linerized perturbation (which is NOT necessary when you keep the quadratic term). What did come out of this effort however, was a highly scalable light-weight threading model, which allowed me to spawn and compute hunderads of reference orbits per second (orbits were short here, all under 8192 iterations), accross all 16 of my CPU cores! In the render below, I had over 250 independant worker tasks - wrapped as async functions - which were all enqued into a thread-pool with non-blocking awaits for orbit computation results, and feeding to the GPU/main thread to flow into the GPU render pipeline after results were ready.
 ![Older ScoutEngine failure](screenshots/Screenshot_2026-02-25_10-41-24.png)
 
 Here are a few more 'before and after pertubation snapshots, to show how much it shifts the precision wall!
@@ -163,7 +224,8 @@ Some preliminary deep-zoom tests...
 ![Deep Zoom Prelim 2](screenshots/Screenshot_2026-03-04_15-40-39.png)
 ![Deep Zoom Prelim 3](screenshots/Screenshot_2026-03-04_16-23-08.png)
 
-Here is my oldest screenshot, where I initially had sliders to control RGB based on a sign wave, and then modulating the frequency of the wave, relative to escape time.
+## Screenshots from 2.0
+Here is my oldest screenshot, where I initially had sliders to control RGB based on a sin wave, and then modulating the frequency of the wave, relative to escape time.
 
 ![Mandelbrot 2.0 800x600 - screenshot 1](screenshots/Mandelbrot_2_ss1.png)
 

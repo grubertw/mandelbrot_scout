@@ -19,6 +19,8 @@ parking_lot = {version = "0.12", features = ["hardware-lock-elision"]}
 bytemuck="1.25.0"
 num-complex = { version = "0.4.6" , features = ["bytemuck"]}
 rug="1.28.1"
+rand="0.8"
+rand_chacha="0.3"
 log="0.4.29"
 env_logger="0.11.8"
 anstyle="1.0.6"
