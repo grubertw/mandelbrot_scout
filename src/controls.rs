@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::env;
 use std::fs::File;
+use chrono::Local;
 use iced_wgpu::core::font;
 use iced_wgpu::core::text::Wrapping;
 use png::Compression;
@@ -183,6 +184,7 @@ pub struct Controls {
     export_img_png_compression: Option<PngCompression>,
     export_img_jpeg_quality: u8,
     use_alternate_dimensions: bool,
+    append_timestamp_to_filename: bool,
     export_img_width: String,
     export_img_height: String,
 
@@ -269,6 +271,7 @@ pub enum Message {
     ExportImgPngCompressionChanged(PngCompression),
     ExportImgJpegQualityChanged(u8),
     UseAlternateDimensionsChanged(bool),
+    AppendTimestampToFileNameChanged(bool),
     ExportImgWidthChanged(String),
     ExportImgHeightChanged(String),
     ExportImage,
@@ -380,6 +383,7 @@ impl Controls {
             export_img_png_compression: Some(PngCompression::Default),
             export_img_jpeg_quality: 90,
             use_alternate_dimensions: false,
+            append_timestamp_to_filename: true,
             export_img_width: scene.borrow().width().to_string(),
             export_img_height: scene.borrow().height().to_string(),
             debug_msg: debug_msg.to_string(), info_text,
@@ -741,6 +745,9 @@ impl Controls {
                     self.export_img_height = self.scene.borrow().height().to_string();
                 }
             }
+            Message::AppendTimestampToFileNameChanged(append_timestamp_to_file_name) => {
+                self.append_timestamp_to_filename = append_timestamp_to_file_name;
+            }
             Message::ExportImgWidthChanged(width) => {
                 self.export_img_width = width;
             }
@@ -754,7 +761,11 @@ impl Controls {
                     "jpg".to_string()
                 } else {"".to_string()};
 
-                let full_filename = format!("{}/{}.{}", self.export_img_dir, self.export_img_file_name, file_ext);
+                let ts = if self.append_timestamp_to_filename {
+                    Local::now().format("_%y%m%d_%H%M%S").to_string()
+                } else {"".to_string()};
+
+                let full_filename = format!("{}/{}{}.{}", self.export_img_dir, self.export_img_file_name, ts, file_ext);
                 match File::create(full_filename.as_str()) {
                     Ok(file) => {
                         let mut img_width = match self.export_img_width.parse::<u32>() {
@@ -1428,9 +1439,27 @@ impl Controls {
                     .width(Length::Fixed(75.0)),
             );
             dimensions_row = dimensions_row.push(
-                space().width(Length::Fixed(10.0))
+                space().width(Length::Fixed(5.0))
             );
         }
+
+        dimensions_row = dimensions_row.push(
+            checkbox(self.append_timestamp_to_filename)
+                .on_toggle(Message::AppendTimestampToFileNameChanged)
+        );
+        dimensions_row = dimensions_row.push(
+            space().width(Length::Fixed(10.0))
+        );
+        dimensions_row = dimensions_row.push(
+            text("Append timestamp to filename")
+                .width(Length::Fixed(70.0))
+                .size(9)
+                .wrapping(Wrapping::Word)
+                .align_y(Alignment::Center),
+        );
+        dimensions_row = dimensions_row.push(
+            space().width(Length::Fixed(10.0))
+        );
 
         dimensions_row = dimensions_row.push(
             button("Save")

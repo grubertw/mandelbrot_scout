@@ -1979,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "mandelbrot_scout"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anstyle",
  "built",

@@ -663,17 +663,17 @@ impl Scene {
         self.render_res_factor_during_pan = res_factor;
         self.recalc_fractal = true;
     }
-    
+
     pub fn set_sample_count(&mut self, sample_count: u32) {
         self.uniform.sample_count = sample_count;
         self.recalc_fractal = true;
     }
-    
+
     pub fn set_jitter_strength(&mut self, jitter_strength: f32) {
         self.uniform.jitter_strength = jitter_strength;
         self.recalc_fractal = true;
     }
-    
+
     pub fn set_sample_avg_bias(&mut self, sample_avg_bias: f32) {
         self.uniform.sample_avg_bias = sample_avg_bias;
         self.recalc_fractal = true;
@@ -1194,7 +1194,8 @@ impl Scene {
             program_name: TITLE.to_string(),
             version: META_VERSION.to_string(),
             center_re, center_im, scale,
-            max_iter: self.uniform.max_iter,
+            palette_name: self.selected_palette.clone(),
+            uniform: self.uniform.clone(),
             ref_orbit,
         }
     }
@@ -1207,9 +1208,8 @@ impl Scene {
         self.update_center_offsets();
         
         self.scale = Float::with_val(self.scale.prec(), Float::parse(meta.scale).unwrap());
-        self.uniform.scale = self.scale.to_f32();
-        
-        self.uniform.max_iter = meta.max_iter;
+        self.uniform = meta.uniform;
+
         self.update_window_title();
         self.recalc_fractal = true;
     }

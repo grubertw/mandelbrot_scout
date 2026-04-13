@@ -1,7 +1,8 @@
 use bytemuck;
+use serde::{Deserialize, Serialize};
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Serialize, Deserialize)]
 pub struct SceneUniform {
     pub center_x: f32,
     pub center_y: f32,

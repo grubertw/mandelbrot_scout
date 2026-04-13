@@ -5,9 +5,10 @@ use std::path::Path;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use png::Decoder;
+use crate::gpu_pipeline::structs::SceneUniform;
 use crate::scene::Rgba8Palette;
 
-pub const META_VERSION: &str = "1";
+pub const META_VERSION: &str = "2";
 
 // Used to generate JSON data for image export
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -17,7 +18,8 @@ pub struct FractalMetadata {
     pub center_re: String,
     pub center_im: String,
     pub scale: String,
-    pub max_iter: u32,
+    pub palette_name: String,
+    pub uniform: SceneUniform,
     pub ref_orbit: Option<RefOrbitMetadata>,
 }
 
