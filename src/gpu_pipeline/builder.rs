@@ -42,7 +42,7 @@ impl PipelineBundle {
         settings: &Settings
     ) -> Self {
         let (uniform_buff,
-            mandel_out_tex, render_texture,
+            mandel_out_tex, refine_out_tex, render_texture,
             render_readback_buf, grid_feedback_buffer, orbit_feedback_buffer) =
             create_shared_buffers(device, uniform, settings);
 
@@ -56,7 +56,8 @@ impl PipelineBundle {
         let (
             clear_bg, clear_pipeline
         ) = build_clear_pipeline(device,
-                 &mandel_out_tex, &render_texture, &grid_feedback_buffer, &orbit_feedback_buffer);
+                 &mandel_out_tex, &refine_out_tex, &render_texture,
+                 &grid_feedback_buffer, &orbit_feedback_buffer);
 
         let (
             ref_orbit_location_buf, rank_one_orbit_buf, rank_two_orbit_buf,
@@ -64,7 +65,7 @@ impl PipelineBundle {
             debug_buffer, debug_readback,
             calc_bg, debug_bg,
             calc_mandel_pipeline
-        ) = build_shader_calc_pipeline(device, &uniform_buff, &mandel_out_tex, &settings);
+        ) = build_shader_calc_pipeline(device, &uniform_buff, &mandel_out_tex, &refine_out_tex, &settings);
 
         let (
             palette_texture,
@@ -80,7 +81,7 @@ impl PipelineBundle {
         let (
             grid_feedback_readback, orbit_feedback_readback,
             reduce_bg, reduce_pipeline
-        ) = build_reduce_pipeline(device, &uniform_buff, &mandel_out_tex,
+        ) = build_reduce_pipeline(device, &uniform_buff, &mandel_out_tex, &refine_out_tex,
                   &grid_feedback_buffer, &orbit_feedback_buffer, &settings);
 
         Self {
@@ -106,7 +107,7 @@ impl PipelineBundle {
 //
 fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings: &Settings)
 -> (wgpu::Buffer,
-    wgpu::Texture, wgpu::Texture,
+    wgpu::Texture, wgpu::Texture, wgpu::Texture,
     wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
     // Allocate Scene Uniforms buffer, where most shader settings reside
     let uniform_buff = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -118,6 +119,22 @@ fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings
     // --- Per-pixel feedback textures ---
     let mandel_out_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("mandel_out_tex"),
+        size: wgpu::Extent3d {
+            width: settings.render_tex_width,
+            height: settings.render_tex_height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+
+    let refine_out_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("refine_out_tex"),
         size: wgpu::Extent3d {
             width: settings.render_tex_width,
             height: settings.render_tex_height,
@@ -176,7 +193,7 @@ fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings
     });
 
     (uniform_buff,
-     mandel_out_tex, render_texture,
+     mandel_out_tex, refine_out_tex, render_texture,
      render_readback_buffer, grid_feedback_buffer, orbit_feedback_buffer)
 }
 
@@ -186,6 +203,7 @@ fn create_shared_buffers(device: &wgpu::Device, uniform: &SceneUniform, settings
 fn build_clear_pipeline(
     device: &wgpu::Device,
     mandel_out_tex: &wgpu::Texture,
+    refine_out_tex: &wgpu::Texture,
     render_texture: &wgpu::Texture,
     grid_feedback_buffer: &wgpu::Buffer,
     orbit_feedback_buffer: &wgpu::Buffer,
@@ -207,9 +225,20 @@ fn build_clear_pipeline(
                 },
                 count: None,
             },
-            // render texture (final image)
+            // refine_out_tex
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            // render texture (final image)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::StorageTexture {
                     access: wgpu::StorageTextureAccess::WriteOnly,
@@ -220,7 +249,7 @@ fn build_clear_pipeline(
             },
             // grid feedback
             wgpu::BindGroupLayoutEntry {
-                binding: 2,
+                binding: 3,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -231,7 +260,7 @@ fn build_clear_pipeline(
             },
             // orbit feedback
             wgpu::BindGroupLayoutEntry {
-                binding: 3,
+                binding: 4,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -256,15 +285,21 @@ fn build_clear_pipeline(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(
-                    &render_texture.create_view(&Default::default())
+                    &refine_out_tex.create_view(&Default::default())
                 ),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: grid_feedback_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::TextureView(
+                    &render_texture.create_view(&Default::default())
+                ),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
+                resource: grid_feedback_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
                 resource: orbit_feedback_buffer.as_entire_binding(),
             },
         ],
@@ -297,6 +332,7 @@ fn build_shader_calc_pipeline(
     device: &wgpu::Device,
     uniform_buff: &wgpu::Buffer,
     mandel_out_tex: &wgpu::Texture,
+    refine_out_tex: &wgpu::Texture,
     settings: &Settings
 ) -> (
     wgpu::Buffer, wgpu::Buffer, wgpu::Buffer,
@@ -361,6 +397,7 @@ fn build_shader_calc_pipeline(
     let calc_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("scene bind group layout"),
         entries: &[
+            // Scene uniforms
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
@@ -371,9 +408,31 @@ fn build_shader_calc_pipeline(
                 },
                 count: None,
             },
-            // Per-pixel mandelbrot() results output texture
+            // Noise texture
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // calc_out_tex texture
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            // refine_out_tex texture
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::StorageTexture {
                     access: wgpu::StorageTextureAccess::WriteOnly,
@@ -384,7 +443,7 @@ fn build_shader_calc_pipeline(
             },
             // Orbit Location buffer
             wgpu::BindGroupLayoutEntry {
-                binding: 2,
+                binding: 4,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -395,7 +454,7 @@ fn build_shader_calc_pipeline(
             },
             // Rank 1 orbit buffer
             wgpu::BindGroupLayoutEntry {
-                binding: 3,
+                binding: 5,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -406,7 +465,7 @@ fn build_shader_calc_pipeline(
             },
             // Rank 2 orbit buffer
             wgpu::BindGroupLayoutEntry {
-                binding: 4,
+                binding: 6,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -415,17 +474,6 @@ fn build_shader_calc_pipeline(
                 },
                 count: None,
             },
-            wgpu::BindGroupLayoutEntry {
-                binding: 5,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-       
         ]}
     );
 
@@ -456,26 +504,32 @@ fn build_shader_calc_pipeline(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(
-                    &mandel_out_tex.create_view(&Default::default())
+                    &noise_texture.create_view(&Default::default())
                 ),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: orbit_location_buf.as_entire_binding(),
+                resource: wgpu::BindingResource::TextureView(
+                    &mandel_out_tex.create_view(&Default::default())
+                ),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: rank_one_orbit_buf.as_entire_binding(),
+                resource: wgpu::BindingResource::TextureView(
+                    &refine_out_tex.create_view(&Default::default())
+                ),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: rank_two_orbit_buf.as_entire_binding(),
+                resource: orbit_location_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: wgpu::BindingResource::TextureView(
-                    &noise_texture.create_view(&Default::default())
-                ),
+                resource: rank_one_orbit_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: rank_two_orbit_buf.as_entire_binding(),
             },
         ],
     });
@@ -781,6 +835,7 @@ fn build_reduce_pipeline(
     device: &wgpu::Device,
     uniform_buff: &wgpu::Buffer,
     mandel_out_tex: &wgpu::Texture,
+    refine_out_tex: &wgpu::Texture,
     grid_feedback_buffer: &wgpu::Buffer,
     orbit_feedback_buffer: &wgpu::Buffer,
     settings: &Settings
@@ -808,6 +863,7 @@ fn build_reduce_pipeline(
         &wgpu::BindGroupLayoutDescriptor {
             label: Some("reduce_feedback_bgl"),
             entries: &[
+                // Scene uniforms
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -829,9 +885,20 @@ fn build_reduce_pipeline(
                     },
                     count: None,
                 },
-                // grid feedback buffer
+                // refine output texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // grid feedback buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -842,7 +909,7 @@ fn build_reduce_pipeline(
                 },
                 // orbit feedback buffer
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3,
+                    binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -871,10 +938,16 @@ fn build_reduce_pipeline(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: grid_feedback_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::TextureView(
+                    &refine_out_tex.create_view(&Default::default())
+                ),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
+                resource: grid_feedback_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
                 resource: orbit_feedback_buffer.as_entire_binding(),
             },
         ],

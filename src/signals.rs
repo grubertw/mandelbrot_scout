@@ -67,6 +67,9 @@ pub struct GpuGridSample {
     pub iters_reached: u32,
     pub escaped: bool,
     pub max_user_iters: u32,
+    pub period: u32,
+    pub contraction: f32,
+    pub score: f32,
 }
 
 #[derive(Clone, Copy, Debug)]

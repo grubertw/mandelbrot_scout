@@ -88,9 +88,17 @@ impl Scene {
             auto_start: settings.auto_start,
             starting_scale: settings.starting_scale,
             ref_iters_multiplier: settings.ref_iters_multiplier,
-            num_seeds_to_spawn_per_eval: settings.num_seeds_to_spawn_per_eval,
+            num_samples_to_infer_direction: settings.num_samples_to_infer_direction,
+            num_f64_seeds: settings.num_f64_seeds,
+            num_f64_walks: settings.num_f64_walks,
+            f64_walk_scale: settings.f64_walk_scale,
+            num_mpfr_seeds: settings.num_mpfr_seeds,
             num_qualified_orbits: settings.num_qualified_orbits,
             rug_precision: settings.init_rug_precision,
+            distance_error_threshold: settings.distance_error_threshold,
+            depth_bonus: settings.depth_bonus,
+            distance_penalty: settings.distance_penalty,
+            contraction_bonus: settings.contraction_bonus,
             exploration_budget: settings.exploration_budget,
         };
 
@@ -118,6 +126,8 @@ impl Scene {
             render_tex_height: settings.render_tex_height as f32,
             max_iter: settings.max_user_iter,
             ref_orb_count: 0,
+            perturb_err_threshold: settings.perturb_err_threshold,
+            grid_feedback_scale: settings.grid_feedback_scale,
             grid_size: settings.screen_grid_size,
             grid_width: width as u32 / settings.screen_grid_size,
             sample_count: 1,
@@ -384,21 +394,23 @@ impl Scene {
 
                 let sample_iters = sample.iter();
                 let escaped = sample.escaped();
+                let period = sample.best_period;
+                let contraction = sample.best_contraction as f32 / 256.0;
+                let score = sample.score as f32 / self.uniform.grid_feedback_scale;
 
-                if !escaped {
-                    trace_str.push_str(
-                        format!("[{:<3}, {:<3}]\tc={:<56} depth={:<3} escaped={} perturbed={} \
-                        max_iters_reached={} orbit_idx={}\traw_flags={}\n",
-                            sample.best_pixel_x,
-                            sample.best_pixel_y,
-                            best_sample.to_string_radix(10, Some(18)),
-                            sample_iters, escaped,
-                            sample.perturbed(),
-                            sample.max_iters_reached(),
-                            sample.orbit_idx(),
-                            sample.best_pixel_flags
-                    ).as_str());
-                }
+
+                trace_str.push_str(
+                    format!("[{:<3}, {:<3}]\tc={:<56} depth={:<3} escaped={} perturbed={} \
+                    max_iters_reached={} period={} contraction={} score={}\n",
+                        sample.best_pixel_x,
+                        sample.best_pixel_y,
+                        best_sample.to_string_radix(10, Some(18)),
+                        sample_iters, escaped,
+                        sample.perturbed(),
+                        sample.max_iters_reached(),
+                        period, contraction, score
+                ).as_str());
+
 
                Some( GpuGridSample {
                     frame_stamp: FrameStamp {
@@ -408,7 +420,8 @@ impl Scene {
                     location: best_sample,
                     iters_reached: sample_iters,
                     escaped,
-                    max_user_iters: self.uniform.max_iter
+                    max_user_iters: self.uniform.max_iter,
+                    period, contraction, score
                 })
             })
             .collect();
@@ -689,6 +702,22 @@ impl Scene {
         self.scout_engine.set_max_user_iterations(max_iterations)
     }
 
+    pub fn set_scout_auto_start(&mut self, auto_start: bool) {
+        self.scout_engine.set_auto_start(auto_start);
+    }
+    
+    pub fn set_ref_iters_multiplier(&mut self, ref_iters_mult: f64) {
+        self.scout_engine.set_ref_iters_multiplier(ref_iters_mult);
+    }
+
+    pub fn set_num_samples_to_infer_direction(&mut self, num_seeds: u32) {
+        self.scout_engine.set_num_samples_to_infer_direction(num_seeds);
+    }
+
+    pub fn set_distance_error_threshold(&mut self, distance_error_threshold: f32) {
+        self.scout_engine.set_distance_error_threshold(distance_error_threshold);
+    }
+
     pub fn set_window_size(&mut self, width: f64, height: f64) {
         self.width = width;
         self.height = height;
@@ -757,14 +786,10 @@ impl Scene {
         self.update_window_title();
         c
     }
+    
     pub fn set_debug_coloring(&mut self, debug_coloring: bool) {
         self.uniform.set_debug_coloring(debug_coloring);
         self.recalc_color = true;
-    }
-    
-    pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
-        self.uniform.set_glitch_fix(glitch_fix);
-        self.recalc_fractal = true;
     }
     
     pub fn set_smooth_coloring(&mut self, smooth_coloring: bool) {

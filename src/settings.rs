@@ -19,9 +19,21 @@ pub struct Settings {
     pub auto_start: bool,
     pub starting_scale: f64,
     pub ref_iters_multiplier: f64,
-    pub num_seeds_to_spawn_per_eval: u32,
+    pub num_samples_to_infer_direction: u32,
+    pub num_f64_seeds: u32,
+    pub num_f64_walks: u32,
+    pub f64_walk_scale: f64,
+    pub num_mpfr_seeds: u32,
     pub num_qualified_orbits: u32,
+    pub distance_error_threshold: f32,
+    pub depth_bonus: f64,
+    pub distance_penalty: f64,
+    pub contraction_bonus: f64,
     pub exploration_budget: i32,
+
+    // Wired into scene uniforms for use in reduce shader
+    pub perturb_err_threshold: f32,
+    pub grid_feedback_scale: f32,
 
     // Initial Scene config
     pub center: (f64, f64),
@@ -143,12 +155,22 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
     builder
         .set_default("init_rug_precision", 128)?
         .set_default("max_live_orbits", 100)?
-        .set_default("auto_start", false)?
-        .set_default("starting_scale", 1e-6)?
+        .set_default("auto_start", true)?
+        .set_default("starting_scale", 1e-8)?
         .set_default("ref_iters_multiplier", 1.25)?
-        .set_default("num_seeds_to_spawn_per_eval", 4)?
+        .set_default("num_samples_to_infer_direction", 6)?
+        .set_default("num_f64_seeds", 8)?
+        .set_default("num_f64_walks", 32)?
+        .set_default("f64_walk_scale", 0.25)?
+        .set_default("num_mpfr_seeds", 3)?
         .set_default("num_qualified_orbits", 1)?
+        .set_default("distance_error_threshold", 4.0)?
+        .set_default("depth_bonus", 2.0)?
+        .set_default("distance_penalty", 1.5)?
+        .set_default("contraction_bonus", 1.0)?
         .set_default("exploration_budget", 2)?
+        .set_default("perturb_err_threshold", 10.0)?
+        .set_default("grid_feedback_scale", 1024)?
         .set_default("center", vec![-0.75, 0.0])?
         .set_default("complex_span", 3.0)?
         .set_default("max_user_iter", 500)?

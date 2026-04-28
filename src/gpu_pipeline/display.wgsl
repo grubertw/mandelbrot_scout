@@ -7,6 +7,8 @@ struct Uniforms {
     scale:              f32,
     max_iter:           u32,
     ref_orb_count:      u32,
+    perturb_err_thresh: f32,
+    grid_feedback_scale:f32,
     view_width:         f32,
     view_height:        f32,
     render_width:       u32,

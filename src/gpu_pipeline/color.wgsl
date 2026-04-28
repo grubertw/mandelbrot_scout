@@ -7,6 +7,8 @@ struct Uniforms {
     scale:              f32,
     max_iter:           u32,
     ref_orb_count:      u32,
+    perturb_err_thresh: f32,
+    grid_feedback_scale:f32,
     view_width:         f32,
     view_height:        f32,
     render_width:       u32,
@@ -47,8 +49,9 @@ struct Uniforms {
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
+// Render flags from scene uniforms
 const DEBUG_COLORING: u32   = 1u << 0;
-const GLITCH_FIX: u32       = 1u << 1;
+const SHOW_GLITCH: u32      = 1u << 1;
 const SMOOTH_COLORING: u32  = 1u << 2;
 const USE_DE: u32           = 1u << 3;
 const USE_STRIPES: u32      = 1u << 4;

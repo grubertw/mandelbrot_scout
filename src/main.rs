@@ -204,7 +204,7 @@ impl ApplicationHandler for Runner {
                 if *resized {
                     let size = window.inner_size();
                     scene.borrow_mut().set_window_size(
-                        size.width.into(), 
+                        size.width.into(),
                         size.height.into());
                     *viewport = Viewport::with_physical_size(Size::new(size.width, size.height),
                         window.scale_factor() as f32);

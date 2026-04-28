@@ -4,26 +4,57 @@
 # Used for Rug (MPFR) Float and Complex number types
 init_rug_precision = 128
 # Total number of orbits the engine will track
-max_live_orbits = 100
+max_live_orbits = 50
 # Start when the starting scale threshold is crossed
-auto_start = false
+auto_start = true
 # Starting scale for tile creation, orbit spawning, and everything scout-engine does!
-starting_scale = 1e-6
+starting_scale = 1e-8
 # Multiply max_user_iters by this value for computing the length of a reference orbit
 ref_iters_multiplier = 1.25
-# Number of Reference Orbits ScoutEngine will create from sampled seed candidates
-# Note, the seed candidate list is taken from a snapshot of GpuGridSample(s), which
-# are reduced within a compute shader running on the GPU.
-num_seeds_to_spawn_per_eval = 4
+# After GPU samples have been ranked/scored, take from the top this amount to
+# determine a direction vector for a fast orbit walk - i.e. escape-time check
+# using f64 precision/math
+num_samples_to_infer_direction = 6
+# Number of f64 seeds to try in a small randomized angle from the infered direction
+num_f64_seeds = 8
+# Number of 'walks' to attempt - i.e. how many times fast_orbit_probe is called, per
+# f64 seed
+num_f64_walks = 32
+# Size of the step increment to take betwen 'walk' steps.
+f64_walk_scale = 1.5
+# After walking all the f64 seeds, rank them by depth, and take these as seeds for
+# final MFPR calculation
+num_mpfr_seeds = 3
 # Number of reference orbits to qualify (or keep qualified), per cycle.
 # With orbits of sufficient quality, the GPU should not have need to rebase
 # any more than 2 or three times.
 num_qualified_orbits = 1
+# Threshold of distance error that accumulates due to precision loss - i.e. f32
+# rounding - of the current camera center from the current reference orbit.
+# In it's normalized form, this roughly equates to 'number of pixels' that
+# perturbation might diviate/distort from accuracy. Visually, this reveals itself
+# as 'fuzzy' or 'blurry' fractal detail, which is most noticable at the boundry.
+distance_error_threshold = 3.7
+# Orbit scoring weight to encourage deeper reference orbits
+depth_bonus = 2.0
+# Orbit scoring weight to discourage distant references
+distance_penalty = 1.5
+# Orbit scoring weight to encourage contracting references
+contraction_bonus = 1.0
 # Numer of 'convergence' cycles that scout engine is allowed to
 # repeat after a camera pan/zoom. Most of the time, only one should be needed,
 # but if perturbance is behaving poorly, more cycles may be needed to find a better
 # orbit (or set of orbits).
 exploration_budget = 2
+
+# for detecting perturbance numerical errors, i.e. |dz| / |z|
+# Observationally, higer values of this ratio seem to indicate greator
+# error. Zhouran's 'glitch fix' algorithm would need to be run in this case.
+perturb_err_threshold = 10.0
+# This setting/variable is to get around the obnoxious detail that WGPU/WGSL
+# does not support atomics on f32. So we need to 'simulate' desimal numbers by
+# multiplying an integer by a 'scale', which the CPU must then divide
+grid_feedback_scale = 1024.0
 
 #
 # Scene Configs

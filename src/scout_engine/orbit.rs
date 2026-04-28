@@ -3,7 +3,7 @@ use crate::signals::{CameraSnapshot, FrameStamp};
 use std::sync::{Arc, Weak};
 
 use log::warn;
-use num_complex::Complex32;
+use num_complex::{Complex32};
 use rug::{Float, Complex};
 use parking_lot::{Mutex, RwLock};
 use crate::scout_engine::ScoutConfig;
@@ -357,10 +357,15 @@ impl OrbitScore {
         let dist = 1.0 - (sample_dist_from_cam_center.to_f64() / cam_half_extent.to_f64())
             .log(10.0).clamp(0.0, 1000.0);
 
+        let (depth_bonus, distance_penalty, contraction_bonus) = {
+            let cfg_g = cfg.lock();
+            (cfg_g.depth_bonus, cfg_g.distance_penalty, cfg_g.contraction_bonus)
+        };
+
         let total_score =
-            depth * 2.0 +
-                dist * 1.5 +
-                contraction * 1.0;
+            depth * depth_bonus +
+                dist * distance_penalty +
+                contraction * contraction_bonus;
 
         Self {
             depth, dist, contraction, total_score, orbit: orbit.clone()

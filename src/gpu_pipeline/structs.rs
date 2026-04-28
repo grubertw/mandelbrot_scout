@@ -9,6 +9,8 @@ pub struct SceneUniform {
     pub scale: f32,
     pub max_iter: u32,
     pub ref_orb_count: u32,
+    pub perturb_err_threshold: f32,
+    pub grid_feedback_scale: f32,
     pub view_width: f32,
     pub view_height: f32,
     pub render_width: u32,
@@ -51,10 +53,6 @@ pub struct SceneUniform {
 impl SceneUniform {
     pub fn set_debug_coloring(&mut self, debug_coloring: bool) {
         if debug_coloring { self.render_flags |= 1 << 0; } else { self.render_flags &= !(1 << 0) }
-    }
-
-    pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
-        if glitch_fix { self.render_flags |= 1 << 1; } else { self.render_flags &= !(1 << 1) }
     }
     
     pub fn set_smooth_coloring(&mut self, smooth_coloring: bool) {
@@ -100,14 +98,17 @@ pub struct GridFeedbackOut {
     pub best_pixel_x:           i32, // Pixel location of deepest iteration in the sample grid
     pub best_pixel_y:           i32,
     pub best_pixel_flags:       u32, // Iteration feedback flags for the location
+    pub best_period:            u32,
+    pub best_contraction:       i32,
+    pub use_count:              u32,
     pub max_iter_count:         u32,
+    pub score:                  i32,
 }
 
 pub const ORBIT_ESCAPED: u32            = 1 << 0;
 pub const ORBIT_PERTURBED: u32          = 1 << 1;
-//pub const PERTURB_ERR_INNER: u32        = 1 << 2;
-//pub const PERTURB_ERR_OUTER: u32        = 1 << 3;
-pub const ORBIT_MAX_ITER_REACHED: u32   = 1 << 4;
+//pub const PERTURB_ERR: u32        = 1 << 2;
+pub const ORBIT_MAX_ITER_REACHED: u32   = 1 << 3;
 pub const ORBIT_SHIFT: u32              = 20;
 
 impl GridFeedbackOut {
@@ -139,9 +140,9 @@ pub struct OrbitFeedbackOut {
     pub max_iter_count:     u32,    // Max iters per pixel, per ref_orb
 
     // --- Flag counts ---
+    pub use_count:                  u32,
     pub escaped_count:              u32,
-    pub perurb_error_inner_count:   u32,
-    pub perurb_error_outer_count:   u32,
+    pub perurb_error_count:         u32,
     pub max_iter_reached_count:     u32,
 }
 

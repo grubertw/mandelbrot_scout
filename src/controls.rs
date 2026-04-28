@@ -172,10 +172,10 @@ pub struct Controls {
     rim_power_range: (f32, f32),
 
     // Scout config
-    ref_iters_multiplier: String,
-    spawn_per_eval: String,
-    num_qualified_orbits: String,
-    glitch_fix: bool,
+    auto_start: bool,
+    ref_iters_multiplier: f64,
+    num_samples_to_infer_dir: u32,
+    distance_error_threshold: f32,
 
     // Export/save config
     export_img_format: Option<ExportImgFormat>,
@@ -260,10 +260,10 @@ pub enum Message {
 
     ResetScoutEngine,
     GoScout,
-    RefItersMultiplierChanged(String),
-    SpawnPerEvalChanged(String),
-    NumQualifiedOrbits(String),
-    GlitchFixChanged(bool),
+    AutoStartChanged(bool),
+    RefItersMultiplierChanged(f64),
+    SamplesToInferDirChanged(u32),
+    DistanceErrorThresholdChanged(f32),
 
     ExportImgFormatChanged(ExportImgFormat),
     ExportImgDirChanged(String),
@@ -373,10 +373,10 @@ impl Controls {
             rim_intensity: settings.rim_intensity,
             rim_power: settings.rim_power,
             rim_power_range: settings.rim_power_range,
-            ref_iters_multiplier:  settings.ref_iters_multiplier.to_string(),
-            spawn_per_eval: settings.num_seeds_to_spawn_per_eval.to_string(),
-            num_qualified_orbits: settings.num_qualified_orbits.to_string(),
-            glitch_fix: false,
+            auto_start: settings.auto_start,
+            ref_iters_multiplier:  settings.ref_iters_multiplier,
+            num_samples_to_infer_dir: settings.num_samples_to_infer_direction,
+            distance_error_threshold: settings.distance_error_threshold,
             export_img_format: Some(ExportImgFormat::Png),
             export_img_dir: default_export_directory,
             export_img_file_name: settings.default_export_filename.clone(),
@@ -700,28 +700,24 @@ impl Controls {
             }
             Message::GoScout => {
                 let mut scene_b = self.scene.borrow_mut();
-                let mut config = scene_b.scout_config().lock().clone();
-                config.ref_iters_multiplier = if let Ok(v) =
-                    self.ref_iters_multiplier.parse::<f64>() { v } else { 0.0 };
-                config.num_seeds_to_spawn_per_eval = if let Ok(v) =
-                    self.spawn_per_eval.parse::<u32>() { v } else { 0 };
-                config.num_qualified_orbits = if let Ok(v) =
-                    self.num_qualified_orbits.parse::<u32>() { v } else { 0 };
-
+                let config = scene_b.scout_config().lock().clone();
                 scene_b.send_scout_signal(ScoutSignal::ExploreSignal(config));
+            }
+            Message::AutoStartChanged(auto_start) => {
+                self.auto_start = auto_start;
+                self.scene.borrow_mut().set_scout_auto_start(auto_start);
             }
             Message::RefItersMultiplierChanged(ref_iters_multiplier) => {
                 self.ref_iters_multiplier = ref_iters_multiplier;
+                self.scene.borrow_mut().set_ref_iters_multiplier(ref_iters_multiplier);
             }
-            Message::SpawnPerEvalChanged(spawn_per_tile) => {
-                self.spawn_per_eval = spawn_per_tile;
+            Message::SamplesToInferDirChanged(spawn_per_eval) => {
+                self.num_samples_to_infer_dir = spawn_per_eval;
+                self.scene.borrow_mut().set_num_samples_to_infer_direction(spawn_per_eval);
             }
-            Message::NumQualifiedOrbits(num_qualified_orbits) => {
-                self.num_qualified_orbits = num_qualified_orbits;
-            }
-            Message::GlitchFixChanged(glitch_fix) => {
-                self.glitch_fix = glitch_fix;
-                self.scene.borrow_mut().set_glitch_fix(glitch_fix);
+            Message::DistanceErrorThresholdChanged(distance_error_threshold) => {
+                self.distance_error_threshold = distance_error_threshold;
+                self.scene.borrow_mut().set_distance_error_threshold(distance_error_threshold);
             }
             Message::ExportImgFormatChanged(img_format) => {
                 self.export_img_format = Some(img_format);
@@ -1283,42 +1279,59 @@ impl Controls {
             .on_press(Message::ResetScoutEngine)
             .width(Length::Fixed(60.0)),
 
-            text("ref iters multiplier: ")
-                .width(Length::Fixed(90.0))
-                .wrapping(Wrapping::Word)
-                .align_y(Alignment::Center)
-                .align_x(Alignment::End),
-            space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.ref_iters_multiplier)
-                .on_input(Message::RefItersMultiplierChanged)
-                .width(Length::Fixed(60.0)),
-
-            text("spawn count per eval: ")
-                .width(Length::Fixed(75.0))
-                .wrapping(Wrapping::Word)
-                .align_y(Alignment::Center)
-                .align_x(Alignment::End),
-            space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.spawn_per_eval)
-                .on_input(Message::SpawnPerEvalChanged)
-                .width(Length::Fixed(40.0)),
-
-            text("max ref orbs: ")
-                .width(Length::Fixed(70.0))
-                .wrapping(Wrapping::Word)
-                .align_y(Alignment::Center)
-                .align_x(Alignment::End),
-            space().width(Length::Fixed(5.0)),
-            text_input("Placeholder...", &self.num_qualified_orbits)
-                .on_input(Message::NumQualifiedOrbits)
-                .width(Length::Fixed(30.0)),
             space().width(Length::Fixed(10.0)),
-
-            checkbox(self.glitch_fix)
-                .on_toggle(Message::GlitchFixChanged),
+            text("Ref Iters Multiplier")
+                .size(10)
+                .width(Length::Fixed(50.0))
+                .align_y(Alignment::Center)
+                .align_x(Alignment::Center),
             space().width(Length::Fixed(5.0)),
-            text("Rebase")
-                .width(Length::Fixed(40.0))
+            slider(1.0 ..= 5.0,
+                self.ref_iters_multiplier, Message::RefItersMultiplierChanged)
+                .step(0.1)
+                .width(Length::Fixed(50.0)),
+            space().width(Length::Fixed(5.0)),
+            text(format!("{:<2.1}", self.ref_iters_multiplier))
+                .width(Length::Fixed(30.0))
+                .align_y(Alignment::Center),
+            space().width(Length::Fixed(5.0)),
+
+            text("Num Seeds per eval")
+                .size(10)
+                .width(Length::Fixed(50.0))
+                .align_y(Alignment::Center)
+                .align_x(Alignment::Center),
+            space().width(Length::Fixed(5.0)),
+            slider(1 ..= 32,
+                self.num_samples_to_infer_dir, Message::SamplesToInferDirChanged)
+                .step(1_u32)
+                .width(Length::Fixed(50.0)),
+            space().width(Length::Fixed(5.0)),
+            text(format!("{:<2}", self.num_samples_to_infer_dir))
+                .width(Length::Fixed(30.0))
+                .align_y(Alignment::Center),
+
+            text("Distance error thresh")
+                .size(10)
+                .width(Length::Fixed(50.0))
+                .align_y(Alignment::Center)
+                .align_x(Alignment::Center),
+            space().width(Length::Fixed(5.0)),
+            slider(2.0 ..= 8.0,
+                self.distance_error_threshold, Message::DistanceErrorThresholdChanged)
+                .step(0.1)
+                .width(Length::Fixed(50.0)),
+            space().width(Length::Fixed(5.0)),
+            text(format!("{:<2.1}", self.distance_error_threshold))
+                .width(Length::Fixed(30.0))
+                .align_y(Alignment::Center),
+
+            space().width(Length::Fixed(10.0)),
+            checkbox(self.auto_start)
+                .on_toggle(Message::AutoStartChanged),
+            space().width(Length::Fixed(10.0)),
+            text("Auto Start")
+                .width(Length::Fixed(35.0))
                 .align_y(Alignment::Center),
 
             space().width(Length::Fixed(20.0)),

@@ -2,6 +2,7 @@ pub mod orbit;
 pub mod tile;
 mod worker;
 mod tasks;
+mod newton;
 pub(crate) mod utils;
 
 use crate::scout_engine::orbit::*;
@@ -15,7 +16,7 @@ use futures::{channel};
 use futures::executor::ThreadPool;
 
 use parking_lot::{Mutex};
-use log::{trace, info};
+use log::{trace, info, debug};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,15 +59,32 @@ pub struct ScoutEngineConfig {
     pub starting_scale: f64,
     /// Multiply max_user_iters by this value for computing the length of a reference orbit
     pub ref_iters_multiplier: f64,
-    /// Number of Reference Orbits ScoutEngine will create from sampled seed candidates
-    /// Note, the seed candidate list is taken from a snapshot of GpuGridSample(s), which
-    /// are reduced within a compute shader running on the GPU.
-    pub num_seeds_to_spawn_per_eval: u32,
+    /// 
+    pub num_samples_to_infer_direction: u32,
+    ///
+    pub num_f64_seeds: u32,
+    ///
+    pub num_f64_walks: u32,
+    ///
+    pub f64_walk_scale: f64,
+    ///
+    pub num_mpfr_seeds: u32,
     /// Number of reference orbits to qualify (or keep qualified), per cycle.
     /// With orbits of sufficient quality, the GPU should not have need to rebase
     /// any more than 2 or three times.
     pub num_qualified_orbits: u32,
     pub rug_precision: u32,
+    /// Normalized error threshold between Complex32 distance and rug::Complex distance
+    /// that builds into DeltaC as the camera moves away from the reference orbit. This
+    /// is the primary gate to the evaluate() call once Scout has live orbits and is past
+    /// the scale threshold.
+    pub distance_error_threshold: f32,
+    /// Multiplier for normalized depth score for a reference orbit
+    pub depth_bonus: f64,
+    /// Multiplier for distance score, which is normalized by half-extent
+    pub distance_penalty: f64,
+    /// Multiplier for contraction score
+    pub contraction_bonus: f64,
     /// Numer of 'convergence' cycles that scout engine is allowed to
     /// repeat after a camera pan/zoom. Most of the time, only one should be needed,
     /// but if perturbance is behaving poorly, more cycles may be needed to find a better
@@ -133,6 +151,21 @@ impl ScoutEngineContext {
         let mut diag_g = self.diagnostics.lock();
         *diag_g = ScoutDiagnostics::new(diag_msg);
         self.window.request_redraw();
+    }
+
+    pub fn active(&self) -> bool {
+        self.living_orbits.lock().len() != 0
+    }
+
+    pub fn reset(&self) {
+        let mut living_orbits_g = self.living_orbits.lock();
+        self.write_diagnostics(
+            format!("Resetting ScoutEngine! cleaning up {} orbits!",
+                    living_orbits_g.len())
+        );
+
+        living_orbits_g.clear();
+        self.context_changed();
     }
 }
 
@@ -208,8 +241,32 @@ impl ScoutEngine {
     
     pub fn set_max_user_iterations(&mut self, max_iters: u32) {
         let mut config_g = self.context.config.lock();
-        info!("Set max_user_iters={}", max_iters);
+        debug!("Set max_user_iters={}", max_iters);
         config_g.max_user_iters = max_iters;
+    }
+
+    pub fn set_auto_start(&mut self, auto_start: bool) {
+        let mut config_g = self.context.config.lock();
+        debug!("Set auto_start={}", auto_start);
+        config_g.auto_start = auto_start;
+    }
+
+    pub fn set_ref_iters_multiplier(&mut self, ref_iters_mult: f64) {
+        let mut config_g = self.context.config.lock();
+        config_g.ref_iters_multiplier = ref_iters_mult;
+        debug!("Set ref_iters_multiplier={}", ref_iters_mult);
+    }
+
+    pub fn set_num_samples_to_infer_direction(&mut self, num_seeds: u32) {
+        let mut config_g = self.context.config.lock();
+        config_g.num_samples_to_infer_direction = num_seeds;
+        debug!("Set num_seeds_to_spawn_per_eval={}", num_seeds);
+    }
+
+    pub fn set_distance_error_threshold(&mut self, distance_error_threshold: f32) {
+        let mut config_g = self.context.config.lock();
+        config_g.distance_error_threshold = distance_error_threshold;
+        debug!("Set distance_error_threshold={}", distance_error_threshold);
     }
 
     pub fn query_qualified_orbits(&self) -> Vec<QualifiedOrbit> {
