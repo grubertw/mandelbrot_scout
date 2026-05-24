@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use crate::scout_engine::{ScoutContext, CameraSnapshotReceiver, OrbitObservationsReceiver, ExploreSignalReceiver, ScoutSignal, newton};
+use crate::scout_engine::{ScoutContext, CameraSnapshotReceiver, OrbitObservationsReceiver, ExploreSignalReceiver, ScoutSignal, ScoutEngineConfig};
 use crate::scout_engine::orbit::*;
 use crate::scout_engine::tasks::*;
 use crate::scout_engine::utils::*;
@@ -14,9 +14,7 @@ use futures::StreamExt;
 use futures::select;
 use futures::future::{join_all, RemoteHandle};
 use futures::executor::{ThreadPool};
-use num_complex::Complex64;
 use rug::Complex;
-use crate::scout_engine::newton::try_newton_refine;
 
 // ScoutEngine's internal work loop, a long-lived future that uses select to poll the
 // the camera snaphot & gpu feedback channels.
@@ -81,23 +79,28 @@ async fn handle_camera_snapshot(
     }
 
     let scale = snapshot.scale();
-    let starting_scale = context.config.lock().starting_scale;
-    let auto_start = context.config.lock().auto_start;
+    let (starting_scale, auto_start, dist_err_thresh) = {
+        let config_g = context.config.lock();
+        (config_g.starting_scale, config_g.auto_start, config_g.distance_error_threshold)
+    };
 
     if context.active() && scale.to_f64() > starting_scale {
         context.reset();
         return;
     }
-    
-    if let Some(curr_orb) = context.living_orbits.lock().first() {
-        let orb_g = curr_orb.read();
-        let dist_err_thresh = context.config.lock().distance_error_threshold;
-        let dist_err = norm_distance_error(snapshot.center(), orb_g.c_ref(), scale);
-        // Hold onto our interior reference orbit as long as possible
-        if dist_err < dist_err_thresh && !orb_g.is_exterior() {
-            info!("Scout detected {} normalized distance error from camera center and current non-escaping ref orb",
+
+    {
+        let lo_g = context.living_orbits.lock();
+
+        if let Some(curr_orb) = lo_g.first() {
+            let orb_g = curr_orb.read();
+            let dist_err = norm_distance_error(snapshot.center(), orb_g.c_ref(), scale);
+            // Hold onto our interior reference orbit as long as possible
+            if dist_err < dist_err_thresh && !orb_g.is_exterior() {
+                info!("Scout detected {} normalized distance error from camera center and current non-escaping ref orb",
                 dist_err);
-            return;
+                return;
+            }
         }
     }
 
@@ -135,7 +138,9 @@ async fn handle_explore_signal(
 async fn evaluate_orbits(
     tp: ThreadPool, context: ScoutContext,
 ) {
-    let current_camera = context.last_camera_snapshot.lock().clone();
+    let current_camera = {
+        context.last_camera_snapshot.lock().clone()
+    };
     info!("Evaluate orbits for screen center {} and scale {}", 
         current_camera.center().to_string_radix(10, Some(10)),
         current_camera.scale().to_string_radix(10, Some(6))
@@ -144,7 +149,9 @@ async fn evaluate_orbits(
     let prec = current_camera.scale().prec();
 
     // Snapshot GPU grid samples for eval
-    let mut grid_samples = context.grid_samples.lock().clone();
+    let mut grid_samples = {
+        context.grid_samples.lock().clone()
+    };
     let mut num_interior_seeds: u32 = 0;
 
     // Perform preliminary scoring on GPU samples before spawning into orbits
@@ -172,146 +179,103 @@ async fn evaluate_orbits(
     }
 
     debug!("{} GpuGridSamples ranked/sorted", sample_scores.len());
-    let num_samples = context.config.lock().num_samples_to_infer_direction;
-    sample_scores.truncate(num_samples as usize);
+    let cfg = {
+        context.config.lock().clone()
+    };
+
+    sample_scores.truncate(cfg.num_gpu_samples_to_eval as usize);
     grid_samples = sample_scores
         .iter()
         .map(|sample| sample.sample.clone())
         .collect();
     
-    let best_period = 
-        if let Some (sample) = grid_samples.first() { sample.period } 
-        else { newton::MAX_P };
+    let gpu_seeds: Vec<Complex> = grid_samples
+        .iter()
+        .map(|sample| sample.location.clone())
+        .collect();
     
-    trace!("Using {} samples for f64 refinement: {:?}", num_samples, grid_samples);
-
-    // Calculate an averaged base location and weighted direction from the grid samples
-    let base_loc = avg_sample_loc(&grid_samples);
-    let direction_64 = infer_direction(&grid_samples);
-    debug!("Inferred base location {} and direction {}",
-        base_loc.to_string_radix(10, Some(10)),
-        direction_64);
-
-    let base_loc_64 = Complex64::new(base_loc.real().to_f64(), base_loc.imag().to_f64());
-    let num_64_seeds = context.config.lock().num_f64_seeds;
-    let step_size = context.config.lock().f64_walk_scale * current_camera.scale().to_f64();
-    let frame_seed = current_camera.frame_stamp().frame_id as u64;
-
-
-    // Generates some f64 seeds in a cone-shaped PRNG pattern
-    let seeds_64 = generate_f64_seeds(
-        num_64_seeds, base_loc_64, direction_64, 
-        frame_seed, step_size, 0.25);
-
-    // Walk all seeds in the same direction, doing f64 escape tests
-    let num_walks = context.config.lock().num_f64_walks;
-    let max_user_iters = context.config.lock().max_user_iters;
-
-    // Refining the seeds means that walking stops if we detect a decrease in depth
-    let mut refined_64_seeds: Vec<(Complex64, u32)> = seeds_64
-        .iter()
-        .map(|c| walk_toward_basin(c, direction_64, num_walks, step_size,  max_user_iters))
-        .collect();
-
-    let num_mpfr_seeds = context.config.lock().num_mpfr_seeds;
-    refined_64_seeds.sort_by(|a, b| b.1.cmp(&a.1));
-    debug!("Refined f64 seeds: {:?}", refined_64_seeds);
-    refined_64_seeds.truncate(num_mpfr_seeds as usize);
-
-    let mut newton_count = 0;
-    let seeds: Vec<Complex> = refined_64_seeds
-        .iter()
-        .filter_map(|seed_64| {
-            trace!("try_newton_refine from seed {:?}", seed_64);
-            let mut seed = Complex::with_val(prec, (seed_64.0.re, seed_64.0.im));
-            
-            let refined = try_newton_refine(&seed, best_period as usize);
-            if let Some(c_refined) = refined {
-                newton_count += 1;
-                debug!(
-                    "Newton refined c from {} → {} (period={})",
-                    seed.to_string_radix(10, Some(10)),
-                    c_refined.to_string_radix(10, Some(10)),
-                    best_period
-                );
-                seed = c_refined;
-            }
-
-            Some(seed)
-        })
-        .collect();
-
-    debug!("{} seeds refined from Newton. {} total seeds", newton_count, seeds.len());
-
-    // Spawn refence orbits from tile samples (candidate seeds)
-    let mut orbit_scores = spawn_orbits_from_seeds(
-        &seeds, tp.clone(), context.clone(), &current_camera
+    let mut gpu_orbit_scores = spawn_orbits_from_seeds(
+        &gpu_seeds, tp.clone(), context.orbit_id_factory.clone(), cfg, &current_camera
     ).await;
 
+    let total_orbits_spawned = gpu_orbit_scores.len(); // + f64_orbit_scores.len();
     let mut best_orbit_len: u32 = 0;
     let mut best_oribt_escape_index: Option<u32> = None;
     let mut best_orbit_contraction: f64 = 0.0;
-    if let Some(s) = orbit_scores.first() {
-        let orb_g = s.orbit.read();
-        best_orbit_len = orb_g.orbit.len() as u32;
-        best_oribt_escape_index = orb_g.escape_index();
-        best_orbit_contraction = orb_g.contraction().to_f64();
-    }
-    
-    // Re-score old orbits
-    let mut pool_g = context.living_orbits.lock();
-    let mut scored_pool_orbs: Vec<OrbitScore> =  pool_g
-        .iter()
-        .map(|orb| OrbitScore::new(orb.clone(), &current_camera, context.config.clone()))
-        .collect();
-    
-    // Append new scored orbits
-    scored_pool_orbs.append(&mut orbit_scores);
-    
-    // Perform global ranking
-    scored_pool_orbs
-        .sort_by(|a, b| b.total_score
-            .partial_cmp(&a.total_score)
-            .unwrap_or(Ordering::Equal));
 
-    let mut trace_str = String::from(
-        format!("Re-Scored LiveOrbits. len={}\n", scored_pool_orbs.len()).as_str());
+    {
+        // Re-score old orbits
+        let mut pool_g = context.living_orbits.lock();
+        let mut scored_pool_orbs: Vec<OrbitScore> = pool_g
+            .iter()
+            .map(|orb| OrbitScore::new(orb.clone(), &current_camera, &cfg))
+            .collect();
 
-    *pool_g = scored_pool_orbs
-        .iter()
-        .map(|s| {
-            let orb_g = s.orbit.read();
-            trace_str.push_str(format!("\tPool OrbitId={:<4} escape={:<7} len={:<6} contraction={:<8.4e}\t\
+        // Append new scored orbits
+        scored_pool_orbs.append(&mut gpu_orbit_scores);
+        //scored_pool_orbs.append(&mut f64_orbit_scores);
+
+        // Perform global ranking
+        scored_pool_orbs
+            .sort_by(|a, b| b.total_score
+                .partial_cmp(&a.total_score)
+                .unwrap_or(Ordering::Equal));
+
+        let mut trace_str = String::from(
+            format!("Re-Scored LiveOrbits. len={}\n", scored_pool_orbs.len()).as_str());
+
+        *pool_g = scored_pool_orbs
+            .iter()
+            .map(|s| {
+                let orb_g = s.orbit.read();
+                trace_str.push_str(format!("\tPool OrbitId={:<4} escape={:<7} len={:<6} contraction={:<8.4e}\t\
             \tSCORING: depth={:<6.4} dist={:<6.4} contraction={:<7.4} total={:<6.4}\n",
-                  orb_g.orbit_id, orb_g.escape_index().map_or(String::from("None"), |v| v.to_string()),
-                   orb_g.orbit.len(), orb_g.contraction(),
-                  s.depth, s.dist, s.contraction, s.total_score
-              ).as_str());
-            s.orbit.clone()
-        })
-        .collect();
-    trace!("{}", trace_str);
+                                           orb_g.orbit_id, orb_g.escape_index().map_or(String::from("None"), |v| v.to_string()),
+                                           orb_g.orbit.len(), orb_g.contraction(),
+                                           s.depth, s.dist, s.contraction, s.total_score
+                ).as_str());
+                s.orbit.clone()
+            })
+            .collect();
+        trace!("{}", trace_str);
 
-    pool_g.truncate(context.config.lock().max_live_orbits as usize);
+        pool_g.truncate(cfg.max_live_orbits as usize);
+
+        if let Some(s) = pool_g.first() {
+            let orb_g = s.read();
+            best_orbit_len = orb_g.orbit.len() as u32;
+            best_oribt_escape_index = orb_g.escape_index();
+            best_orbit_contraction = orb_g.contraction().to_f64();
+        }
+    }
 
     context.write_diagnostics(
-        format!("Scout evaluated {} grid samples and spawned {} orbits. {} interior samples found!\n\
+            format!("Scout evaluated {} grid samples, fast (f64) probed {} orbits, and spawned {} orbits. {} interior samples found!\n\
         \tBest Sample Info: iters_reached={} escaped={}\n\
         \tBest Qualified Ref Orbit Info:\n\t\tprec={:<3} ref_len={}\n\t\tescape_index={}\n\t\tcontraction={:.5e}",
-                grid_samples.len(), num_samples, num_interior_seeds,
-                best_sample_iters_reached, best_sample_escaped, prec,
-                best_orbit_len,
-                best_oribt_escape_index.map_or(String::from("None"), |v| v.to_string()),
-                best_orbit_contraction
+                    grid_samples.len(), 0, total_orbits_spawned,
+                    num_interior_seeds,
+                    best_sample_iters_reached, best_sample_escaped, prec,
+                    best_orbit_len,
+                    best_oribt_escape_index.map_or(String::from("None"), |v| v.to_string()),
+                    best_orbit_contraction
         ));
 
     context.context_changed();
+
+    // Send a signal to the winit window to wake up the render loop and redraw the viewport
+    // This mechanism is largely in place so that the render loop need not run continually
+    // and communications to/from the GPU can be tightly controlled.
+    context.window.request_redraw();
+
+    info!("Evaluate Orbits complete!");
 }
 
 async fn spawn_orbits_from_seeds(
     seeds: &[Complex],
     tp: ThreadPool,
-    context: ScoutContext,
+    id_factory: OrbitIdFactory,
+    cfg: ScoutEngineConfig,
     current_camera: &CameraSnapshot,
 ) -> Vec<OrbitScore> {
 
@@ -319,8 +283,8 @@ async fn spawn_orbits_from_seeds(
         .iter()
         .filter_map(|seed| {
             let res = tp.spawn_with_handle(
-                start_reference_orbit(seed.clone(), context.orbit_id_factory.clone(),
-                                      context.config.clone(),
+                start_reference_orbit(seed.clone(), id_factory.clone(),
+                                      cfg,
                                       current_camera.frame_stamp().clone())
             );
             if let Ok(h) = res { Some(h) } else {
@@ -334,7 +298,7 @@ async fn spawn_orbits_from_seeds(
 
     let mut scored_orbits: Vec<OrbitScore> = live_orbits
         .iter()
-        .map(|orb| OrbitScore::new(orb.clone(), current_camera, context.config.clone()))
+        .map(|orb| OrbitScore::new(orb.clone(), current_camera, &cfg))
         .collect();
     scored_orbits
         .sort_by(|a, b| b.total_score

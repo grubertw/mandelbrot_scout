@@ -1,4 +1,4 @@
-use crate::scout_engine::{ScoutConfig};
+use crate::scout_engine::{ScoutEngineConfig};
 use crate::scout_engine::orbit::*;
 
 use crate::signals::{FrameStamp};
@@ -12,19 +12,11 @@ use parking_lot::RwLock;
 pub async fn start_reference_orbit(
     c_ref: Complex, 
     id_factory: OrbitIdFactory,
-    config: ScoutConfig,
+    cfg: ScoutEngineConfig,
     frame_st: FrameStamp
 ) -> LiveOrbit {
-    let (max_user_iters, multiplier) = {
-        let config_g = config.lock();
-        (
-            config_g.max_user_iters,
-            config_g.ref_iters_multiplier
-        )
-    };
-
     // Note that we will compute past max_user_iters, according to the multiplier
-    let max_iters = (max_user_iters as f64 * multiplier) as u32;
+    let max_iters = (cfg.max_user_iters as f64 * cfg.ref_iters_multiplier) as u32;
     
     let mut orbit = ReferenceOrbit::new(
         id_factory, c_ref,
@@ -43,27 +35,19 @@ pub async fn start_reference_orbit(
     Arc::new(RwLock::new(orbit))
 }
 
-pub async fn continue_reference_orbit(orbit: LiveOrbit, config: ScoutConfig) {
-    let (max_user_iters, multiplier) = {
-        let config_g = config.lock();
-        (
-            config_g.max_user_iters,
-            config_g.ref_iters_multiplier
-        )
-    };
-
+pub async fn continue_reference_orbit(orbit: LiveOrbit, cfg: ScoutEngineConfig) {
     let mut orbit_g = orbit.write();
     orbit_g.is_anchored = false;
     let start_iter = orbit_g.orbit.len();
 
     // Increase the storage capacity of the orbit vector and (re)start compute from
     // where it last stopped.
-    let max_iters = (max_user_iters as f64 * multiplier) as u32;
+    let max_iters = (cfg.max_user_iters as f64 * cfg.ref_iters_multiplier) as u32;
     orbit_g.extend_orbit(max_iters);
     orbit_g.compute_to(max_iters);
 
     debug!("Continued orbit {} to max_user_iters={}. escape={:?}",
-        orbit_g.orbit_id, max_user_iters, orbit_g.quality_metrics.escape_index);
+        orbit_g.orbit_id, cfg.max_user_iters, orbit_g.quality_metrics.escape_index);
 
     for i in start_iter..=orbit_g.orbit.len() {
         let c = &orbit_g.orbit[i];

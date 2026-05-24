@@ -174,7 +174,9 @@ pub struct Controls {
     // Scout config
     auto_start: bool,
     ref_iters_multiplier: f64,
-    num_samples_to_infer_dir: u32,
+    num_gpu_samples_to_eval: u32,
+    glitch_fix: bool,
+    perturb_err_threshold: f32,
     distance_error_threshold: f32,
 
     // Export/save config
@@ -262,7 +264,9 @@ pub enum Message {
     GoScout,
     AutoStartChanged(bool),
     RefItersMultiplierChanged(f64),
-    SamplesToInferDirChanged(u32),
+    GpuSamplesToEvalChanged(u32),
+    GlitchFixChanged(bool),
+    PerturbErrorThresholdChanged(f32),
     DistanceErrorThresholdChanged(f32),
 
     ExportImgFormatChanged(ExportImgFormat),
@@ -375,7 +379,9 @@ impl Controls {
             rim_power_range: settings.rim_power_range,
             auto_start: settings.auto_start,
             ref_iters_multiplier:  settings.ref_iters_multiplier,
-            num_samples_to_infer_dir: settings.num_samples_to_infer_direction,
+            num_gpu_samples_to_eval: settings.num_gpu_samples_to_eval,
+            glitch_fix: false,
+            perturb_err_threshold: settings.perturb_err_threshold,
             distance_error_threshold: settings.distance_error_threshold,
             export_img_format: Some(ExportImgFormat::Png),
             export_img_dir: default_export_directory,
@@ -705,19 +711,41 @@ impl Controls {
             }
             Message::AutoStartChanged(auto_start) => {
                 self.auto_start = auto_start;
-                self.scene.borrow_mut().set_scout_auto_start(auto_start);
+                let scene_b = self.scene.borrow();
+                let config = scene_b.scout_config();
+                let mut config_g = config.lock();
+                config_g.auto_start = auto_start;
             }
             Message::RefItersMultiplierChanged(ref_iters_multiplier) => {
                 self.ref_iters_multiplier = ref_iters_multiplier;
-                self.scene.borrow_mut().set_ref_iters_multiplier(ref_iters_multiplier);
+                let scene_b = self.scene.borrow();
+                let config = scene_b.scout_config();
+                let mut config_g = config.lock();
+                config_g.ref_iters_multiplier = ref_iters_multiplier;
             }
-            Message::SamplesToInferDirChanged(spawn_per_eval) => {
-                self.num_samples_to_infer_dir = spawn_per_eval;
-                self.scene.borrow_mut().set_num_samples_to_infer_direction(spawn_per_eval);
+            Message::GpuSamplesToEvalChanged(spawn_per_eval) => {
+                self.num_gpu_samples_to_eval = spawn_per_eval;
+                let scene_b = self.scene.borrow();
+                let config = scene_b.scout_config();
+                let mut config_g = config.lock();
+                config_g.num_gpu_samples_to_eval = spawn_per_eval;
             }
             Message::DistanceErrorThresholdChanged(distance_error_threshold) => {
                 self.distance_error_threshold = distance_error_threshold;
-                self.scene.borrow_mut().set_distance_error_threshold(distance_error_threshold);
+                let scene_b = self.scene.borrow();
+                let config = scene_b.scout_config();
+                let mut config_g = config.lock();
+                config_g.distance_error_threshold = distance_error_threshold;
+            }
+            Message::GlitchFixChanged(gitch_fix) => {
+                self.glitch_fix = gitch_fix;
+                let mut scene_b = self.scene.borrow_mut();
+                scene_b.set_glitch_fix(gitch_fix);
+            }
+            Message::PerturbErrorThresholdChanged(perturb_threshold) => {
+                self.perturb_err_threshold = perturb_threshold;
+                let mut scene_b = self.scene.borrow_mut();
+                scene_b.set_perturb_err_threshold(perturb_threshold);
             }
             Message::ExportImgFormatChanged(img_format) => {
                 self.export_img_format = Some(img_format);
@@ -1289,26 +1317,49 @@ impl Controls {
             slider(1.0 ..= 5.0,
                 self.ref_iters_multiplier, Message::RefItersMultiplierChanged)
                 .step(0.1)
-                .width(Length::Fixed(50.0)),
+                .width(Length::Fixed(40.0)),
             space().width(Length::Fixed(5.0)),
             text(format!("{:<2.1}", self.ref_iters_multiplier))
-                .width(Length::Fixed(30.0))
+                .width(Length::Fixed(25.0))
                 .align_y(Alignment::Center),
             space().width(Length::Fixed(5.0)),
 
-            text("Num Seeds per eval")
+            text("GPU Samples per eval")
                 .size(10)
                 .width(Length::Fixed(50.0))
                 .align_y(Alignment::Center)
                 .align_x(Alignment::Center),
             space().width(Length::Fixed(5.0)),
             slider(1 ..= 32,
-                self.num_samples_to_infer_dir, Message::SamplesToInferDirChanged)
+                self.num_gpu_samples_to_eval, Message::GpuSamplesToEvalChanged)
                 .step(1_u32)
-                .width(Length::Fixed(50.0)),
+                .width(Length::Fixed(40.0)),
             space().width(Length::Fixed(5.0)),
-            text(format!("{:<2}", self.num_samples_to_infer_dir))
-                .width(Length::Fixed(30.0))
+            text(format!("{:<2}", self.num_gpu_samples_to_eval))
+                .width(Length::Fixed(25.0))
+                .align_y(Alignment::Center),
+
+            space().width(Length::Fixed(10.0)),
+            checkbox(self.glitch_fix)
+                .on_toggle(Message::GlitchFixChanged),
+            space().width(Length::Fixed(10.0)),
+            text("Glitch Fix")
+                .width(Length::Fixed(35.0))
+                .align_y(Alignment::Center),
+
+            text("Perturb error thresh")
+                .size(10)
+                .width(Length::Fixed(50.0))
+                .align_y(Alignment::Center)
+                .align_x(Alignment::Center),
+            space().width(Length::Fixed(5.0)),
+            slider(0.01 ..= 10.0,
+                self.perturb_err_threshold, Message::PerturbErrorThresholdChanged)
+                .step(0.1)
+                .width(Length::Fixed(40.0)),
+            space().width(Length::Fixed(5.0)),
+            text(format!("{:<1.3}", self.perturb_err_threshold))
+                .width(Length::Fixed(45.0))
                 .align_y(Alignment::Center),
 
             text("Distance error thresh")
@@ -1320,7 +1371,7 @@ impl Controls {
             slider(2.0 ..= 8.0,
                 self.distance_error_threshold, Message::DistanceErrorThresholdChanged)
                 .step(0.1)
-                .width(Length::Fixed(50.0)),
+                .width(Length::Fixed(40.0)),
             space().width(Length::Fixed(5.0)),
             text(format!("{:<2.1}", self.distance_error_threshold))
                 .width(Length::Fixed(30.0))

@@ -12,19 +12,9 @@ starting_scale = 1e-8
 # Multiply max_user_iters by this value for computing the length of a reference orbit
 ref_iters_multiplier = 1.25
 # After GPU samples have been ranked/scored, take from the top this amount to
-# determine a direction vector for a fast orbit walk - i.e. escape-time check
-# using f64 precision/math
-num_samples_to_infer_direction = 6
-# Number of f64 seeds to try in a small randomized angle from the infered direction
-num_f64_seeds = 8
-# Number of 'walks' to attempt - i.e. how many times fast_orbit_probe is called, per
-# f64 seed
-num_f64_walks = 32
-# Size of the step increment to take betwen 'walk' steps.
-f64_walk_scale = 1.5
-# After walking all the f64 seeds, rank them by depth, and take these as seeds for
-# final MFPR calculation
-num_mpfr_seeds = 3
+# use for further evaluation - i.e. as a base for f64 depth probing and for spawning
+# direct MFPR orbits
+num_gpu_samples_to_eval = 6
 # Number of reference orbits to qualify (or keep qualified), per cycle.
 # With orbits of sufficient quality, the GPU should not have need to rebase
 # any more than 2 or three times.
@@ -36,11 +26,11 @@ num_qualified_orbits = 1
 # as 'fuzzy' or 'blurry' fractal detail, which is most noticable at the boundry.
 distance_error_threshold = 3.7
 # Orbit scoring weight to encourage deeper reference orbits
-depth_bonus = 2.0
+depth_bonus = 10.0
 # Orbit scoring weight to discourage distant references
-distance_penalty = 1.5
+distance_penalty = 1.15
 # Orbit scoring weight to encourage contracting references
-contraction_bonus = 1.0
+contraction_bonus = 0.1
 # Numer of 'convergence' cycles that scout engine is allowed to
 # repeat after a camera pan/zoom. Most of the time, only one should be needed,
 # but if perturbance is behaving poorly, more cycles may be needed to find a better
@@ -50,7 +40,7 @@ exploration_budget = 2
 # for detecting perturbance numerical errors, i.e. |dz| / |z|
 # Observationally, higer values of this ratio seem to indicate greator
 # error. Zhouran's 'glitch fix' algorithm would need to be run in this case.
-perturb_err_threshold = 10.0
+perturb_err_threshold = 0.01
 # This setting/variable is to get around the obnoxious detail that WGPU/WGSL
 # does not support atomics on f32. So we need to 'simulate' desimal numbers by
 # multiplying an integer by a 'scale', which the CPU must then divide

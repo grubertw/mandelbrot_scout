@@ -88,11 +88,7 @@ impl Scene {
             auto_start: settings.auto_start,
             starting_scale: settings.starting_scale,
             ref_iters_multiplier: settings.ref_iters_multiplier,
-            num_samples_to_infer_direction: settings.num_samples_to_infer_direction,
-            num_f64_seeds: settings.num_f64_seeds,
-            num_f64_walks: settings.num_f64_walks,
-            f64_walk_scale: settings.f64_walk_scale,
-            num_mpfr_seeds: settings.num_mpfr_seeds,
+            num_gpu_samples_to_eval: settings.num_gpu_samples_to_eval,
             num_qualified_orbits: settings.num_qualified_orbits,
             rug_precision: settings.init_rug_precision,
             distance_error_threshold: settings.distance_error_threshold,
@@ -676,6 +672,11 @@ impl Scene {
         self.render_res_factor_during_pan = res_factor;
         self.recalc_fractal = true;
     }
+    
+    pub fn set_perturb_err_threshold(&mut self, perturb_threshold: f32) {
+        self.uniform.perturb_err_threshold = perturb_threshold;
+        self.recalc_fractal = true;
+    }
 
     pub fn set_sample_count(&mut self, sample_count: u32) {
         self.uniform.sample_count = sample_count;
@@ -699,23 +700,10 @@ impl Scene {
     pub fn set_max_iterations(&mut self, max_iterations: u32) {
         self.uniform.max_iter = max_iterations;
         self.recalc_fractal = true;
-        self.scout_engine.set_max_user_iterations(max_iterations)
-    }
-
-    pub fn set_scout_auto_start(&mut self, auto_start: bool) {
-        self.scout_engine.set_auto_start(auto_start);
-    }
-    
-    pub fn set_ref_iters_multiplier(&mut self, ref_iters_mult: f64) {
-        self.scout_engine.set_ref_iters_multiplier(ref_iters_mult);
-    }
-
-    pub fn set_num_samples_to_infer_direction(&mut self, num_seeds: u32) {
-        self.scout_engine.set_num_samples_to_infer_direction(num_seeds);
-    }
-
-    pub fn set_distance_error_threshold(&mut self, distance_error_threshold: f32) {
-        self.scout_engine.set_distance_error_threshold(distance_error_threshold);
+        
+        let config = self.scout_config();
+        let mut config_g = config.lock();
+        config_g.max_user_iters = max_iterations;
     }
 
     pub fn set_window_size(&mut self, width: f64, height: f64) {
@@ -790,6 +778,11 @@ impl Scene {
     pub fn set_debug_coloring(&mut self, debug_coloring: bool) {
         self.uniform.set_debug_coloring(debug_coloring);
         self.recalc_color = true;
+    }
+    
+    pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
+        self.uniform.set_glitch_fix(glitch_fix);
+        self.recalc_fractal = true;
     }
     
     pub fn set_smooth_coloring(&mut self, smooth_coloring: bool) {
@@ -1033,7 +1026,6 @@ impl Scene {
         if orbits.len() > 1 {
             let ranked_orb = &orbits[1];
             self.queue.write_buffer(&self.pipeline.rank_two_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
-            orbit_count += 1;
             trace!("Wrote Rank Two RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
                 ranked_orb.orbit.len() * 8, ranked_orb.orbit.len());
         }

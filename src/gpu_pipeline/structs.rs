@@ -55,6 +55,10 @@ impl SceneUniform {
         if debug_coloring { self.render_flags |= 1 << 0; } else { self.render_flags &= !(1 << 0) }
     }
     
+    pub fn set_glitch_fix(&mut self, fix: bool) {
+        if fix { self.render_flags |= 1 << 1; } else { self.render_flags &= !(1 << 1) }
+    }
+    
     pub fn set_smooth_coloring(&mut self, smooth_coloring: bool) {
         if smooth_coloring { self.render_flags |= 1 << 2; } else { self.render_flags &= !(1 << 2) }
     }

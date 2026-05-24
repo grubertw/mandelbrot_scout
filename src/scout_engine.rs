@@ -16,7 +16,7 @@ use futures::{channel};
 use futures::executor::ThreadPool;
 
 use parking_lot::{Mutex};
-use log::{trace, info, debug};
+use log::{trace, info};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,16 +59,9 @@ pub struct ScoutEngineConfig {
     pub starting_scale: f64,
     /// Multiply max_user_iters by this value for computing the length of a reference orbit
     pub ref_iters_multiplier: f64,
-    /// 
-    pub num_samples_to_infer_direction: u32,
-    ///
-    pub num_f64_seeds: u32,
-    ///
-    pub num_f64_walks: u32,
-    ///
-    pub f64_walk_scale: f64,
-    ///
-    pub num_mpfr_seeds: u32,
+    /// Number of GPU samples to take under consideration in evaluation loop
+    /// Note, this is the quantity kept after scoring and sorting
+    pub num_gpu_samples_to_eval: u32,
     /// Number of reference orbits to qualify (or keep qualified), per cycle.
     /// With orbits of sufficient quality, the GPU should not have need to rebase
     /// any more than 2 or three times.
@@ -138,19 +131,14 @@ impl ScoutEngineContext {
     }
     
     pub fn context_changed(&self) {
+        trace!("Signaling Context Changed");
         self.context_changed.store(true, Ordering::Relaxed);
-
-        // Send a signal to the winit window to wake up the render loop and redraw the viewport
-        // This mechanism is largely in place so that the render loop need not run continually 
-        // and communications to/from the GPU can be tightly controlled. 
-        self.window.request_redraw();
     }
 
     pub fn write_diagnostics(&self, diag_msg: String) {
         info!("{}", diag_msg);
         let mut diag_g = self.diagnostics.lock();
         *diag_g = ScoutDiagnostics::new(diag_msg);
-        self.window.request_redraw();
     }
 
     pub fn active(&self) -> bool {
@@ -238,39 +226,12 @@ impl ScoutEngine {
         //trace!("Scout Engine set grid {} samples: {:?}", grid_samples.len(), grid_samples);
         *cxt_grid_samples = grid_samples;
     }
-    
-    pub fn set_max_user_iterations(&mut self, max_iters: u32) {
-        let mut config_g = self.context.config.lock();
-        debug!("Set max_user_iters={}", max_iters);
-        config_g.max_user_iters = max_iters;
-    }
-
-    pub fn set_auto_start(&mut self, auto_start: bool) {
-        let mut config_g = self.context.config.lock();
-        debug!("Set auto_start={}", auto_start);
-        config_g.auto_start = auto_start;
-    }
-
-    pub fn set_ref_iters_multiplier(&mut self, ref_iters_mult: f64) {
-        let mut config_g = self.context.config.lock();
-        config_g.ref_iters_multiplier = ref_iters_mult;
-        debug!("Set ref_iters_multiplier={}", ref_iters_mult);
-    }
-
-    pub fn set_num_samples_to_infer_direction(&mut self, num_seeds: u32) {
-        let mut config_g = self.context.config.lock();
-        config_g.num_samples_to_infer_direction = num_seeds;
-        debug!("Set num_seeds_to_spawn_per_eval={}", num_seeds);
-    }
-
-    pub fn set_distance_error_threshold(&mut self, distance_error_threshold: f32) {
-        let mut config_g = self.context.config.lock();
-        config_g.distance_error_threshold = distance_error_threshold;
-        debug!("Set distance_error_threshold={}", distance_error_threshold);
-    }
 
     pub fn query_qualified_orbits(&self) -> Vec<QualifiedOrbit> {
-        let num_orbits_to_qualify = self.config().lock().num_qualified_orbits as usize;
+        let num_orbits_to_qualify = {
+            let config_g = self.context.config.lock();
+            config_g.num_qualified_orbits as usize
+        };
         let pool_g = self.context.living_orbits.lock();
 
         let df_orbits: Vec<QualifiedOrbit> = pool_g
@@ -322,6 +283,7 @@ impl ScoutEngine {
         self.thread_pool.spawn_ok(async move {
             let msg = f();
             context.write_diagnostics(msg);
+            context.window.request_redraw();
         });
     }
 }

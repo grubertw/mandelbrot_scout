@@ -1,5 +1,5 @@
 const DEBUG_COLORING: u32   = 1u << 0;
-const SHOW_GLITCH: u32      = 1u << 1;
+const GLITCH_FIX: u32       = 1u << 1;
 const SMOOTH_COLORING: u32  = 1u << 2;
 const USE_DE: u32           = 1u << 3;
 const USE_STRIPES: u32      = 1u << 4;
@@ -304,7 +304,9 @@ fn load_ref_orbit(orbit_idx: u32, it: u32) -> vec2f {
 fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
     var dz = vec2f(0.0, 0.0);
     var i: u32 = 0u;
+    var ref_i: u32 = 0u;
     let max_i = uni.max_iter;
+    let max_ref_i = uni.ref_orb_count;
     var mag_z: f32 = 0.0;
     // Extra tracking for DE/surface normals
     // Note, this is a derivitive of 'full z', which
@@ -327,7 +329,8 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
 
     for (i = 0u; i < max_i; i = i + 1u) {
         // Load reference orbit Z_n
-        let Z = load_ref_orbit(0u, i);
+        var Z = load_ref_orbit(0u, ref_i);
+        ref_i += 1u;
 
         // λ_n = 2 * Z_n
         let lambda = Z + Z;
@@ -341,6 +344,7 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
         }
 
         // Reconstructed z for escape testing
+        Z = load_ref_orbit(0u, ref_i);
         z = Z + dz;
         z_history[i % MAX_P] = z;
 
@@ -354,8 +358,8 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
         }
 
         // Standard bailout
-        mag_z = length(z);
-        if (mag_z > 32.0) {
+        mag_z = z.x * z.x + z.y * z.y;
+        if (mag_z > 128.0) {
              flags |= ESCAPED_BIT;
             // Make extra iterations past escape for better DE approximation.
             if (extra >= 2) {
@@ -369,16 +373,17 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
             log_dzz += log2(2.0 * mag_z + 1e-30);
         }
 
-        let mag_dz = length(dz);
+        let mag_dz = dz.x * dz.x + dz.y * dz.y;
 
         // Detect numerical error from |dz|/|z|
         // i.e. Zhouran's glitch detection, where same RefOrb can be reused.
-        if (i > 20u) {
-            let ratio = mag_dz / (mag_z + 1e-30);
-            max_glitch_ratio = max(max_glitch_ratio, ratio);
-            if (max_glitch_ratio > uni.perturb_err_thresh) {
-                flags |= PERTURB_ERR_BIT;
-            }
+        //let ratio = mag_dz / (mag_z + 1e-30);
+        //max_glitch_ratio = max(max_glitch_ratio, ratio);
+        if ( ((uni.render_flags & GLITCH_FIX) != 0) &&
+             (mag_z < mag_dz * uni.perturb_err_thresh || ref_i == max_ref_i)) {
+            dz = z;
+            ref_i = 0u;
+            flags |= PERTURB_ERR_BIT;
         }
 
         // Period detection logic

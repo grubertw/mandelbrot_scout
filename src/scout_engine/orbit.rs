@@ -6,7 +6,7 @@ use log::warn;
 use num_complex::{Complex32};
 use rug::{Float, Complex};
 use parking_lot::{Mutex, RwLock};
-use crate::scout_engine::ScoutConfig;
+use crate::scout_engine::{ScoutEngineConfig};
 use crate::scout_engine::utils::complex_distance;
 
 /// All ReferenceOrbit object are Arc+Mutex wrapped, to support
@@ -338,34 +338,28 @@ pub struct OrbitScore {
 }
 
 impl OrbitScore {
-    pub fn new(orbit: LiveOrbit, cam: &CameraSnapshot, cfg: ScoutConfig) -> Self {
+    pub fn new(orbit: LiveOrbit, cam: &CameraSnapshot, cfg: &ScoutEngineConfig) -> Self {
         let orb_g = orbit.read();
         let cam_center = cam.center();
         let cam_half_extent = cam.half_extent();
-        let curr_max_ref_iters = {
-            let cfg_g = cfg.lock();
-            cfg_g.max_user_iters as f64 * cfg_g.ref_iters_multiplier
-        };
+        let curr_max_ref_iters = cfg.max_user_iters as f64 * cfg.ref_iters_multiplier;
 
         let mut sample_dist_from_cam_center = complex_distance(orb_g.c_ref(), cam_center);
         sample_dist_from_cam_center = sample_dist_from_cam_center.abs();
 
-        let depth = if orb_g.escape_index().is_none() {1.0} else {
+        let depth = if orb_g.escape_index().is_none() {
+            orb_g.orbit.len() as f64 / curr_max_ref_iters
+        } else {
             orb_g.escape_index().unwrap() as f64 / curr_max_ref_iters
         };
         let contraction = (-(orb_g.contraction().to_f64() * 20.0)).clamp(-2.0, 2.0);
         let dist = 1.0 - (sample_dist_from_cam_center.to_f64() / cam_half_extent.to_f64())
             .log(10.0).clamp(0.0, 1000.0);
 
-        let (depth_bonus, distance_penalty, contraction_bonus) = {
-            let cfg_g = cfg.lock();
-            (cfg_g.depth_bonus, cfg_g.distance_penalty, cfg_g.contraction_bonus)
-        };
-
         let total_score =
-            depth * depth_bonus +
-                dist * distance_penalty +
-                contraction * contraction_bonus;
+            depth * cfg.depth_bonus +
+                dist * cfg.distance_penalty +
+                contraction * cfg.contraction_bonus;
 
         Self {
             depth, dist, contraction, total_score, orbit: orbit.clone()

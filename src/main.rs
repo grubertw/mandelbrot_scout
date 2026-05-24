@@ -39,7 +39,7 @@ use winit::{
     window::{Window, WindowId, WindowAttributes},
 };
 
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use chrono::Local;
 use anstyle::Style;
 
@@ -233,11 +233,15 @@ impl ApplicationHandler for Runner {
                             // Ask ScoutEngine for it's current tile orbits and push to the GPU
                             s.query_qualified_orbits();
 
-                            let scout_diags = s.read_scout_diagnostics();
-                            let mut scout_diags_g = scout_diags.lock();
-                            if !scout_diags_g.consumed {
-                                controls.update(Message::UpdateDebugText(scout_diags_g.message.clone()));
-                                scout_diags_g.consumed = true;
+                            {
+                                trace!("Reading scout diagnostics...");
+                                let scout_diags = s.read_scout_diagnostics();
+                                let mut scout_diags_g = scout_diags.lock();
+                                if !scout_diags_g.consumed {
+                                    controls.update(Message::UpdateDebugText(scout_diags_g.message.clone()));
+                                    scout_diags_g.consumed = true;
+                                }
+                                trace!("scout diagnostics read successfully!");
                             }
 
                             let size = window.inner_size();
