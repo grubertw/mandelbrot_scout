@@ -14,7 +14,6 @@ pub struct RgbPalette {
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     // Maps to ScoutEngineConfig
-    pub init_rug_precision: u32,
     pub max_live_orbits: u32,
     pub auto_start: bool,
     pub starting_scale: f64,
@@ -35,6 +34,10 @@ pub struct Settings {
     pub center: (f64, f64),
     pub complex_span: f64,
     pub max_user_iter: u32,
+    pub init_shift: u32,
+    pub min_fixed_bits: u32,
+    pub max_fixed_bits: u32,
+    pub shift_increment: u32,
     pub render_res_factor: f64,
     pub render_res_factor_during_pan: f64,
     pub default_export_directory: String,
@@ -149,7 +152,6 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
     palettes_map.insert("default".to_string(), Value::from(default_palette));
 
     builder
-        .set_default("init_rug_precision", 128)?
         .set_default("max_live_orbits", 100)?
         .set_default("auto_start", true)?
         .set_default("starting_scale", 1e-8)?
@@ -166,6 +168,10 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("center", vec![-0.75, 0.0])?
         .set_default("complex_span", 3.0)?
         .set_default("max_user_iter", 500)?
+        .set_default("init_shift", 64)?
+        .set_default("min_fixed_bits", 56)?
+        .set_default("max_fixed_bits", 80)?
+        .set_default("shift_increment", 16)?
         .set_default("render_res_factor", 1.0)?
         .set_default("render_res_factor_during_pan", 0.85)?
         .set_default("default_export_directory", "/Pictures")?

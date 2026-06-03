@@ -1,5 +1,4 @@
 pub mod orbit;
-pub mod tile;
 mod worker;
 mod tasks;
 mod newton;
@@ -66,7 +65,6 @@ pub struct ScoutEngineConfig {
     /// With orbits of sufficient quality, the GPU should not have need to rebase
     /// any more than 2 or three times.
     pub num_qualified_orbits: u32,
-    pub rug_precision: u32,
     /// Normalized error threshold between Complex32 distance and rug::Complex distance
     /// that builds into DeltaC as the camera moves away from the reference orbit. This
     /// is the primary gate to the evaluate() call once Scout has live orbits and is past
@@ -248,8 +246,8 @@ impl ScoutEngine {
                     c_ref_32: orb_g.gpu_payload.c_ref,
                     orbit: orb_g.gpu_payload.c32_orbit.clone(),
                     escape_index: orb_g.quality_metrics.escape_index,
-                    r_valid: orb_g.r_valid().to_f32(),
-                    contraction: orb_g.contraction().to_f32(),
+                    r_valid: orb_g.r_valid() as f32,
+                    contraction: orb_g.contraction() as f32,
                     created_at: orb_g.quality_metrics.created_at,
                     }
                 })

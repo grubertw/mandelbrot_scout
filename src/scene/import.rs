@@ -8,7 +8,7 @@ use png::Decoder;
 use crate::gpu_pipeline::structs::SceneUniform;
 use crate::scene::Rgba8Palette;
 
-pub const META_VERSION: &str = "2";
+pub const META_VERSION: &str = "3";
 
 // Used to generate JSON data for image export
 #[derive(Debug, Serialize, Deserialize, Clone)]

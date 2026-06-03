@@ -14,7 +14,7 @@ use futures::StreamExt;
 use futures::select;
 use futures::future::{join_all, RemoteHandle};
 use futures::executor::{ThreadPool};
-use rug::Complex;
+use crate::numerics::FixedComplex;
 
 // ScoutEngine's internal work loop, a long-lived future that uses select to poll the
 // the camera snaphot & gpu feedback channels.
@@ -69,9 +69,9 @@ async fn handle_camera_snapshot(
     snapshot: Arc<CameraSnapshot>,
 ) {
     debug!("Scout Worker received camera snapshot. center={} scale={} extent={}",
-        snapshot.center().to_string_radix(10, Some(14)),
-        snapshot.scale().to_string_radix(10, Some(8)),
-        snapshot.half_extent().to_string_radix(10, Some(6))
+        snapshot.center().to_ui_string(10),
+        snapshot.scale().to_ui_string(5),
+        snapshot.half_extent().to_ui_string(4)
     );
     {
         let mut last_snap_g = context.last_camera_snapshot.lock();
@@ -84,8 +84,18 @@ async fn handle_camera_snapshot(
         (config_g.starting_scale, config_g.auto_start, config_g.distance_error_threshold)
     };
 
-    if context.active() && scale.to_f64() > starting_scale {
-        context.reset();
+    if !auto_start {
+        trace!("Autostart disabled. Camera Snapshot ignored!");
+        return;
+    }
+
+    if scale.to_f64_lossy() > starting_scale {
+        trace!("Scale {} larger than starting scale {}. Camera Snapshot ignored!",
+            scale.to_f64_lossy(), starting_scale);
+        if context.active() {
+            trace!("Context was active; resetting");
+            context.reset();
+        }
         return;
     }
 
@@ -102,10 +112,6 @@ async fn handle_camera_snapshot(
                 return;
             }
         }
-    }
-
-    if scale.to_f64() > starting_scale || !auto_start {
-        return;
     }
 
     tp.spawn_ok(
@@ -142,11 +148,10 @@ async fn evaluate_orbits(
         context.last_camera_snapshot.lock().clone()
     };
     info!("Evaluate orbits for screen center {} and scale {}", 
-        current_camera.center().to_string_radix(10, Some(10)),
-        current_camera.scale().to_string_radix(10, Some(6))
+        current_camera.center(), current_camera.scale()
     );
     
-    let prec = current_camera.scale().prec();
+    let shift = current_camera.scale().shift;
 
     // Snapshot GPU grid samples for eval
     let mut grid_samples = {
@@ -189,11 +194,12 @@ async fn evaluate_orbits(
         .map(|sample| sample.sample.clone())
         .collect();
     
-    let gpu_seeds: Vec<Complex> = grid_samples
+    let gpu_seeds: Vec<FixedComplex> = grid_samples
         .iter()
         .map(|sample| sample.location.clone())
         .collect();
-    
+    debug!("{} GPU seeds will be used to calculate reference orbits", gpu_seeds.len());
+
     let mut gpu_orbit_scores = spawn_orbits_from_seeds(
         &gpu_seeds, tp.clone(), context.orbit_id_factory.clone(), cfg, &current_camera
     ).await;
@@ -245,17 +251,17 @@ async fn evaluate_orbits(
             let orb_g = s.read();
             best_orbit_len = orb_g.orbit.len() as u32;
             best_oribt_escape_index = orb_g.escape_index();
-            best_orbit_contraction = orb_g.contraction().to_f64();
+            best_orbit_contraction = orb_g.contraction();
         }
     }
 
     context.write_diagnostics(
             format!("Scout evaluated {} grid samples, fast (f64) probed {} orbits, and spawned {} orbits. {} interior samples found!\n\
         \tBest Sample Info: iters_reached={} escaped={}\n\
-        \tBest Qualified Ref Orbit Info:\n\t\tprec={:<3} ref_len={}\n\t\tescape_index={}\n\t\tcontraction={:.5e}",
+        \tBest Qualified Ref Orbit Info:\n\t\tshift={:<3} ref_len={}\n\t\tescape_index={}\n\t\tcontraction={:.5e}",
                     grid_samples.len(), 0, total_orbits_spawned,
                     num_interior_seeds,
-                    best_sample_iters_reached, best_sample_escaped, prec,
+                    best_sample_iters_reached, best_sample_escaped, shift,
                     best_orbit_len,
                     best_oribt_escape_index.map_or(String::from("None"), |v| v.to_string()),
                     best_orbit_contraction
@@ -272,7 +278,7 @@ async fn evaluate_orbits(
 }
 
 async fn spawn_orbits_from_seeds(
-    seeds: &[Complex],
+    seeds: &[FixedComplex],
     tp: ThreadPool,
     id_factory: OrbitIdFactory,
     cfg: ScoutEngineConfig,
@@ -308,16 +314,16 @@ async fn spawn_orbits_from_seeds(
     for scored_orbit in &scored_orbits {
         let orb_g = scored_orbit.orbit.read();
 
-        trace!("Scored orbit {} c_ref={} orbit.len={} escape={:?} contraction={} r_valid={} \
-        period={:?} z_min={} a_max={} with precision={}\n\t\tScores: depth={} dist={} contraction={} total_score={}",
-            orb_g.orbit_id, orb_g.c_ref().to_string_radix(10, Some(18)),
+        trace!("Scored orbit {} c_ref={} orbit.len={} escape={:?} contraction={:.4e} r_valid={:.8e} \
+        period={:?} z_min={:.5e} a_max={:.5e} with shift={}\n\t\tScores: depth={} dist={} contraction={} total_score={}",
+            orb_g.orbit_id, orb_g.c_ref(),
             orb_g.orbit.len(), orb_g.quality_metrics.escape_index,
-            orb_g.contraction().to_string_radix(10, Some(4)),
-            orb_g.r_valid().to_string_radix(10, Some(5)),
+            orb_g.contraction(),
+            orb_g.r_valid(),
             orb_g.quality_metrics.period,
-            orb_g.quality_metrics.z_min.to_string_radix(10, Some(6)),
-            orb_g.quality_metrics.a_max.to_string_radix(10, Some(6)),
-            orb_g.c_ref().prec().0,
+            orb_g.quality_metrics.z_min,
+            orb_g.quality_metrics.a_max,
+            orb_g.c_ref().re.shift,
             scored_orbit.depth, scored_orbit.dist,
             scored_orbit.contraction,
             scored_orbit.total_score

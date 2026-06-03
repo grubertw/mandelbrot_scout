@@ -1,35 +1,34 @@
 use num_complex::{Complex32};
 use crate::signals::{CameraSnapshot, GpuGridSample};
-use rug::{Float, Complex};
+use crate::numerics::{FixedComplex, FixedReal};
 
 // I.e. distance as a vector
-pub fn complex_delta(a: &Complex, b: &Complex) -> Complex {
+pub fn complex_delta(a: &FixedComplex, b: &FixedComplex) -> FixedComplex {
     // (a.real - b.real, a.imag - b.imag)
-    let real = a.real().clone() - b.real();
-    let imag = a.imag().clone() - b.imag();
-    Complex::with_val(
-        a.prec(), 
-        (real, imag)
+    let real = a.re.clone() - b.re.clone();
+    let imag = a.im.clone() - b.im.clone();
+    FixedComplex::new(
+        real, imag
     )
 }
 
 // I.e. distance as a scalar 
-pub fn complex_distance(a: &Complex, b: &Complex) -> Float {
+pub fn complex_distance(a: &FixedComplex, b: &FixedComplex) -> FixedReal {
     let delta = complex_delta(a, b);
-    let sum = delta.real().clone() * delta.real() + delta.imag() * delta.imag();
+    let sum = delta.re.clone() * delta.re.clone() + delta.im.clone() * delta.im.clone();
     sum.sqrt()
 }
 
-pub fn norm_distance_error(c: &Complex, ref_c: &Complex, scale: &Float) -> f32 {
-    let c_f32 = Complex32::new(c.real().to_f32(), c.imag().to_f32());
-    let ref_c_f32 = Complex32::new(ref_c.real().to_f32(), ref_c.imag().to_f32());
+pub fn norm_distance_error(c: &FixedComplex, ref_c: &FixedComplex, scale: &FixedReal) -> f32 {
+    let c_f32 = Complex32::new(c.re().to_f32_lossy(), c.im().to_f32_lossy());
+    let ref_c_f32 = Complex32::new(ref_c.re().to_f32_lossy(), ref_c.im().to_f32_lossy());
     let delta_c_f32 = c_f32 - ref_c_f32;
     let dist_c_f32 = delta_c_f32.l1_norm();
 
     let true_dist = complex_distance(c, ref_c);
-    let diff_err = (dist_c_f32 - true_dist.to_f32()).abs();
+    let diff_err = (dist_c_f32 - true_dist.to_f32_lossy()).abs();
 
-    (diff_err / scale.to_f32()).log10()
+    (diff_err / scale.to_f32_lossy()).log10()
 }
 
 #[derive(Clone, Debug)]
@@ -47,11 +46,10 @@ impl SampleScore {
         let cam_center = cam.center();
         let cam_half_extent = cam.half_extent();
 
-        let mut sample_dist_from_cam_center = complex_distance(&sample.location, cam_center);
-        sample_dist_from_cam_center = sample_dist_from_cam_center.abs();
+        let sample_dist_from_cam_center = complex_distance(&sample.location, cam_center).to_f64_lossy().abs();
 
         let depth = sample.iters_reached as f64 / sample.max_user_iters as f64;
-        let dist = 1.0 - (sample_dist_from_cam_center.to_f64() / cam_half_extent.to_f64())
+        let dist = 1.0 - (sample_dist_from_cam_center / cam_half_extent.to_f64_lossy())
             .clamp(0.0, 1.0);
         let escape_penalty = if sample.escaped {1.0} else {0.0};
 

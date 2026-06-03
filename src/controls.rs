@@ -15,11 +15,11 @@ use iced_wgpu::core::font;
 use iced_wgpu::core::text::Wrapping;
 use png::Compression;
 use rfd::FileDialog;
-use rug::{Complex, Float};
 use strum::IntoEnumIterator;
 use strum_macros::{Display, EnumIter};
 
 use crate::export::{render_scene_to_jpeg, render_scene_to_png};
+use crate::numerics::{FixedComplex, FixedReal};
 use crate::scene::import::{load_metadata_from_png, ExtPalette};
 use crate::scout_engine::ScoutSignal;
 use crate::settings::Settings;
@@ -287,9 +287,9 @@ impl Controls {
     pub fn new(settings: &Settings, scene: Rc<RefCell<Scene>>) -> Controls {
         let scene_b = scene.borrow();
         let center = scene_b.center().clone();
-        let center_x = center.real().to_string_radix(10, Some(10));
-        let center_y = center.imag().to_string_radix(10, Some(10));
-        let scale = scene_b.scale().to_string_radix(10, Some(6));
+        let center_x = center.re().to_ui_string(10);
+        let center_y = center.im().to_ui_string(10);
+        let scale = scene_b.scale().to_ui_string(5);
 
         let mut palettes: Vec<PaletteSelection> = scene_b.get_palette_list()
             .iter()
@@ -380,7 +380,7 @@ impl Controls {
             auto_start: settings.auto_start,
             ref_iters_multiplier:  settings.ref_iters_multiplier,
             num_gpu_samples_to_eval: settings.num_gpu_samples_to_eval,
-            glitch_fix: false,
+            glitch_fix: true,
             perturb_err_threshold: settings.perturb_err_threshold,
             distance_error_threshold: settings.distance_error_threshold,
             export_img_format: Some(ExportImgFormat::Png),
@@ -461,27 +461,27 @@ impl Controls {
             Message::PollFromScene => {
                 let scene_b = self.scene.borrow();
                 let center = scene_b.center();
-                self.center_x = center.real().to_string_radix(10, Some(10));
-                self.center_y = center.imag().to_string_radix(10, Some(10));
-                self.scale = scene_b.scale().to_string_radix(10, Some(6));
+                self.center_x = center.re().to_ui_string(10);
+                self.center_y = center.im().to_ui_string(10);
+                self.scale = scene_b.scale().to_ui_string(5);
             }
             Message::ApplyCenterScale => {
-                let prec = self.scene.borrow().scale().prec();
-                let center_x = if let Ok(re) = Float::parse(self.center_x.clone()) {
-                    Float::with_val(prec, re)
-                } else {Float::with_val(prec, 0)};
-
-                let center_y = if let Ok(im) = Float::parse(self.center_y.clone()) {
-                    Float::with_val(prec, im)
-                } else {Float::with_val(prec, 0)};
-
-                let scale = if let Ok(s) = Float::parse(self.scale.clone()) {
-                    Float::with_val(prec, s)
-                } else {Float::with_val(prec, 0)};
-
-                let center = Complex::with_val(prec, (center_x, center_y));
-
                 let mut scene_b = self.scene.borrow_mut();
+                let shift = scene_b.scale().shift;
+
+                let center_x = if let Ok(re) = self.center_x.parse::<f64>() {
+                    FixedReal::from_f64(re, shift)
+                } else {FixedReal::zero(shift)};
+
+                let center_y = if let Ok(im) = self.center_y.parse::<f64>() {
+                    FixedReal::from_f64(im, shift)
+                } else {FixedReal::zero(shift)};
+
+                let scale = if let Ok(s) = self.scale.parse::<f64>() {
+                    FixedReal::from_f64(s, shift)
+                } else {FixedReal::zero(shift)};
+
+                let center = FixedComplex::new(center_x, center_y);
                 scene_b.set_center(center);
                 scene_b.set_scale(scale);
                 // Update scout engine with new position
@@ -499,9 +499,9 @@ impl Controls {
                         scene_b.apply_metadata(meta);
                         self.debug_msg = format!("Successfully restored scene from PNG file {:?}!", path);
                         info!("{}", self.debug_msg);
-                        self.center_x = scene_b.center().real().to_string_radix(10, Some(10));
-                        self.center_y = scene_b.center().imag().to_string_radix(10, Some(10));
-                        self.scale = scene_b.scale().to_string_radix(10, Some(6));
+                        self.center_x = scene_b.center().re().to_ui_string(10);
+                        self.center_y = scene_b.center().im().to_ui_string(10);
+                        self.scale = scene_b.scale().to_ui_string(5);
                     }
                     else {
                         self.debug_msg =
@@ -981,7 +981,7 @@ impl Controls {
                 .align_x(Alignment::End),
             text_input("Placeholder...", &self.center_x)
                 .on_input(Message::CenterXChanged)
-                .width(Length::Fixed(140.0)),
+                .width(Length::Fixed(150.0)),
 
             text("imag: ")
                 .width(Length::Fixed(60.0))
@@ -989,7 +989,7 @@ impl Controls {
                 .align_x(Alignment::End),
             text_input("Placeholder...", &self.center_y)
                 .on_input(Message::CenterYChanged)
-                .width(Length::Fixed(140.0)),
+                .width(Length::Fixed(150.0)),
 
             text("scale: ")
                 .width(Length::Fixed(60.0))

@@ -1,8 +1,6 @@
 #
 # Scout Engine configs
 #
-# Used for Rug (MPFR) Float and Complex number types
-init_rug_precision = 128
 # Total number of orbits the engine will track
 max_live_orbits = 50
 # Start when the starting scale threshold is crossed
@@ -14,7 +12,7 @@ ref_iters_multiplier = 1.25
 # After GPU samples have been ranked/scored, take from the top this amount to
 # use for further evaluation - i.e. as a base for f64 depth probing and for spawning
 # direct MFPR orbits
-num_gpu_samples_to_eval = 6
+num_gpu_samples_to_eval = 4
 # Number of reference orbits to qualify (or keep qualified), per cycle.
 # With orbits of sufficient quality, the GPU should not have need to rebase
 # any more than 2 or three times.
@@ -61,6 +59,17 @@ complex_span = 3.0
 # computation 'early' - i.e. until an anchor orbit is found, at which point
 # the remainder of the orbit will be computed
 max_user_iter = 500
+# Initial fixed-point shift to use
+# The 'shift' of a fixed-point is the exponent where
+# fixed = mantissa * 2^shift
+init_shift = 64
+# Minimum number of bits the mantissa is allowed to be before rescaling the shift
+min_fixed_bits = 56
+# Maximum number of bits the mantissa is allowed to be before rescaling the shift
+max_fixed_bits = 80
+# Amount to increase or descrease the size of the shift when a rescale operation
+# is performed - i.e. during UI zoom operations.
+shift_increment = 16
 # When value is 1.0, this is a direct pixel-to-pixel mapping between
 # the render_texture and display
 # Descreasing the value resuces it's 'quality', meaning that the texture

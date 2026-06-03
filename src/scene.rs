@@ -1,10 +1,12 @@
 pub mod import;
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use crate::settings::Settings;
 use crate::gpu_pipeline::builder::*;
 use crate::gpu_pipeline::structs::*;
 use crate::signals::*;
+use crate::numerics::*;
 use crate::scout_engine::{ScoutEngineConfig, ScoutEngine, ScoutConfig, ScoutSignal};
 use crate::scout_engine::orbit::OrbitId;
 use crate::scout_engine::utils::complex_delta;
@@ -15,13 +17,13 @@ use iced_wgpu::wgpu;
 use iced_wgpu::wgpu::BufferAsyncError;
 use iced_winit::winit::window::Window;
 
-use rug::{Float, Complex};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use log::{trace, debug, info, warn};
 use std::sync::Arc;
 use std::time;
+use num_bigint::BigInt;
 use parking_lot::Mutex;
 use crate::scene::import::{FractalMetadata, RefOrbitMetadata, META_VERSION};
 use crate::TITLE;
@@ -30,8 +32,8 @@ use crate::TITLE;
 struct LoadedOrbit {
     rank: u32,
     orbit_id: OrbitId,
-    orbit_c_ref: Complex,
-    center_offset: Complex,
+    orbit_c_ref: FixedComplex,
+    center_offset: FixedComplex,
     gpu_orb_loc_info: GpuRefOrbitLocation
 }
 
@@ -48,9 +50,12 @@ pub struct Scene {
     queue: wgpu::Queue,
     frame_id: u64,
     frame_timestamp: time::Instant,
-    center: Complex, // scaled and shifted with mouse drag
-    scale: Float,
-    scale_factor: Float,
+    center: FixedComplex, // scaled and shifted with mouse drag
+    scale: FixedReal,
+    min_fixed_bits: u32,
+    max_fixed_bits: u32,
+    shift_increment: u32,
+    scale_factor: f64,
     width: f64,
     height: f64,
     render_res_factor: f64,
@@ -77,8 +82,17 @@ impl Scene {
         width: f64, height: f64,
         settings: &Settings
     ) -> Scene {
-        let center = Complex::with_val(settings.init_rug_precision, settings.center);
-        let scale = Float::with_val(settings.init_rug_precision, settings.complex_span / width);
+        let starting_scale = settings.complex_span / width;
+        let starting_shift = compute_starting_shift(
+            starting_scale, settings.init_shift, settings.shift_increment,
+        );
+        debug!("starting shift {} computed from starting scale {} and with {} guard bits and {} bit increment",
+            starting_shift, starting_scale, settings.init_shift, settings.shift_increment);
+
+        let center = FixedComplex::with_val_f64(settings.center, starting_shift);
+        let scale = FixedReal::from_f64(starting_scale, starting_shift);
+        trace!("Starting center {} (f64: {} + {}i) and scale {} (f64: {:.5e})",
+            center, center.re.to_f64_lossy(), center.im.to_f64_lossy(), scale, scale.to_f64_lossy());
 
         // Configure ScoutEngine (our single source of truth for reference orbits)
         let scout_config =  ScoutEngineConfig {
@@ -90,7 +104,6 @@ impl Scene {
             ref_iters_multiplier: settings.ref_iters_multiplier,
             num_gpu_samples_to_eval: settings.num_gpu_samples_to_eval,
             num_qualified_orbits: settings.num_qualified_orbits,
-            rug_precision: settings.init_rug_precision,
             distance_error_threshold: settings.distance_error_threshold,
             depth_bonus: settings.depth_bonus,
             distance_penalty: settings.distance_penalty,
@@ -111,9 +124,9 @@ impl Scene {
         let default_palette = color_palettes.get("default").unwrap();
 
         let uniform = SceneUniform {
-            center_x: center.real().to_f32(),
-            center_y: center.imag().to_f32(),
-            scale: scale.to_f32(),
+            center_x: center.re().to_f32_lossy(),
+            center_y: center.im().to_f32_lossy(),
+            scale: scale.to_f32_lossy(),
             view_width: width as f32,
             view_height: height as f32,
             render_width: width as u32,
@@ -129,7 +142,7 @@ impl Scene {
             sample_count: 1,
             jitter_strength: 0.0,
             sample_avg_bias: 0.9,
-            render_flags: 0,
+            render_flags: 2,
             stripe_density: settings.stripe_density,
             stripe_strength: settings.stripe_strength,
             stripe_gamma: settings.stripe_gamma,
@@ -167,7 +180,11 @@ impl Scene {
         Scene {
             window, device, queue,
             frame_id: 0, frame_timestamp: time::Instant::now(),
-            center, scale, scale_factor: Float::with_val(settings.init_rug_precision, 1.05),
+            center, scale,
+            min_fixed_bits: settings.min_fixed_bits,
+            max_fixed_bits: settings.max_fixed_bits,
+            shift_increment: settings.shift_increment,
+            scale_factor: 1.05,
             width, height,
             render_res_factor: settings.render_res_factor,
             render_res_factor_during_pan: settings.render_res_factor_during_pan,
@@ -396,11 +413,11 @@ impl Scene {
 
 
                 trace_str.push_str(
-                    format!("[{:<3}, {:<3}]\tc={:<56} depth={:<3} escaped={} perturbed={} \
+                    format!("[{:<3}, {:<3}]\tc={} (f64: {} + {}i) depth={:<3} escaped={} perturbed={} \
                     max_iters_reached={} period={} contraction={} score={}\n",
                         sample.best_pixel_x,
                         sample.best_pixel_y,
-                        best_sample.to_string_radix(10, Some(18)),
+                        best_sample, best_sample.re.to_f64_lossy(), best_sample.im.to_f64_lossy(),
                         sample_iters, escaped,
                         sample.perturbed(),
                         sample.max_iters_reached(),
@@ -590,8 +607,8 @@ impl Scene {
                 let dbg = bytemuck::from_bytes::<DebugOut>(&data[..]).clone();
 
                 debug!("FROM CPU (Scene struct)");
-                debug!("  center = {:?}", self.center);
-                debug!("  scale  = {:?}", self.scale);
+                debug!("  center = {} (f64: {} + {}i)", self.center, self.center.re.to_f64_lossy(), self.center.im.to_f64_lossy());
+                debug!("  scale  = {} (f64: {:.5e})", self.scale, self.scale.to_f64_lossy());
                 debug!("  width  = {}\theight = {}", self.width, self.height);
                 debug!("FROM GPU:");
                 debug!("  center = (re:{}, im:{})", dbg.center_x, dbg.center_y);
@@ -623,11 +640,11 @@ impl Scene {
         self.scout_engine.config()
     }
 
-    pub fn center(&self) -> &Complex {
+    pub fn center(&self) -> &FixedComplex {
         &self.center
     }
 
-    pub fn scale(&self) -> &Float {
+    pub fn scale(&self) -> &FixedReal {
         &self.scale
     }
 
@@ -716,42 +733,84 @@ impl Scene {
         debug!("Window size changed w={} h={}", width, height);
     }
 
-    pub fn set_scale(&mut self, scale: Float) {
+    pub fn set_scale(&mut self, scale: FixedReal) {
+        if scale.mantissa == BigInt::ZERO {
+            panic!("Scale cannot be zero");
+        }
         self.scale = scale;
         self.recalc_fractal = true;
-        self.uniform.scale = self.scale.to_f32();
+        self.uniform.scale = self.scale.to_f32_lossy();
+        self.normalize_precision();
         self.update_window_title();
     }
 
     pub fn change_scale(&mut self, increase: bool) -> String {
-        if increase {
-            self.scale *= &self.scale_factor;
-        } else {
-            self.scale /= &self.scale_factor;
+        self.scale = self.scale.scale_by_f64(self.scale_factor, increase);
+        if self.scale.mantissa == BigInt::ZERO {
+            panic!("Scale cannot be zero");
         }
 
-        self.uniform.scale = self.scale.to_f32();
+        self.uniform.scale = self.scale.to_f32_lossy();
         self.recalc_fractal = true;
-        let s = self.scale.to_string_radix(10, None);
-        debug!("Scale changed {}", s);
+        debug!("Scale changed {} (f64 {:.5e}) bits={}",
+            self.scale, self.scale.to_f64_lossy(), self.scale.mantissa.bits());
+        self.normalize_precision();
         self.update_window_title();
-        s
+        self.scale.to_string()
+    }
+
+    pub fn normalize_precision(&mut self) {
+        let bits_used = self.scale.mantissa.bits();
+
+        if bits_used < self.min_fixed_bits as u64 {
+            debug!("Detected bits used {} below the min threshold {}. rescale up by {}",
+                bits_used, self.min_fixed_bits, self.shift_increment);
+            self.rescale(self.shift_increment as i32);
+        } else if bits_used > self.max_fixed_bits as u64 {
+            debug!("Detected bits used {} above the max threshold {}. rescale down by {}",
+                bits_used, self.min_fixed_bits, self.shift_increment);
+            self.rescale(-(self.shift_increment as i32));
+        }
+    }
+
+    pub fn rescale(&mut self, delta_shift: i32) {
+        if delta_shift > 0 {
+            let s = delta_shift as u32;
+
+            self.center.re.mantissa <<= s;
+            self.center.im.mantissa <<= s;
+            self.scale.mantissa <<= s;
+
+            self.scale.shift += s;
+            self.center.re.shift += s;
+            self.center.im.shift += s;
+        } else {
+            let s = (-delta_shift) as u32;
+
+            self.center.re.mantissa >>= s;
+            self.center.im.mantissa >>= s;
+            self.scale.mantissa >>= s;
+
+            self.scale.shift -= s;
+            self.center.re.shift -= s;
+            self.center.im.shift -= s;
+        }
     }
 
     fn update_center_offsets(&mut self) {
         let center = self.center().clone();
-        self.uniform.center_x = center.real().to_f32();
-        self.uniform.center_y = center.imag().to_f32();
+        self.uniform.center_x = center.re().to_f32_lossy();
+        self.uniform.center_y = center.im().to_f32_lossy();
 
         for loadout in self.loaded_orbits.iter_mut() {
             loadout.center_offset = complex_delta(&center, &loadout.orbit_c_ref);
 
-            loadout.gpu_orb_loc_info.center_offset_re = loadout.center_offset.real().to_f32();
-            loadout.gpu_orb_loc_info.center_offset_im = loadout.center_offset.imag().to_f32();
+            loadout.gpu_orb_loc_info.center_offset_re = loadout.center_offset.re().to_f32_lossy();
+            loadout.gpu_orb_loc_info.center_offset_im = loadout.center_offset.im().to_f32_lossy();
         }
     }
 
-    pub fn set_center(&mut self, new_center: Complex) {
+    pub fn set_center(&mut self, new_center: FixedComplex) {
         self.center = new_center;
         self.recalc_fractal = true;
         self.update_center_offsets();
@@ -759,18 +818,17 @@ impl Scene {
     }
 
     pub fn change_center(&mut self, center_diff: (f64, f64)) -> String {
-        let dx = self.scale.clone() * center_diff.0;
-        let dy = self.scale.clone() * center_diff.1;
+        let dx = self.scale.scale_by_f64(center_diff.0, true);
+        let dy = self.scale.scale_by_f64(center_diff.1, true);
 
-        let (real, imag) = self.center.as_mut_real_imag();
-        *real -= &dx;
-        *imag += &dy;
+        self.center.re -= dx;
+        self.center.im += dy;
 
         self.update_center_offsets();
         self.recalc_fractal = true;
-        let c = self.center.to_string_radix(10, None);
-        debug!("Center changed {:?} ----- diff ({:?} {:?})", 
-            c, dx, dy);
+        let c = format!("{}", self.center);
+        debug!("Center changed {} ----- diff {:?}",
+            c, center_diff);
         self.update_window_title();
         c
     }
@@ -779,12 +837,12 @@ impl Scene {
         self.uniform.set_debug_coloring(debug_coloring);
         self.recalc_color = true;
     }
-    
+
     pub fn set_glitch_fix(&mut self, glitch_fix: bool) {
         self.uniform.set_glitch_fix(glitch_fix);
         self.recalc_fractal = true;
     }
-    
+
     pub fn set_smooth_coloring(&mut self, smooth_coloring: bool) {
         self.uniform.set_smooth_coloring(smooth_coloring);
         self.recalc_fractal = true;
@@ -1026,6 +1084,7 @@ impl Scene {
         if orbits.len() > 1 {
             let ranked_orb = &orbits[1];
             self.queue.write_buffer(&self.pipeline.rank_two_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
+            orbit_count += 1;
             trace!("Wrote Rank Two RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
                 ranked_orb.orbit.len() * 8, ranked_orb.orbit.len());
         }
@@ -1043,8 +1102,8 @@ impl Scene {
                 trace_str.push_str(
                     format!("  Rank #{:<2}\tOrbitId={:<3?} center_offset={} orbit_c_ref={}\n",
                         load.rank, load.orbit_id,
-                        load.center_offset.to_string_radix(10, Some(18)),
-                        load.orbit_c_ref.to_string_radix(10, Some(18))
+                        load.center_offset,
+                        load.orbit_c_ref
                     ).as_str());
             }
             trace!("{}", trace_str);
@@ -1109,15 +1168,15 @@ impl Scene {
     // Pixels from the GPU MUST first undergo f32 reconstruction first before
     // being taken to high precision. Otherwise, the collected sample is NOT being
     // faithful to 'c' that underwent escape-time calculation using its f32 arithmetic.
-    fn build_c_from_scene(&self, pix_x: i32, pix_y: i32) -> Complex {
+    fn build_c_from_scene(&self, pix_x: i32, pix_y: i32) -> FixedComplex {
         let rw = self.uniform.render_width as f32;
         let rh = self.uniform.render_height as f32;
 
         let vw = self.uniform.view_width;
         let vh = self.uniform.view_height;
 
-        let u = (pix_x as f32 + 0.5) / rw;
-        let v = (pix_y as f32 + 0.5) / rh;
+        let u = (pix_x as f32) / rw;
+        let v = (pix_y as f32) / rh;
 
         let cu = u - 0.5;
         //let cv = 0.5 - v;
@@ -1129,8 +1188,7 @@ impl Scene {
         let c_re = off_x + self.uniform.center_x;
         let c_im = off_y + self.uniform.center_y;
 
-        let prec = self.scale.prec();
-        Complex::with_val(prec, (c_re, c_im))
+        FixedComplex::with_val_f32( (c_re, c_im), self.scale.shift)
     }
 
     // Under perturbation, f32 math must be specifically avoided.
@@ -1140,15 +1198,15 @@ impl Scene {
         pix_x: i32,
         pix_y: i32,
         orbit_idx: u32
-    ) -> Option<Complex> {
+    ) -> Option<FixedComplex> {
         let rw = self.uniform.render_width as f32;
         let rh = self.uniform.render_height as f32;
 
         let vw = self.uniform.view_width;
         let vh = self.uniform.view_height;
 
-        let u = (pix_x as f32 + 0.5) / rw;
-        let v = (pix_y as f32 + 0.5) / rh;
+        let u = (pix_x as f32) / rw;
+        let v = (pix_y as f32) / rh;
 
         let cu = u - 0.5;
         //let cv = 0.5 - v;
@@ -1157,21 +1215,21 @@ impl Scene {
         let off_x_f32 = (cu * vw) * self.uniform.scale;
         let off_y_f32 = (cv * vh) * self.uniform.scale;
 
-        let prec = self.scale.prec();
-        let off_x = Float::with_val(prec, off_x_f32);
-        let off_y = Float::with_val(prec, off_y_f32);
+        let shift = self.scale.shift;
+        let off_x = FixedReal::from_f32(off_x_f32, shift);
+        let off_y = FixedReal::from_f32(off_y_f32, shift);
 
         if let Some(loadout_loc) = self.loaded_orbits.get(orbit_idx as usize) {
-            let mut c_re = loadout_loc.center_offset.real().clone();
-            c_re += &off_x;
+            let mut c_re = loadout_loc.center_offset.re().clone();
+            c_re += off_x;
 
-            let mut c_im = loadout_loc.center_offset.imag().clone();
-            c_im += &off_y;
+            let mut c_im = loadout_loc.center_offset.im().clone();
+            c_im += off_y;
 
-            c_re += loadout_loc.orbit_c_ref.real();
-            c_im += loadout_loc.orbit_c_ref.imag();
+            c_re += loadout_loc.orbit_c_ref.re().clone();
+            c_im += loadout_loc.orbit_c_ref.im().clone();
 
-            Some(Complex::with_val(prec, (c_re, c_im)))
+            Some(FixedComplex::new(c_re, c_im))
         } else {
             None
         }
@@ -1179,26 +1237,25 @@ impl Scene {
 
     fn update_window_title(&self) {
         let title_str =
-            format!("re: {} im: {}  scale: {}  w: {} h: {}",
-                self.center.real().to_string_radix(10, Some(8)),
-                self.center.imag().to_string_radix(10, Some(8)),
-                self.scale.to_string_radix(10, Some(4)),
+            format!("{}  scale: {}  w: {} h: {}",
+                self.center.to_ui_string(10),
+                self.scale.to_ui_string(5),
                 self.width.to_string(), self.height.to_string()
             );
         self.window.set_title(&title_str);
     }
 
     pub fn build_metadata(&self) -> FractalMetadata {
-        let center_re = self.center.real().to_string_radix(10, None);
-        let center_im = self.center.imag().to_string_radix(10, None);
-        let scale = self.scale.to_string_radix(10, None);
+        let center_re = self.center.re().to_storage_string();
+        let center_im = self.center.im().to_storage_string();
+        let scale = self.scale.to_storage_string();
 
         let ref_orbit = self.loaded_orbits.first().map(|orb| {
-            let c_ref_re = orb.orbit_c_ref.real().to_string_radix(10, None);
-            let c_ref_im = orb.orbit_c_ref.imag().to_string_radix(10, None);
+            let c_ref_re = orb.orbit_c_ref.re().to_storage_string();
+            let c_ref_im = orb.orbit_c_ref.im().to_storage_string();
 
-            let center_offset_re = orb.center_offset.real().to_string_radix(10, None);
-            let center_offset_im = orb.center_offset.imag().to_string_radix(10, None);
+            let center_offset_re = orb.center_offset.re().to_storage_string();
+            let center_offset_im = orb.center_offset.im().to_storage_string();
 
             RefOrbitMetadata {
                 c_ref_re, c_ref_im,
@@ -1218,13 +1275,13 @@ impl Scene {
     }
 
     pub fn apply_metadata(&mut self, meta: FractalMetadata) {
-        let re = Float::parse(meta.center_re).unwrap();
-        let im = Float::parse(meta.center_im).unwrap();
+        let re = FixedReal::from_str(meta.center_re.as_str()).unwrap();
+        let im = FixedReal::from_str(meta.center_im.as_str()).unwrap();
 
-        self.center = Complex::with_val(self.scale.prec(), (re, im));
+        self.center = FixedComplex::new(re, im);
         self.update_center_offsets();
         
-        self.scale = Float::with_val(self.scale.prec(), Float::parse(meta.scale).unwrap());
+        self.scale = FixedReal::from_str(meta.scale.as_str()).unwrap();
         self.uniform = meta.uniform;
 
         self.update_window_title();
@@ -1232,9 +1289,20 @@ impl Scene {
     }
 }
 
+pub fn compute_starting_shift(
+    scale: f64,
+    guard_bits: u32,
+    shift_increment: u32,
+) -> u32 {
+    let raw =
+        (-scale.log2()).ceil() as u32 + guard_bits;
+
+    raw.next_multiple_of(shift_increment)
+}
+
 fn build_gpu_orbit_loadout_from_qualified_orbits(
     orbits: &Vec<QualifiedOrbit>,
-    center: &Complex
+    center: &FixedComplex
 ) -> Vec<LoadedOrbit> {
     orbits.iter()
         .map(|orb| {
@@ -1248,9 +1316,9 @@ fn build_gpu_orbit_loadout_from_qualified_orbits(
                     c_ref_re: orb.c_ref_32.re,
                     c_ref_im: orb.c_ref_32.im,
                     r_valid: orb.r_valid,
-                    max_ref_iters: orb.escape_index.unwrap_or(orb.orbit.len() as u32),
-                    center_offset_re: orbit_offset_from_center.real().to_f32(),
-                    center_offset_im: orbit_offset_from_center.imag().to_f32(),
+                    max_ref_iters: orb.orbit.len() as u32,
+                    center_offset_re: orbit_offset_from_center.re().to_f32_lossy(),
+                    center_offset_im: orbit_offset_from_center.im().to_f32_lossy(),
             }
         }
         })

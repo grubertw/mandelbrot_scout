@@ -17,8 +17,9 @@ wgpu="29.0.0"
 futures = { version = "0.3.32", features = ["thread-pool"] }
 parking_lot = {version = "0.12", features = ["hardware-lock-elision"]}
 bytemuck="1.25.0"
+num-bigint="0.4.6"
+num-traits = "0.2.19"
 num-complex = { version = "0.4.6" , features = ["bytemuck"]}
-rug="1.28.1"
 rand="0.8"
 rand_chacha="0.3"
 log="0.4.29"

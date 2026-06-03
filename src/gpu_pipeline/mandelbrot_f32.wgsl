@@ -76,9 +76,8 @@ fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> vec2f {
 
     let jittered_pix = vec2f(pix) + jitter * uni.jitter_strength;
 
-    // Normalize pixel → [0,1]
-    let u = (f32(jittered_pix.x) + 0.5) / rw;
-    let v = (f32(jittered_pix.y) + 0.5) / rh;
+    let u = f32(jittered_pix.x) / rw;
+    let v = f32(jittered_pix.y) / rh;
 
     // Center → [-0.5, 0.5]
     let cu = u - 0.5;
@@ -268,8 +267,8 @@ fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32, jitter: vec2f) 
 
     let jittered_pix = vec2f(pix) + jitter * uni.jitter_strength;
 
-    let u = (f32(jittered_pix.x) + 0.5) / rw;
-    let v = (f32(jittered_pix.y) + 0.5) / rh;
+    let u = f32(jittered_pix.x) / rw;
+    let v = f32(jittered_pix.y) / rh;
 
     let cu = u - 0.5;
     let cv = v - 0.5;
@@ -306,7 +305,7 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
     var i: u32 = 0u;
     var ref_i: u32 = 0u;
     let max_i = uni.max_iter;
-    let max_ref_i = uni.ref_orb_count;
+    let max_ref_i = orbit_location[0u].max_ref_iters;
     var mag_z: f32 = 0.0;
     // Extra tracking for DE/surface normals
     // Note, this is a derivitive of 'full z', which

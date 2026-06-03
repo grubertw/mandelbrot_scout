@@ -4,8 +4,8 @@ use crate::scout_engine::orbit::OrbitId;
 use std::hash::{Hash, Hasher};
 use std::time;
 
-use rug::{Float, Complex};
 use num_complex::Complex32;
+use crate::numerics::{FixedComplex, FixedReal};
 
 ///////////////////////////////////////////////////////////
 // Consumed by Scout Engine
@@ -19,9 +19,9 @@ pub struct FrameStamp {
 #[derive(Clone, Debug)]
 pub struct CameraSnapshot {
     frame_stamp: FrameStamp,
-    center: Complex,
-    scale: Float, // pixel scale, pix_dx.max(pix_dy)
-    half_extent: Float, // scale * extent
+    center: FixedComplex,
+    scale: FixedReal, // pixel scale, pix_dx.max(pix_dy)
+    half_extent: FixedReal, // scale * extent
 
     pub screen_extent_multiplier: f64, // width.max(height)
 }
@@ -29,11 +29,11 @@ pub struct CameraSnapshot {
 impl CameraSnapshot {
     pub fn new(
         frame_stamp: FrameStamp,
-        center: Complex,
-        scale: Float,
+        center: FixedComplex,
+        scale: FixedReal,
         screen_extent_multiplier: f64
     ) -> Self {
-        let half_extent = scale.clone() * screen_extent_multiplier;
+        let half_extent = scale.scale_by_f64(screen_extent_multiplier, true);
 
         Self {
             frame_stamp, center, scale, 
@@ -45,15 +45,15 @@ impl CameraSnapshot {
         &self.frame_stamp
     }
 
-    pub fn center(&self) -> &Complex {
+    pub fn center(&self) -> &FixedComplex {
         &self.center
     }
 
-    pub fn scale(&self) -> &Float {
+    pub fn scale(&self) -> &FixedReal {
         &self.scale
     }
 
-    pub fn half_extent(&self) -> &Float {
+    pub fn half_extent(&self) -> &FixedReal {
         &self.half_extent
     }
 }
@@ -63,7 +63,7 @@ pub struct GpuGridSample {
     pub frame_stamp: FrameStamp,
     
     // Gpu Reduced info about the pest sampled pixel it's sample grid
-    pub location: Complex,
+    pub location: FixedComplex,
     pub iters_reached: u32,
     pub escaped: bool,
     pub max_user_iters: u32,
@@ -92,7 +92,7 @@ pub struct FrameDiagnostics {
 pub struct QualifiedOrbit {
     pub rank: u32,
     pub orbit_id: OrbitId,
-    pub c_ref: Complex,
+    pub c_ref: FixedComplex,
     pub c_ref_32: Complex32,
     pub orbit: Vec<Complex32>,
     pub escape_index: Option<u32>,
