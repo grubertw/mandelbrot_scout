@@ -104,12 +104,14 @@ async fn handle_camera_snapshot(
 
         if let Some(curr_orb) = lo_g.first() {
             let orb_g = curr_orb.read();
-            let dist_err = norm_distance_error(snapshot.center(), orb_g.c_ref(), scale);
-            // Hold onto our interior reference orbit as long as possible
-            if dist_err < dist_err_thresh && !orb_g.is_exterior() {
-                info!("Scout detected {} normalized distance error from camera center and current non-escaping ref orb",
-                dist_err);
-                return;
+            if snapshot.scale().shift == orb_g.c_ref.re.shift {
+                let dist_err = norm_distance_error(snapshot.center(), orb_g.c_ref(), scale);
+                // Hold onto our interior reference orbit as long as possible
+                if dist_err < dist_err_thresh && !orb_g.is_exterior() {
+                    info!("Scout detected {} normalized distance error from camera center and current non-escaping ref orb",
+                    dist_err);
+                    return;
+                }
             }
         }
     }
@@ -205,6 +207,7 @@ async fn evaluate_orbits(
     ).await;
 
     let total_orbits_spawned = gpu_orbit_scores.len(); // + f64_orbit_scores.len();
+    let mut best_orbit_id: u64 = 0;
     let mut best_orbit_len: u32 = 0;
     let mut best_oribt_escape_index: Option<u32> = None;
     let mut best_orbit_contraction: f64 = 0.0;
@@ -249,6 +252,7 @@ async fn evaluate_orbits(
 
         if let Some(s) = pool_g.first() {
             let orb_g = s.read();
+            best_orbit_id = orb_g.orbit_id;
             best_orbit_len = orb_g.orbit.len() as u32;
             best_oribt_escape_index = orb_g.escape_index();
             best_orbit_contraction = orb_g.contraction();
@@ -258,10 +262,11 @@ async fn evaluate_orbits(
     context.write_diagnostics(
             format!("Scout evaluated {} grid samples, fast (f64) probed {} orbits, and spawned {} orbits. {} interior samples found!\n\
         \tBest Sample Info: iters_reached={} escaped={}\n\
-        \tBest Qualified Ref Orbit Info:\n\t\tshift={:<3} ref_len={}\n\t\tescape_index={}\n\t\tcontraction={:.5e}",
+        \tBest Qualified Ref Orbit Info:\n\t\tOrbitId={} shift={:<3} ref_len={}\n\t\tescape_index={}\n\t\tcontraction={:.5e}",
                     grid_samples.len(), 0, total_orbits_spawned,
                     num_interior_seeds,
-                    best_sample_iters_reached, best_sample_escaped, shift,
+                    best_sample_iters_reached, best_sample_escaped,
+                    best_orbit_id, shift,
                     best_orbit_len,
                     best_oribt_escape_index.map_or(String::from("None"), |v| v.to_string()),
                     best_orbit_contraction

@@ -1,3 +1,4 @@
+use log::debug;
 use num_complex::{Complex32};
 use crate::signals::{CameraSnapshot, GpuGridSample};
 use crate::numerics::{FixedComplex, FixedReal};
@@ -45,6 +46,13 @@ impl SampleScore {
     pub fn new(sample: &GpuGridSample, cam: &CameraSnapshot) -> Self {
         let cam_center = cam.center();
         let cam_half_extent = cam.half_extent();
+        let mut sample = sample.clone();
+
+        if sample.location.re.shift != cam.center().re.shift {
+            let delta_shift = cam.center().re.shift as i32 - sample.location.re.shift as i32;
+            debug!("Rescaling sample to match viewport. delta_shift={}", delta_shift);
+            sample.location.rescale(delta_shift);
+        }
 
         let sample_dist_from_cam_center = complex_distance(&sample.location, cam_center).to_f64_lossy().abs();
 
@@ -62,11 +70,11 @@ impl SampleScore {
             gpu_score * 0.5 +     // weak influence
                 depth * 3.0 +         // still important
                 dist * 0.2 +          // mild bias
-                SampleScore::contraction_bias(sample) +
-                SampleScore::interior_bias(sample);
+                SampleScore::contraction_bias(&sample) +
+                SampleScore::interior_bias(&sample);
 
         Self {
-            depth, dist, escape_penalty, total_score, sample: sample.clone()
+            depth, dist, escape_penalty, total_score, sample
         }
     }
 

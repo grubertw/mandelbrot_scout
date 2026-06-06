@@ -184,7 +184,7 @@ impl Scene {
             min_fixed_bits: settings.min_fixed_bits,
             max_fixed_bits: settings.max_fixed_bits,
             shift_increment: settings.shift_increment,
-            scale_factor: 1.05,
+            scale_factor: settings.scale_factor,
             width, height,
             render_res_factor: settings.render_res_factor,
             render_res_factor_during_pan: settings.render_res_factor_during_pan,
@@ -607,8 +607,8 @@ impl Scene {
                 let dbg = bytemuck::from_bytes::<DebugOut>(&data[..]).clone();
 
                 debug!("FROM CPU (Scene struct)");
-                debug!("  center = {} (f64: {} + {}i)", self.center, self.center.re.to_f64_lossy(), self.center.im.to_f64_lossy());
-                debug!("  scale  = {} (f64: {:.5e})", self.scale, self.scale.to_f64_lossy());
+                debug!("  center = {} (f64: {} + {}i) (bits: {} {})", self.center, self.center.re.to_f64_lossy(), self.center.im.to_f64_lossy(), self.center.re.mantissa.bits(), self.center.im.mantissa.bits());
+                debug!("  scale  = {} (f64: {:.5e}) (bits: {})", self.scale, self.scale.to_f64_lossy(), self.scale.mantissa.bits());
                 debug!("  width  = {}\theight = {}", self.width, self.height);
                 debug!("FROM GPU:");
                 debug!("  center = (re:{}, im:{})", dbg.center_x, dbg.center_y);
@@ -679,7 +679,11 @@ impl Scene {
     pub fn read_scout_diagnostics(&self) -> Arc<Mutex<ScoutDiagnostics>> {
         self.scout_engine.read_diagnostics()
     }
-    
+
+    pub fn set_scale_factor(&mut self, scale_factor: f64) {
+        self.scale_factor = scale_factor;
+    }
+
     pub fn set_render_res_factor(&mut self, res_factor: f64) {
         self.render_res_factor = res_factor;
         self.recalc_fractal = true;
@@ -744,19 +748,52 @@ impl Scene {
         self.update_window_title();
     }
 
-    pub fn change_scale(&mut self, increase: bool) -> String {
+    fn change_scale(&mut self, increase: bool) {
         self.scale = self.scale.scale_by_f64(self.scale_factor, increase);
         if self.scale.mantissa == BigInt::ZERO {
             panic!("Scale cannot be zero");
         }
 
         self.uniform.scale = self.scale.to_f32_lossy();
-        self.recalc_fractal = true;
         debug!("Scale changed {} (f64 {:.5e}) bits={}",
             self.scale, self.scale.to_f64_lossy(), self.scale.mantissa.bits());
+    }
+
+    fn pixel_to_complex_offset(
+        &self,
+        cursor_x: f64,
+        cursor_y: f64,
+    ) -> FixedComplex {
+        let px = cursor_x - self.width * 0.5;
+        let py = cursor_y - self.height * 0.5;
+
+        FixedComplex {
+            re: self.scale.scale_by_f64(px, true),
+            im: self.scale.scale_by_f64(-py, true),
+        }
+    }
+
+    pub fn zoom_step_toward(&mut self, cursor_pos: (f64, f64), zoom_in: bool) {
+        let offset_before =
+            self.pixel_to_complex_offset(cursor_pos.0, cursor_pos.1);
+
+        let target =
+            self.center.clone() + offset_before.clone();
+
+        self.change_scale(!zoom_in);
+
+        let offset_after =
+            self.pixel_to_complex_offset(cursor_pos.0, cursor_pos.1);
+
+        self.center = target - offset_after.clone();
+
+        debug!("Zoom Step Toward - offset_before={}, offset_after={} zoom_in={}",
+            offset_before, offset_after, zoom_in);
+        self.recalc_fractal = true;
         self.normalize_precision();
+        self.update_center_offsets();
         self.update_window_title();
-        self.scale.to_string()
+        self.take_camera_snapshot();
     }
 
     pub fn normalize_precision(&mut self) {
@@ -774,26 +811,12 @@ impl Scene {
     }
 
     pub fn rescale(&mut self, delta_shift: i32) {
-        if delta_shift > 0 {
-            let s = delta_shift as u32;
+        self.center.rescale(delta_shift);
+        self.scale.rescale(delta_shift);
 
-            self.center.re.mantissa <<= s;
-            self.center.im.mantissa <<= s;
-            self.scale.mantissa <<= s;
-
-            self.scale.shift += s;
-            self.center.re.shift += s;
-            self.center.im.shift += s;
-        } else {
-            let s = (-delta_shift) as u32;
-
-            self.center.re.mantissa >>= s;
-            self.center.im.mantissa >>= s;
-            self.scale.mantissa >>= s;
-
-            self.scale.shift -= s;
-            self.center.re.shift -= s;
-            self.center.im.shift -= s;
+        for loadout in self.loaded_orbits.iter_mut() {
+            loadout.orbit_c_ref.rescale(delta_shift);
+            loadout.center_offset.rescale(delta_shift);
         }
     }
 
@@ -817,18 +840,32 @@ impl Scene {
         self.update_window_title();
     }
 
-    pub fn change_center(&mut self, center_diff: (f64, f64)) -> String {
-        let dx = self.scale.scale_by_f64(center_diff.0, true);
-        let dy = self.scale.scale_by_f64(center_diff.1, true);
+    fn pixels_to_complex_delta(
+        &self,
+        dx_pixels: f64,
+        dy_pixels: f64,
+    ) -> FixedComplex {
+        FixedComplex {
+            re: self.scale.scale_by_f64(dx_pixels, true),
+            im: self.scale.scale_by_f64(dy_pixels, true),
+        }
+    }
 
-        self.center.re -= dx;
-        self.center.im += dy;
+    pub fn pan_pixels(&mut self, delta_pixels: (f64, f64)) -> String {
+        let delta =
+            self.pixels_to_complex_delta(
+                delta_pixels.0,
+                delta_pixels.1,
+            );
+
+        self.center.re -= delta.re;
+        self.center.im += delta.im;
 
         self.update_center_offsets();
         self.recalc_fractal = true;
         let c = format!("{}", self.center);
-        debug!("Center changed {} ----- diff {:?}",
-            c, center_diff);
+        debug!("Pan Pixels {} ----- delta_pixels {:?}",
+            c, delta_pixels);
         self.update_window_title();
         c
     }
@@ -1051,7 +1088,14 @@ impl Scene {
         // First check if ScoutEngine's context has changed. 
         if self.scout_engine.context_changed() {
             self.recalc_fractal = true;
-            let orbits = self.scout_engine.query_qualified_orbits();
+            let mut orbits = self.scout_engine.query_qualified_orbits();
+            for orb in orbits.iter_mut() {
+                if orb.c_ref.re.shift != self.center.re.shift {
+                    let delta_shift = self.center.re.shift as i32 - orb.c_ref.re.shift as i32;
+                    debug!("Rescaling qualified orbit to match viewport. delta_shift={}", delta_shift);
+                    orb.c_ref.rescale(delta_shift);
+                }
+            }
 
             // Upload qualified orbits to a Texture2D
             self.upload_orbits(&orbits);

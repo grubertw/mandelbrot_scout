@@ -115,6 +115,8 @@ pub struct Controls {
     center_y: String,
     scale: String,
 
+    scale_factor: f64,
+
     // Render resolution settings
     render_res_factor: f64,
     render_res_factor_during_pan: f64,
@@ -216,6 +218,8 @@ pub enum Message {
     PollFromScene,
     ApplyCenterScale,
     RestoreFromPng,
+
+    ScaleFactorChanged(f64),
 
     RenderResFactorChanged(f64),
     RenderResFactorDuringPanChanged(f64),
@@ -330,6 +334,7 @@ impl Controls {
             iter_range_min: 0, iter_range_max: settings.max_user_iter * 2,
             max_iterations: settings.max_user_iter,
             center_x, center_y, scale,
+            scale_factor: settings.scale_factor,
             render_res_factor: settings.render_res_factor,
             render_res_factor_during_pan: settings.render_res_factor_during_pan,
             render_sample_count: 1,
@@ -510,6 +515,10 @@ impl Controls {
                         warn!("{}", self.debug_msg);
                     }
                 }
+            }
+            Message::ScaleFactorChanged(scale_factor) => {
+                self.scale_factor = scale_factor;
+                self.scene.borrow_mut().set_scale_factor(self.scale_factor);
             }
             Message::RenderResFactorChanged(res_fac) => {
                 self.render_res_factor = res_fac;
@@ -1022,14 +1031,14 @@ impl Controls {
         column![
             container(row![
                 text("Resolution Factor")
-                    .width(Length::Fixed(140.0))
+                    .width(Length::Fixed(120.0))
                     .align_y(Alignment::Center)
                     .align_x(Alignment::Center),
                 space().width(Length::Fixed(5.0)),
                 slider(0.25..=2.0,
                     self.render_res_factor, Message::RenderResFactorChanged)
                     .step(0.05)
-                    .width(Length::Fixed(100.0)),
+                    .width(Length::Fixed(80.0)),
                 space().width(Length::Fixed(5.0)),
                 text(format!("{:<3.2}", self.render_res_factor))
                     .width(Length::Fixed(30.0))
@@ -1037,16 +1046,31 @@ impl Controls {
                 space().width(Length::Fixed(15.0)),
 
                 text("RF During Pan")
-                    .width(Length::Fixed(120.0))
+                    .width(Length::Fixed(110.0))
                     .align_y(Alignment::Center)
                     .align_x(Alignment::Center),
                 space().width(Length::Fixed(5.0)),
                 slider(0.1..=1.0,
                     self.render_res_factor_during_pan, Message::RenderResFactorDuringPanChanged)
                     .step(0.05)
-                    .width(Length::Fixed(100.0)),
+                    .width(Length::Fixed(80.0)),
                 space().width(Length::Fixed(5.0)),
                 text(format!("{:<3.2}", self.render_res_factor_during_pan))
+                    .width(Length::Fixed(30.0))
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(15.0)),
+
+                text("Scale Factor")
+                    .width(Length::Fixed(90.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(1.05..=4.0,
+                    self.scale_factor, Message::ScaleFactorChanged)
+                    .step(0.05)
+                    .width(Length::Fixed(60.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<1.2}", self.scale_factor))
                     .width(Length::Fixed(30.0))
                     .align_y(Alignment::Center),
                 ]

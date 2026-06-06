@@ -3,7 +3,7 @@ use crate::signals::{CameraSnapshot, FrameStamp};
 
 use std::sync::{Arc, Weak};
 
-use log::{warn};
+use log::{debug, warn};
 use num_complex::{Complex32};
 use parking_lot::{Mutex, RwLock};
 use crate::scout_engine::{ScoutEngineConfig};
@@ -333,9 +333,17 @@ pub struct OrbitScore {
 
 impl OrbitScore {
     pub fn new(orbit: LiveOrbit, cam: &CameraSnapshot, cfg: &ScoutEngineConfig) -> Self {
-        let orb_g = orbit.read();
+        let mut orb_g = orbit.write();
         let cam_center = cam.center();
         let cam_half_extent = cam.half_extent();
+
+        // Orbits must be rescaled with the current viewport before being compared
+        if orb_g.c_ref().re.shift != cam_center.re.shift {
+            let delta_shift = cam_center.re.shift as i32 - orb_g.c_ref().re.shift as i32;
+            debug!("Rescaling orbit {} to match viewport. delta_shift={}", orb_g.orbit_id, delta_shift);
+            orb_g.c_ref.rescale(delta_shift);
+        }
+
         let curr_max_ref_iters = cfg.max_user_iters as f64 * cfg.ref_iters_multiplier;
 
         let sample_dist_from_cam_center = complex_distance(orb_g.c_ref(), cam_center).to_f64_lossy().abs();

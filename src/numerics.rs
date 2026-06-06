@@ -17,7 +17,7 @@ pub const MAX_SAFE_DF_MAG: f64 = 1e30;
 /// shift is a u32. Math operations on this type are kept minimal,
 /// and the shift never changes. Instead, the shift is only updated
 /// on zoom operations and on consideration of the viewport scale.
-/// From the perspective of this class, shift should never be 
+/// From the perspective of this class, shift should never be
 /// modified once the object is allocated.
 #[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub struct FixedReal {
@@ -26,8 +26,8 @@ pub struct FixedReal {
 }
 
 /// A real plus an imaginary component Fixed values are put together to
-/// form a complex number. When creating a new FixedComplex, the shift 
-/// of both the real and imaginary components must be the same. 
+/// form a complex number. When creating a new FixedComplex, the shift
+/// of both the real and imaginary components must be the same.
 #[derive(Clone, Debug)]
 pub struct FixedComplex {
     pub re: FixedReal,
@@ -51,12 +51,7 @@ impl FixedReal {
     }
 
     pub fn from_f32(float: f32, shift: u32) -> Self {
-        let scaled = float * 2.0_f32.powi(shift as i32);
-
-        Self::new(
-            BigInt::from_f32(scaled.round()).unwrap(),
-            shift,
-        )
+        Self::from_f64(float as f64, shift)
     }
 
     pub fn from_f64(float: f64, shift: u32) -> Self {
@@ -141,6 +136,21 @@ impl FixedReal {
 
     pub fn to_storage_string(&self) -> String {
         format!("{}@{}", self.mantissa, self.shift)
+    }
+
+    pub fn rescale(&mut self, delta_shift: i32) {
+        if delta_shift > 0 {
+            let s = delta_shift as u32;
+
+            self.mantissa <<= s;
+            self.shift += s;
+        }
+        else {
+            let s = (-delta_shift) as u32;
+
+            self.mantissa >>= s;
+            self.shift -= s;
+        }
     }
 }
 
@@ -307,6 +317,11 @@ impl FixedComplex {
     pub fn to_ui_string(&self, digits: usize) -> String {
         format!("({:.*e} + {:.*e}i)",
             digits, self.re.to_f64_lossy(), digits, self.im.to_f64_lossy())
+    }
+
+    pub fn rescale(&mut self, delta_shift: i32) {
+        self.re.rescale(delta_shift);
+        self.im.rescale(delta_shift);
     }
 }
 

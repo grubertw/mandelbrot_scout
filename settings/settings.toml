@@ -70,6 +70,8 @@ max_fixed_bits = 80
 # Amount to increase or descrease the size of the shift when a rescale operation
 # is performed - i.e. during UI zoom operations.
 shift_increment = 16
+# The rate of scale/zoom operations
+scale_factor = 1.05
 # When value is 1.0, this is a direct pixel-to-pixel mapping between
 # the render_texture and display
 # Descreasing the value resuces it's 'quality', meaning that the texture

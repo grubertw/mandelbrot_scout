@@ -38,6 +38,7 @@ pub struct Settings {
     pub min_fixed_bits: u32,
     pub max_fixed_bits: u32,
     pub shift_increment: u32,
+    pub scale_factor: f64,
     pub render_res_factor: f64,
     pub render_res_factor_during_pan: f64,
     pub default_export_directory: String,
@@ -172,6 +173,7 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("min_fixed_bits", 56)?
         .set_default("max_fixed_bits", 80)?
         .set_default("shift_increment", 16)?
+        .set_default("scale_factor", 1.05)?
         .set_default("render_res_factor", 1.0)?
         .set_default("render_res_factor_during_pan", 0.85)?
         .set_default("default_export_directory", "/Pictures")?

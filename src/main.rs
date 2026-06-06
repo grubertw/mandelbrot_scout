@@ -23,7 +23,7 @@ use iced_wgpu::graphics::{Viewport, Shell};
 use iced_wgpu::{Engine, Renderer, wgpu};
 use iced_winit::Clipboard;
 use iced_winit::conversion;
-use iced_winit::core::mouse;
+use iced_winit::core::{mouse};
 use iced_winit::core::renderer;
 use iced_winit::core::window;
 use iced_winit::core::{Event, Font, Pixels, Size, Theme};
@@ -49,8 +49,100 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::process;
 use std::time::Instant;
+use iced_winit::winit::dpi::PhysicalPosition;
+use num_traits::Signed;
 
 pub const TITLE: &str = "Mandelbrot Scout";
+pub const CLICK_THRESHOLD: f64 = 5.0;
+
+#[derive(Debug, Clone)]
+pub enum NavigationEvent {
+    Zoom {
+        factor: f64,
+        cursor_pos: PhysicalPosition<f64>,
+    },
+
+    ZoomStep {
+        zoom_in: bool,
+        cursor_pos: PhysicalPosition<f64>,
+    },
+
+    Pan {
+        delta_pixels: (f64, f64),
+    },
+
+    PanFinished,
+}
+
+struct NavigationState {
+    cursor_pos: PhysicalPosition<f64>,
+    fractal_can_receive_input: bool,
+
+    left_pressed: bool,
+    right_pressed: bool,
+
+    press_position: Option<PhysicalPosition<f64>>,
+    drag_start: Option<PhysicalPosition<f64>>,
+    scene: Rc<RefCell<Scene>>,
+}
+
+impl NavigationState {
+    fn new(scene: Rc<RefCell<Scene>>) -> Self {
+        NavigationState {
+            cursor_pos: PhysicalPosition::new(0.0, 0.0),
+            fractal_can_receive_input: false,
+            left_pressed: false,
+            right_pressed: false,
+            press_position: None,
+            drag_start: None,
+            scene,
+        }
+    }
+
+    pub fn process_event(
+        &mut self,
+        event: &NavigationEvent,
+    ) {
+        debug!("process NavigationEvent: {:?}", event);
+        match event {
+            NavigationEvent::Zoom {
+                factor,
+                cursor_pos,
+            } => {
+                self.scene.borrow_mut()
+                    .zoom_step_toward((cursor_pos.x, cursor_pos.y), factor.is_negative());
+            }
+
+            NavigationEvent::ZoomStep {
+                zoom_in,
+                cursor_pos,
+            } => {
+                self.scene.borrow_mut()
+                    .zoom_step_toward((cursor_pos.x, cursor_pos.y), *zoom_in);
+            }
+
+            NavigationEvent::Pan {
+                delta_pixels,
+            } => {
+                self.scene.borrow_mut()
+                    .pan_pixels(*delta_pixels);
+            }
+
+            NavigationEvent::PanFinished => {
+                self.scene.borrow_mut().recalculate();
+                self.scene.borrow_mut().take_camera_snapshot();
+            }
+        }
+    }
+
+    pub fn is_pressed(&self) -> bool {
+        self.press_position.is_some()
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.drag_start.is_some()
+    }
+}
 
 #[allow(clippy::large_enum_variant)]
 enum Runner {
@@ -71,11 +163,8 @@ enum Runner {
         viewport: Viewport,
         modifiers: ModifiersState,
         resized: bool,
-        // For tracking mouse movment and shifting (offsetting) the fractal
-        prev_pos: (f64, f64),
-        mouse_lb_state: ElementState,
-        mouse_rb_state: ElementState,
-        is_panning: bool,
+        // For tracking mouse/touch/trackpad interaction to abstract platform-specific behavior
+        navigation_state: NavigationState,
     },
 }
 
@@ -174,17 +263,13 @@ impl ApplicationHandler for Runner {
 
             // Change this to render continuously
             event_loop.set_control_flow(ControlFlow::Wait);
-            
-            let prev_pos = (-1.0, -1.0);
-            let mouse_lb_state = ElementState::Released;
-            let mouse_rb_state = ElementState::Released;
 
             info!("ApplicationHandler Runner Initialized");
             *self = Self::Ready {window, surface, format, renderer,
                 scene: Rc::clone(&scene), controls, events: Vec::new(), cursor: mouse::Cursor::Unavailable,
                 cache: user_interface::Cache::new(), modifiers: ModifiersState::default(),
-                clipboard, viewport, resized: false, prev_pos, mouse_lb_state, mouse_rb_state,
-                is_panning: false};
+                clipboard, viewport, resized: false,
+                navigation_state: NavigationState::new(Rc::clone(&scene))};
         }
     }
 
@@ -192,13 +277,13 @@ impl ApplicationHandler for Runner {
             _window_id: WindowId, event: WindowEvent) {
         let Self::Ready {window, surface, format, renderer, scene,
             controls, events, viewport, cursor, cache, modifiers, clipboard, resized,
-            mouse_lb_state, mouse_rb_state, prev_pos,
-            is_panning} = self
+            navigation_state} = self
         else {
             return;
         };
         //trace!("Runner.window_event - {:?} {:?}", _window_id, event);
-        
+        let mut nav_events: Vec<NavigationEvent> = Vec::new();
+
         match event {
             WindowEvent::RedrawRequested => {
                 if *resized {
@@ -245,7 +330,7 @@ impl ApplicationHandler for Runner {
                             }
 
                             let size = window.inner_size();
-                            let (w, h) = if *is_panning {
+                            let (w, h) = if navigation_state.is_dragging() {
                                 (size.width as f64 * s.render_res_factor_during_pan(),
                                  size.height as f64 * s.render_res_factor_during_pan())
                             }
@@ -284,6 +369,9 @@ impl ApplicationHandler for Runner {
                             ..
                         } = state
                         {
+                            navigation_state.fractal_can_receive_input
+                                = mouse_interaction == mouse::Interaction::None;
+
                             // Update the mouse cursor
                             if let Some(icon) =
                                 conversion::mouse_interaction(
@@ -333,56 +421,75 @@ impl ApplicationHandler for Runner {
                     viewport.scale_factor(),
                 ));
 
-                match mouse_rb_state {
-                    ElementState::Pressed => {
-                        *is_panning = true;
-                        if prev_pos.0 > 0.0 {
-                            let diff = ((position.x - prev_pos.0) as f64,
-                                        (position.y - prev_pos.1) as f64);
+                if navigation_state.left_pressed
+                    && position != navigation_state.press_position.unwrap()
+                    && navigation_state.drag_start.is_none() {
+                    navigation_state.drag_start = Some(position);
+                }
 
-                            debug!("CursorMoved & ElementState::Pressed prev_pos={:?} new_pos={:?} diff={:?}", 
-                                prev_pos, position, diff);
+                navigation_state.cursor_pos = position;
 
-                            scene.borrow_mut().change_center(diff);
-                        } else {
-                            scene.borrow_mut().recalculate();
-                            debug!("CursorMoved & ElementState::Pressed starting pos={:?}", position);
+                if let Some(previous) = navigation_state.drag_start {
+                    let dx = position.x - previous.x;
+                    let dy = position.y - previous.y;
+
+                    navigation_state.drag_start = Some(position);
+
+                    nav_events.push(
+                        NavigationEvent::Pan {
+                            delta_pixels: (dx, dy),
                         }
-
-                        prev_pos.0 = position.x;
-                        prev_pos.1 = position.y;
-                        window.request_redraw();
-                    }
-                    ElementState::Released => {
-                        if prev_pos.0 > 0.0 {
-                            *is_panning = false;
-                            scene.borrow_mut().recalculate();
-                            scene.borrow_mut().take_camera_snapshot();
-                            window.request_redraw();
-                        }
-
-                        *prev_pos = (-1.0, -1.0);
-                    }
+                    );
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if let MouseScrollDelta::LineDelta(_, h) = delta {
-                    let new_scale = scene.borrow_mut().change_scale(if h > 0.0 {true} else {false});
-                    scene.borrow_mut().take_camera_snapshot();
-
-                    debug!("MouseWheel & MouseScrollDelta::LineDelta ---> h={} scale={}", 
-                        h, new_scale);
+                    if navigation_state.fractal_can_receive_input {
+                        nav_events.push(NavigationEvent::Zoom {
+                            factor: h as f64,
+                            cursor_pos: navigation_state.cursor_pos,
+                        });
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, ..} => {
-                match button {
-                    MouseButton::Left => {
-                        *mouse_lb_state = state;
+                if navigation_state.fractal_can_receive_input {
+                    match state {
+                        ElementState::Pressed => {
+                            match button {
+                                MouseButton::Left => {
+                                    navigation_state.left_pressed = true;
+                                    navigation_state.press_position = Some(navigation_state.cursor_pos);
+                                }
+                                MouseButton::Right => {
+                                    navigation_state.right_pressed = true;
+                                    navigation_state.press_position = Some(navigation_state.cursor_pos);
+                                }
+                                _ => {}
+                            }
+                        }
+                        ElementState::Released => {
+                            if navigation_state.is_pressed() {
+                                if !navigation_state.is_dragging() && navigation_state.left_pressed {
+                                    nav_events.push(NavigationEvent::ZoomStep {
+                                        zoom_in: true,
+                                        cursor_pos: navigation_state.cursor_pos,
+                                    });
+                                } else if !navigation_state.is_dragging() && navigation_state.right_pressed {
+                                    nav_events.push(NavigationEvent::ZoomStep {
+                                        zoom_in: false,
+                                        cursor_pos: navigation_state.cursor_pos,
+                                    });
+                                } else if navigation_state.left_pressed {
+                                    nav_events.push(NavigationEvent::PanFinished)
+                                }
+                                navigation_state.press_position = None;
+                                navigation_state.left_pressed = false;
+                                navigation_state.right_pressed = false;
+                                navigation_state.drag_start = None;
+                            }
+                        }
                     }
-                    MouseButton::Right => {
-                        *mouse_rb_state = state;
-                    }
-                    _ => {}
                 }
             }
             WindowEvent::KeyboardInput { device_id: _, ref event, .. } => {
@@ -390,23 +497,30 @@ impl ApplicationHandler for Runner {
                 let PhysicalKey::Code (c) = physical_key else {
                     return;
                 };
-                let new_scale: String;
                 
                 match c {
                     KeyCode::ArrowUp => {
-                        new_scale = scene.borrow_mut().change_scale(true);
-                        scene.borrow_mut().take_camera_snapshot();
+                        nav_events.push(NavigationEvent::Zoom {
+                            factor: 1.0,
+                            cursor_pos: navigation_state.cursor_pos,
+                        });
                     }
                     KeyCode::ArrowDown => {
-                        new_scale = scene.borrow_mut().change_scale(false);
-                        scene.borrow_mut().take_camera_snapshot();
+                        nav_events.push(NavigationEvent::Zoom {
+                            factor: -1.0,
+                            cursor_pos: navigation_state.cursor_pos,
+                        });
                     }
-                    _ => {
-                        new_scale = "".to_string();
-                    }
+                    _ => {}
                 }
-
-                debug!("Arrow Key Pressed! new scale={}", new_scale);
+            }
+            WindowEvent::PinchGesture { device_id: _, delta, .. } => {
+                nav_events.push(
+                    NavigationEvent::Zoom {
+                        factor: -delta,
+                        cursor_pos: navigation_state.cursor_pos,
+                    }
+                );
             }
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 *modifiers = new_modifiers.state();
@@ -418,6 +532,11 @@ impl ApplicationHandler for Runner {
                 event_loop.exit();
             }
             _ => {}
+        }
+
+        // Handle (Application Generated) navigation events
+        for nav_event in nav_events {
+            navigation_state.process_event(&nav_event);
         }
 
         // Map window event to iced event
