@@ -102,11 +102,8 @@ pub struct GridFeedbackOut {
     pub best_pixel_x:           i32, // Pixel location of deepest iteration in the sample grid
     pub best_pixel_y:           i32,
     pub best_pixel_flags:       u32, // Iteration feedback flags for the location
-    pub best_period:            u32,
-    pub best_contraction:       i32,
     pub use_count:              u32,
     pub max_iter_count:         u32,
-    pub score:                  i32,
 }
 
 pub const ORBIT_ESCAPED: u32            = 1 << 0;
@@ -167,7 +164,6 @@ pub struct DebugOut {
 pub struct GpuRefOrbitLocation {
     pub c_ref_re:           f32,
     pub c_ref_im:           f32,
-    pub r_valid:            f32,
     pub max_ref_iters:      u32,
     pub center_offset_re:   f32,
     pub center_offset_im:   f32,

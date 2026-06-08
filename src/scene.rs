@@ -407,21 +407,16 @@ impl Scene {
 
                 let sample_iters = sample.iter();
                 let escaped = sample.escaped();
-                let period = sample.best_period;
-                let contraction = sample.best_contraction as f32 / 256.0;
-                let score = sample.score as f32 / self.uniform.grid_feedback_scale;
-
 
                 trace_str.push_str(
                     format!("[{:<3}, {:<3}]\tc={} (f64: {} + {}i) depth={:<3} escaped={} perturbed={} \
-                    max_iters_reached={} period={} contraction={} score={}\n",
+                    max_iters_reached={}\n",
                         sample.best_pixel_x,
                         sample.best_pixel_y,
                         best_sample, best_sample.re.to_f64_lossy(), best_sample.im.to_f64_lossy(),
                         sample_iters, escaped,
                         sample.perturbed(),
                         sample.max_iters_reached(),
-                        period, contraction, score
                 ).as_str());
 
 
@@ -434,7 +429,6 @@ impl Scene {
                     iters_reached: sample_iters,
                     escaped,
                     max_user_iters: self.uniform.max_iter,
-                    period, contraction, score
                 })
             })
             .collect();
@@ -1359,7 +1353,6 @@ fn build_gpu_orbit_loadout_from_qualified_orbits(
                 gpu_orb_loc_info: GpuRefOrbitLocation {
                     c_ref_re: orb.c_ref_32.re,
                     c_ref_im: orb.c_ref_32.im,
-                    r_valid: orb.r_valid,
                     max_ref_iters: orb.orbit.len() as u32,
                     center_offset_re: orbit_offset_from_center.re().to_f32_lossy(),
                     center_offset_im: orbit_offset_from_center.im().to_f32_lossy(),

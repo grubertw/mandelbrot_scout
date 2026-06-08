@@ -28,21 +28,15 @@ struct Uniforms {
 @group(0) @binding(1)
 var calc_tex : texture_2d<f32>;
 
-@group(0) @binding(2)
-var refine_tex : texture_2d<f32>;
-
 // Aggregated screen-grid output (atomics)
 struct GridFeedback {
     best_pixel_x:           atomic<i32>,
     best_pixel_y:           atomic<i32>,
     best_pixel_flags:       atomic<u32>,
-    best_period:            atomic<u32>,
-    best_contraction:       atomic<i32>,
     use_count:              atomic<u32>,
     max_iter_count:         atomic<u32>,
-    score:                  atomic<i32>
 };
-@group(0) @binding(3)
+@group(0) @binding(2)
 var<storage, read_write> grid_feedback : array<GridFeedback>;
 
 struct OrbitFeedback {
@@ -53,7 +47,7 @@ struct OrbitFeedback {
     perurb_error_count:         atomic<u32>,
     max_iter_reached_count:     atomic<u32>,
 };
-@group(0) @binding(4)
+@group(0) @binding(3)
 var<storage, read_write> orbit_feedback : array<OrbitFeedback>;
 
 const ESCAPED_BIT: u32              = 1u << 0u;
@@ -61,9 +55,6 @@ const PERTURB_BIT: u32              = 1u << 1u;
 const PERTURB_ERR_BIT: u32          = 1u << 2u;
 const MAX_ITER_BIT: u32             = 1u << 3u;
 const ORBIT_SHIFT: u32              = 20u;
-
-const MAX_U32: u32 = 0xFFFFFFFFu;
-const MAX_P: u32 = 32u;
 
 // ---------------------------------------------
 // Compute entry point
@@ -81,11 +72,6 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let fi = textureLoad(calc_tex, pix, 0).x;
     let t = fi / f32(uni.max_iter);
     let iter = u32(floor(fi));
-    
-    let max_glitch_ratio = textureLoad(refine_tex, pix, 0).x;
-    var best_period = u32(textureLoad(refine_tex, pix, 0).y);
-    let best_period_error = textureLoad(refine_tex, pix, 0).z;
-    var contraction = textureLoad(refine_tex, pix, 0).w;
 
     let escaped = (flags & ESCAPED_BIT) != 0u;
     let used_perturb = (flags & PERTURB_BIT) != 0u;
@@ -100,28 +86,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (grid_idx >= arrayLength(&grid_feedback)) {
         return;
     }
-
-    let feedback_scale = uni.grid_feedback_scale;
-    let has_period = best_period < MAX_P;
-    let period_score = select(0.0, 1.0 - f32(best_period) / f32(MAX_P), has_period);
-    contraction = clamp(contraction, -100.0, 20.0);
-
-    var score: i32 = 0;
-    score  = safe_i32(t * feedback_scale * 0.5);
-    score += safe_i32(period_score * feedback_scale * 2.0);
-    score -= safe_i32(best_period_error * feedback_scale * 8.0);
-    score -= safe_i32(contraction * feedback_scale * 0.1);
-    score -= safe_i32(max_glitch_ratio * feedback_scale * 2.0);
     
-    let prev_max_score = atomicMax(&grid_feedback[grid_idx].score, score);
-    atomicMax(&grid_feedback[grid_idx].max_iter_count, iter);
-    atomicMin(&grid_feedback[grid_idx].best_period, best_period);
-    atomicMin(&grid_feedback[grid_idx].best_contraction,
-        i32(contraction * 256.0));
+    let prev_max_iters = atomicMax(&grid_feedback[grid_idx].max_iter_count, iter);
 
     // If we won the max race, build complex 'c' for the pixel, from
     // the scene uniforms (i.e. same used in fragment shader).
-    if (score > prev_max_score) {
+    if (iter > prev_max_iters) {
         atomicStore(&grid_feedback[grid_idx].best_pixel_x, pix.x);
         atomicStore(&grid_feedback[grid_idx].best_pixel_y, pix.y);
         atomicStore(&grid_feedback[grid_idx].best_pixel_flags, flags);

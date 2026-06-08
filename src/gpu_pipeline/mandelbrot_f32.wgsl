@@ -64,9 +64,6 @@ struct Uniforms {
 @group(0) @binding(2)
 var calc_out_tex: texture_storage_2d<rgba32float, write>;
 
-@group(0) @binding(3)
-var refine_out_tex: texture_storage_2d<rgba32float, write>;
-
 fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> vec2f {
     let rw = f32(uni.render_width);
     let rh = f32(uni.render_height);
@@ -89,18 +86,7 @@ fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> vec2f {
     return vec2f(uni.center_x, uni.center_y) + offset;
 }
 
-struct FractalResult {
-    iters: f32,
-    distance: f32,
-    stripe_avg: f32,
-    flags: u32,
-    max_glitch_ratio: f32,
-    best_period: u32,
-    best_period_error: f32,
-    best_contraction: f32,
-};
-
-fn mandelbrot(c: vec2f) -> FractalResult {
+fn mandelbrot(c: vec2f) -> vec4f {
     var z = vec2f(0.0, 0.0);
 
     var i: u32 = 0u;
@@ -109,16 +95,11 @@ fn mandelbrot(c: vec2f) -> FractalResult {
     // Extra tracking for DE/surface normals
     var escape_mag_z: f32 = 0.0;
     var dz = vec2f(0.0, 0.0);
-    var log_dzz: f32 = 0.0;
     var extra: u32 = 0u; // Iterate a few past bailout for better DE values.
     // For stripe-averaging
     var stripe_sum: f32 = 0.0;
     var stripe_count: f32 = 0.0;
     var flags: u32 = 0u;
-    var best_period: u32 = MAX_P;
-    var best_period_error: f32 = 1e30;
-    var best_contraction: f32 = 1e30;
-    var z_history: array<vec2f, MAX_P>;
 
     for (i = 0u; i < max_i; i = i + 1u) {
         if ((uni.render_flags & USE_DE) != 0) {
@@ -128,7 +109,6 @@ fn mandelbrot(c: vec2f) -> FractalResult {
 
         // update z
         z = c32_mul(z, z) + c;
-        z_history[i % MAX_P] = z;
 
         if ((uni.render_flags & USE_STRIPES) != 0) {
             // for stripe-averaging
@@ -152,21 +132,6 @@ fn mandelbrot(c: vec2f) -> FractalResult {
 
         if ((flags & ESCAPED_BIT) == 0) {
             escape_mag_z = mag_z;
-            log_dzz += log2(2.0 * mag_z + 1e-30);
-        }
-
-        if (i > MAX_P) {
-            for (var p: u32 = 1u; p < MAX_P; p = p + 1u) {
-                let prev = z_history[(i - p) % MAX_P];
-                let err = length(z - prev);
-                let rel_err = err / (length(z) + 1e-6);
-
-                if (rel_err < best_period_error && rel_err < 1e-2) {
-                    best_period_error = err;
-                    best_period = p;
-                    best_contraction = log_dzz;
-                }
-            }
         }
     }
 
@@ -196,16 +161,12 @@ fn mandelbrot(c: vec2f) -> FractalResult {
         stripe_avg = stripe_sum / stripe_count;
     }
 
-    return FractalResult(
-        fi, distance, stripe_avg, flags,
-        0.0, best_period, best_period_error, best_contraction
-    );
+    return vec4(fi, distance, stripe_avg, f32(flags));
 }
 
 struct GpuRefOrbitLocation {
     c_ref_re:           f32,
     c_ref_im:           f32,
-    r_valid:            f32,
     max_ref_iters:      u32,
     center_offset_re:   f32,
     center_offset_im:   f32,
@@ -223,14 +184,14 @@ struct GpuRefOrbitLocation {
 // Now, delta_c can be computed 'safely', without the catastrophic cancelation that
 // happens if the GPU were to attempt calculating the delta between ref orbit and
 // screen center on it's own.
-@group(0) @binding(4)
+@group(0) @binding(3)
 var<storage, read> orbit_location : array<GpuRefOrbitLocation>;
 
 // Ranked ReferenceOrbits, in ComplexDf format
-@group(0) @binding(5)
+@group(0) @binding(4)
 var<storage, read> rank_one_orbit: array<vec2f>;
 
-@group(0) @binding(6)
+@group(0) @binding(5)
 var<storage, read> rank_two_orbit: array<vec2f>;
 
 fn wrap(coord: vec2i, size: vec2i) -> vec2i {
@@ -300,7 +261,7 @@ fn load_ref_orbit(orbit_idx: u32, it: u32) -> vec2f {
 // -------------------------------
 // Mandelbrot Perturbance
 // -------------------------------
-fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
+fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
     var dz = vec2f(0.0, 0.0);
     var i: u32 = 0u;
     var ref_i: u32 = 0u;
@@ -312,7 +273,6 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
     // is taken after Z + dz, but of the 'previous iteration'
     // similar to how it is in the absolute recurrance.
     var dzdc = vec2f(0.0, 0.0);
-    var log_dzz: f32 = 0.0;
     var z = vec2f(0.0, 0.0);
     var escape_mag_z: f32 = 0.0;
     var extra: u32 = 0u; // Iterate a few past bailout for better DE values.
@@ -320,11 +280,6 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
     var stripe_sum: f32 = 0.0;
     var stripe_count: f32 = 0.0;
     var flags: u32 = PERTURB_BIT;
-    var max_glitch_ratio: f32 = 0.0;
-    var best_period: u32 = MAX_P;
-    var best_period_error: f32 = 1e30;
-    var best_contraction: f32 = 1e30;
-    var z_history: array<vec2f, MAX_P>;
 
     for (i = 0u; i < max_i; i = i + 1u) {
         // Load reference orbit Z_n
@@ -345,7 +300,6 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
         // Reconstructed z for escape testing
         Z = load_ref_orbit(0u, ref_i);
         z = Z + dz;
-        z_history[i % MAX_P] = z;
 
         if ((uni.render_flags & USE_STRIPES) != 0) {
             // for stripe-averaging
@@ -369,7 +323,6 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
 
         if ((flags & ESCAPED_BIT) == 0) {
             escape_mag_z = mag_z;
-            log_dzz += log2(2.0 * mag_z + 1e-30);
         }
 
         let mag_dz = dz.x * dz.x + dz.y * dz.y;
@@ -383,21 +336,6 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
             dz = z;
             ref_i = 0u;
             flags |= PERTURB_ERR_BIT;
-        }
-
-        // Period detection logic
-        if (i > MAX_P) {
-            for (var p: u32 = 1u; p < MAX_P; p = p + 1u) {
-                let prev = z_history[(i - p) % MAX_P];
-                let err = length(z - prev);
-                let rel_err = err / (length(z) + 1e-6);
-
-                if (rel_err < best_period_error && rel_err < 1e-2) {
-                    best_period_error = err;
-                    best_period = p;
-                    best_contraction = log_dzz;
-                }
-            }
         }
     }
 
@@ -428,10 +366,7 @@ fn mandelbrot_perturb(delta_c: vec2f) -> FractalResult {
         stripe_avg = stripe_sum / stripe_count;
     }
 
-    return FractalResult(
-        fi, distance, stripe_avg, flags, max_glitch_ratio,
-        best_period, best_period_error, best_contraction
-    );
+    return vec4f(fi, distance, stripe_avg, f32(flags));
 }
 
 // The texture sampler in display.wgsl likes to have a few more pixels to interplolate
@@ -460,13 +395,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     var accum_stripe = 0.0;
     var accum_flags = 0u;
 
-    var max_glitch_ratio: f32 = 0.0;
-    var best_period = MAX_P;
-    var best_period_error: f32 = 1e30;
-    var best_contraction: f32 = 1e30;
-
     for (sample_idx = 0; sample_idx < uni.sample_count; sample_idx++) {
-        var results = FractalResult(0.0, 0.0, 0.0, 0u, 0.0, 0u, 0.0, 0.0);
+        var results = vec4f(0.0, 0.0, 0.0, 0.0);
         let jitter = get_jitter(pix, sample_idx);
 
         // Check if there is a (qualified) reference orbit available and,
@@ -483,17 +413,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
             c_for_log = c;
         }
 
-        max_iters = max(results.iters, max_iters);
-        min_iters = min(results.iters, min_iters);
+        max_iters = max(results.x, max_iters);
+        min_iters = min(results.x, min_iters);
      
-        accum_dist += results.distance;
-        accum_stripe += results.stripe_avg;
-        accum_flags |= results.flags;
-
-        max_glitch_ratio = max(results.max_glitch_ratio, max_glitch_ratio);
-        best_period = min(results.best_period, best_period);
-        best_period_error = min(results.best_period_error, best_period_error);
-        best_contraction = min(results.best_contraction, best_contraction);
+        accum_dist += results.y;
+        accum_stripe += results.z;
+        accum_flags |= u32(results.w);
     }
 
     // Average
@@ -504,9 +429,6 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     textureStore(calc_out_tex, pix,
         vec4f(accum_iters, accum_dist, accum_stripe, f32(accum_flags)));
-
-    textureStore(refine_out_tex, pix,
-        vec4f(max_glitch_ratio, f32(best_period), best_period_error, best_contraction));
 
     // -- DEBUG --
     if (   pix.x == i32(f32(uni.render_width) * 0.5)

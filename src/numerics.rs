@@ -114,6 +114,13 @@ impl FixedReal {
         (numerator / 2.0_f64.powi(shift as i32)) as f32
     }
 
+    pub fn square_ref(x: &Self) -> Self {
+        Self::new(
+            (&x.mantissa * &x.mantissa) >> x.shift,
+            x.shift
+        )
+    }
+
     pub fn scale_by_f64(&self, factor: f64, up: bool) -> Self {
         let rhs = FixedReal::from_f64(factor, self.shift);
         if up {self.clone() * rhs} else {self.clone() / rhs}
@@ -184,10 +191,27 @@ impl Add for FixedReal {
     }
 }
 
+impl<'a, 'b> Add<&'b FixedReal> for &'a FixedReal {
+    type Output = FixedReal;
+    fn add(self, rhs: &'b FixedReal) -> FixedReal {
+        FixedReal::new(
+            &self.mantissa + &rhs.mantissa,
+            self.shift,
+        )
+    }
+}
+
 impl AddAssign for FixedReal {
     fn add_assign(&mut self, rhs: Self) {
         debug_assert_eq!(self.shift, rhs.shift);
         self.mantissa += rhs.mantissa;
+    }
+}
+
+impl AddAssign<&FixedReal> for FixedReal {
+    fn add_assign(&mut self, rhs: &FixedReal) {
+        debug_assert_eq!(self.shift, rhs.shift);
+        self.mantissa += &rhs.mantissa;
     }
 }
 
@@ -200,10 +224,27 @@ impl Sub for FixedReal {
     }
 }
 
+impl<'a, 'b> Sub<&'b FixedReal> for &'a FixedReal {
+    type Output = FixedReal;
+    fn sub(self, rhs: &'b FixedReal) -> FixedReal {
+        FixedReal::new(
+            &self.mantissa - &rhs.mantissa,
+            self.shift,
+        )
+    }
+}
+
 impl SubAssign for FixedReal {
     fn sub_assign(&mut self, rhs: Self) {
         debug_assert_eq!(self.shift, rhs.shift);
         self.mantissa -= rhs.mantissa;
+    }
+}
+
+impl SubAssign<&FixedReal> for FixedReal {
+    fn sub_assign(&mut self, rhs: &FixedReal) {
+        debug_assert_eq!(self.shift, rhs.shift);
+        self.mantissa -= &rhs.mantissa;
     }
 }
 
@@ -222,10 +263,28 @@ impl Mul for FixedReal {
     }
 }
 
+impl<'a, 'b> Mul<&'b FixedReal> for &'a FixedReal {
+    type Output = FixedReal;
+    fn mul(self, rhs: &'b FixedReal) -> FixedReal {
+        FixedReal::new(
+            (&self.mantissa * &rhs.mantissa) >> self.shift,
+            self.shift,
+        )
+    }
+}
+
 impl MulAssign for FixedReal {
     fn mul_assign(&mut self, rhs: Self) {
         debug_assert_eq!(self.shift, rhs.shift);
         self.mantissa *= rhs.mantissa;
+        self.mantissa >>= self.shift
+    }
+}
+
+impl MulAssign<&FixedReal> for FixedReal {
+    fn mul_assign(&mut self, rhs: &FixedReal) {
+        debug_assert_eq!(&self.shift, &rhs.shift);
+        self.mantissa *= &rhs.mantissa;
         self.mantissa >>= self.shift
     }
 }
@@ -245,11 +304,29 @@ impl Div for FixedReal {
     }
 }
 
+impl<'a, 'b> Div<&'b FixedReal> for &'a FixedReal {
+    type Output = FixedReal;
+    fn div(self, rhs: &'b FixedReal) -> FixedReal {
+        FixedReal::new(
+            (&self.mantissa << self.shift) / &rhs.mantissa,
+            self.shift,
+        )
+    }
+}
+
 impl DivAssign for FixedReal {
     fn div_assign(&mut self, rhs: Self) {
         debug_assert_eq!(self.shift, rhs.shift);
         self.mantissa <<= self.shift;
         self.mantissa /= rhs.mantissa;
+    }
+}
+
+impl DivAssign<&FixedReal> for FixedReal {
+    fn div_assign(&mut self, rhs: &FixedReal) {
+        debug_assert_eq!(&self.shift, &rhs.shift);
+        self.mantissa <<= self.shift;
+        self.mantissa /= &rhs.mantissa;
     }
 }
 
@@ -283,12 +360,9 @@ impl FixedComplex {
     }
 
     pub fn square(&self) -> Self {
-        let a = self.re.clone();
-        let b = self.im.clone();
-
-        let aa = a.clone() * a.clone();
-        let bb = b.clone() * b.clone();
-        let ab = a * b;
+        let aa = FixedReal::square_ref(&self.re);
+        let bb = FixedReal::square_ref(&self.im);
+        let ab = &self.re * &self.im;
 
         Self::new(
             aa - bb,
@@ -297,8 +371,10 @@ impl FixedComplex {
     }
 
     pub fn norm_sqr(&self) -> FixedReal {
-        self.re.clone() * self.re.clone()
-            + self.im.clone() * self.im.clone()
+        let re2 = FixedReal::square_ref(&self.re);
+        let im2 = FixedReal::square_ref(&self.im);
+
+        re2 + im2
     }
 
     pub fn norm(&self) -> FixedReal {
@@ -338,10 +414,38 @@ impl Add for FixedComplex {
     }
 }
 
+impl<'a, 'b> Add<&'b FixedComplex> for &'a FixedComplex {
+    type Output = FixedComplex;
+    fn add(self, rhs: &'b FixedComplex) -> FixedComplex {
+        FixedComplex::new(
+            &self.re + &rhs.re,
+            &self.im + &rhs.im
+        )
+    }
+}
+
+impl AddAssign<&FixedComplex> for FixedComplex {
+    fn add_assign(&mut self, rhs: &FixedComplex) {
+        debug_assert_eq!(&self.re.shift, &rhs.re.shift);
+        self.re.mantissa += &rhs.re.mantissa;
+        self.im.mantissa += &rhs.im.mantissa;
+    }
+}
+
 impl Sub for FixedComplex {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
         Self::new(self.re - rhs.re, self.im - rhs.im)
+    }
+}
+
+impl<'a, 'b> Sub<&'b FixedComplex> for &'a FixedComplex {
+    type Output = FixedComplex;
+    fn sub(self, rhs: &'b FixedComplex) -> FixedComplex {
+        FixedComplex::new(
+            &self.re - &rhs.re,
+            &self.im - &rhs.im
+        )
     }
 }
 
@@ -354,6 +458,15 @@ impl Mul for FixedComplex {
     }
 }
 
+impl<'a, 'b> Mul<&'b FixedComplex> for &'a FixedComplex {
+    type Output = FixedComplex;
+    fn mul(self, rhs: &'b FixedComplex) -> FixedComplex {
+        let re = &self.re * &rhs.re - &self.im * &rhs.im;
+        let im = &self.im * &rhs.re + &self.re * &rhs.im;
+        FixedComplex::new(re, im)
+    }
+}
+
 impl Div for FixedComplex {
     type Output = Self;
     fn div(self, rhs: Self) -> Self {
@@ -361,6 +474,17 @@ impl Div for FixedComplex {
         let re = self.re.clone() * self.re.clone() + rhs.im.clone() * rhs.im.clone();
         let im = self.im.clone() * rhs.re.clone() - self.re.clone() * rhs.im.clone();
         Self::new(re / norm_sqr.clone(), im / norm_sqr)
+    }
+}
+
+impl<'a, 'b> Div<&'b FixedComplex> for &'a FixedComplex {
+    type Output = FixedComplex;
+    fn div(self, rhs: &'b FixedComplex) -> FixedComplex {
+        let norm_sqr = rhs.norm_sqr();
+        let re = &self.re * &self.re + &rhs.im * &rhs.im;
+        let im = &self.im * &rhs.re - &self.re * &rhs.im;
+
+        FixedComplex::new(re / norm_sqr.clone(), im / norm_sqr)
     }
 }
 

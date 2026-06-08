@@ -60,39 +60,13 @@ impl SampleScore {
         let dist = 1.0 - (sample_dist_from_cam_center / cam_half_extent.to_f64_lossy())
             .clamp(0.0, 1.0);
         let escape_penalty = if sample.escaped {1.0} else {0.0};
-
-        let gpu_score = sample.score as f64;
-
-        // normalize if needed
-        let gpu_score = gpu_score.clamp(-10.0, 10.0);
-
+        
         let total_score =
-            gpu_score * 0.5 +     // weak influence
-                depth * 3.0 +         // still important
-                dist * 0.2 +          // mild bias
-                SampleScore::contraction_bias(&sample) +
-                SampleScore::interior_bias(&sample);
+                depth * 3.0 +         
+                dist * 0.2;
 
         Self {
             depth, dist, escape_penalty, total_score, sample
-        }
-    }
-
-    fn contraction_bias(sample: &GpuGridSample) -> f64 {
-        if sample.contraction < 0.0 {
-            // good (attracting)
-            (-sample.contraction as f64).min(10.0)
-        } else {
-            // bad (repelling)
-            -2.0
-        }
-    }
-
-    fn interior_bias(sample: &GpuGridSample) -> f64 {
-        if !sample.escaped {
-            2.0
-        } else {
-            0.0
         }
     }
 }

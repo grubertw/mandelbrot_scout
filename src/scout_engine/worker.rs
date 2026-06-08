@@ -210,7 +210,6 @@ async fn evaluate_orbits(
     let mut best_orbit_id: u64 = 0;
     let mut best_orbit_len: u32 = 0;
     let mut best_oribt_escape_index: Option<u32> = None;
-    let mut best_orbit_contraction: f64 = 0.0;
 
     {
         // Re-score old orbits
@@ -237,11 +236,12 @@ async fn evaluate_orbits(
             .iter()
             .map(|s| {
                 let orb_g = s.orbit.read();
-                trace_str.push_str(format!("\tPool OrbitId={:<4} escape={:<7} len={:<6} contraction={:<8.4e}\t\
-            \tSCORING: depth={:<6.4} dist={:<6.4} contraction={:<7.4} total={:<6.4}\n",
-                                           orb_g.orbit_id, orb_g.escape_index().map_or(String::from("None"), |v| v.to_string()),
-                                           orb_g.orbit.len(), orb_g.contraction(),
-                                           s.depth, s.dist, s.contraction, s.total_score
+                trace_str.push_str(format!("\tPool OrbitId={:<4} escape={:<7} len={:<6}\t\
+            \tSCORING: depth={:<6.4} dist={:<6.4} total={:<6.4}\n",
+                       orb_g.orbit_id, 
+                       orb_g.escape_index().map_or(String::from("None"), |v| v.to_string()),
+                       orb_g.orbit.len(),
+                       s.depth, s.dist, s.total_score
                 ).as_str());
                 s.orbit.clone()
             })
@@ -255,21 +255,19 @@ async fn evaluate_orbits(
             best_orbit_id = orb_g.orbit_id;
             best_orbit_len = orb_g.orbit.len() as u32;
             best_oribt_escape_index = orb_g.escape_index();
-            best_orbit_contraction = orb_g.contraction();
         }
     }
 
     context.write_diagnostics(
             format!("Scout evaluated {} grid samples, fast (f64) probed {} orbits, and spawned {} orbits. {} interior samples found!\n\
         \tBest Sample Info: iters_reached={} escaped={}\n\
-        \tBest Qualified Ref Orbit Info:\n\t\tOrbitId={} shift={:<3} ref_len={}\n\t\tescape_index={}\n\t\tcontraction={:.5e}",
+        \tBest Qualified Ref Orbit Info:\n\t\tOrbitId={} shift={:<3} ref_len={}\n\t\tescape_index={}",
                     grid_samples.len(), 0, total_orbits_spawned,
                     num_interior_seeds,
                     best_sample_iters_reached, best_sample_escaped,
                     best_orbit_id, shift,
                     best_orbit_len,
                     best_oribt_escape_index.map_or(String::from("None"), |v| v.to_string()),
-                    best_orbit_contraction
         ));
 
     context.context_changed();
@@ -319,18 +317,12 @@ async fn spawn_orbits_from_seeds(
     for scored_orbit in &scored_orbits {
         let orb_g = scored_orbit.orbit.read();
 
-        trace!("Scored orbit {} c_ref={} orbit.len={} escape={:?} contraction={:.4e} r_valid={:.8e} \
-        period={:?} z_min={:.5e} a_max={:.5e} with shift={}\n\t\tScores: depth={} dist={} contraction={} total_score={}",
+        trace!("Scored orbit {} c_ref={} orbit.len={} escape={:?} \
+        with shift={}\n\t\tScores: depth={} dist={} total_score={}",
             orb_g.orbit_id, orb_g.c_ref(),
-            orb_g.orbit.len(), orb_g.quality_metrics.escape_index,
-            orb_g.contraction(),
-            orb_g.r_valid(),
-            orb_g.quality_metrics.period,
-            orb_g.quality_metrics.z_min,
-            orb_g.quality_metrics.a_max,
+            orb_g.orbit.len(), orb_g.escape_index,
             orb_g.c_ref().re.shift,
             scored_orbit.depth, scored_orbit.dist,
-            scored_orbit.contraction,
             scored_orbit.total_score
         );
     }

@@ -67,9 +67,6 @@ pub struct GpuGridSample {
     pub iters_reached: u32,
     pub escaped: bool,
     pub max_user_iters: u32,
-    pub period: u32,
-    pub contraction: f32,
-    pub score: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -96,8 +93,6 @@ pub struct QualifiedOrbit {
     pub c_ref_32: Complex32,
     pub orbit: Vec<Complex32>,
     pub escape_index: Option<u32>,
-    pub r_valid: f32,
-    pub contraction: f32,
     pub created_at: FrameStamp,
 }
 
