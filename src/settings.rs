@@ -20,15 +20,12 @@ pub struct Settings {
     pub ref_iters_multiplier: f64,
     pub num_gpu_samples_to_eval: u32,
     pub num_qualified_orbits: u32,
-    pub distance_error_threshold: f32,
     pub depth_bonus: f64,
     pub distance_penalty: f64,
-    pub contraction_bonus: f64,
     pub exploration_budget: i32,
 
     // Wired into scene uniforms for use in reduce shader
     pub perturb_err_threshold: f32,
-    pub grid_feedback_scale: f32,
 
     // Initial Scene config
     pub center: (f64, f64),
@@ -156,13 +153,11 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("max_live_orbits", 100)?
         .set_default("auto_start", true)?
         .set_default("starting_scale", 1e-8)?
-        .set_default("ref_iters_multiplier", 1.25)?
+        .set_default("ref_iters_multiplier", 1.0)?
         .set_default("num_gpu_samples_to_eval", 6)?
         .set_default("num_qualified_orbits", 1)?
-        .set_default("distance_error_threshold", 4.0)?
         .set_default("depth_bonus", 2.0)?
         .set_default("distance_penalty", 1.5)?
-        .set_default("contraction_bonus", 1.0)?
         .set_default("exploration_budget", 2)?
         .set_default("perturb_err_threshold", 0.01)?
         .set_default("grid_feedback_scale", 1024)?

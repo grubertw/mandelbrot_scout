@@ -12,7 +12,6 @@ struct Uniforms {
     max_iter:           u32,
     ref_orb_count:      u32,
     perturb_err_thresh: f32,
-    grid_feedback_scale:f32,
     view_width:         f32,
     view_height:        f32,
     render_width:       u32,
@@ -86,7 +85,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (grid_idx >= arrayLength(&grid_feedback)) {
         return;
     }
-    
+
     let prev_max_iters = atomicMax(&grid_feedback[grid_idx].max_iter_count, iter);
 
     // If we won the max race, build complex 'c' for the pixel, from

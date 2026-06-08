@@ -79,9 +79,9 @@ async fn handle_camera_snapshot(
     }
 
     let scale = snapshot.scale();
-    let (starting_scale, auto_start, dist_err_thresh) = {
+    let (starting_scale, auto_start) = {
         let config_g = context.config.lock();
-        (config_g.starting_scale, config_g.auto_start, config_g.distance_error_threshold)
+        (config_g.starting_scale, config_g.auto_start)
     };
 
     if !auto_start {
@@ -97,23 +97,6 @@ async fn handle_camera_snapshot(
             context.reset();
         }
         return;
-    }
-
-    {
-        let lo_g = context.living_orbits.lock();
-
-        if let Some(curr_orb) = lo_g.first() {
-            let orb_g = curr_orb.read();
-            if snapshot.scale().shift == orb_g.c_ref.re.shift {
-                let dist_err = norm_distance_error(snapshot.center(), orb_g.c_ref(), scale);
-                // Hold onto our interior reference orbit as long as possible
-                if dist_err < dist_err_thresh && !orb_g.is_exterior() {
-                    info!("Scout detected {} normalized distance error from camera center and current non-escaping ref orb",
-                    dist_err);
-                    return;
-                }
-            }
-        }
     }
 
     tp.spawn_ok(
@@ -238,7 +221,7 @@ async fn evaluate_orbits(
                 let orb_g = s.orbit.read();
                 trace_str.push_str(format!("\tPool OrbitId={:<4} escape={:<7} len={:<6}\t\
             \tSCORING: depth={:<6.4} dist={:<6.4} total={:<6.4}\n",
-                       orb_g.orbit_id, 
+                       orb_g.orbit_id,
                        orb_g.escape_index().map_or(String::from("None"), |v| v.to_string()),
                        orb_g.orbit.len(),
                        s.depth, s.dist, s.total_score

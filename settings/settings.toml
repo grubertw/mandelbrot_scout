@@ -5,10 +5,10 @@
 max_live_orbits = 50
 # Start when the starting scale threshold is crossed
 auto_start = true
-# Starting scale for tile creation, orbit spawning, and everything scout-engine does!
-starting_scale = 1e-8
+# Starting scale for Pertubation.
+starting_scale = 1e-7
 # Multiply max_user_iters by this value for computing the length of a reference orbit
-ref_iters_multiplier = 1.25
+ref_iters_multiplier = 1.0
 # After GPU samples have been ranked/scored, take from the top this amount to
 # use for further evaluation - i.e. as a base for f64 depth probing and for spawning
 # direct MFPR orbits
@@ -17,18 +17,10 @@ num_gpu_samples_to_eval = 4
 # With orbits of sufficient quality, the GPU should not have need to rebase
 # any more than 2 or three times.
 num_qualified_orbits = 1
-# Threshold of distance error that accumulates due to precision loss - i.e. f32
-# rounding - of the current camera center from the current reference orbit.
-# In it's normalized form, this roughly equates to 'number of pixels' that
-# perturbation might diviate/distort from accuracy. Visually, this reveals itself
-# as 'fuzzy' or 'blurry' fractal detail, which is most noticable at the boundry.
-distance_error_threshold = 3.7
 # Orbit scoring weight to encourage deeper reference orbits
 depth_bonus = 10.0
 # Orbit scoring weight to discourage distant references
 distance_penalty = 1.15
-# Orbit scoring weight to encourage contracting references
-contraction_bonus = 0.1
 # Numer of 'convergence' cycles that scout engine is allowed to
 # repeat after a camera pan/zoom. Most of the time, only one should be needed,
 # but if perturbance is behaving poorly, more cycles may be needed to find a better
@@ -39,10 +31,6 @@ exploration_budget = 2
 # Observationally, higer values of this ratio seem to indicate greator
 # error. Zhouran's 'glitch fix' algorithm would need to be run in this case.
 perturb_err_threshold = 0.01
-# This setting/variable is to get around the obnoxious detail that WGPU/WGSL
-# does not support atomics on f32. So we need to 'simulate' desimal numbers by
-# multiplying an integer by a 'scale', which the CPU must then divide
-grid_feedback_scale = 1024.0
 
 #
 # Scene Configs

@@ -65,17 +65,10 @@ pub struct ScoutEngineConfig {
     /// With orbits of sufficient quality, the GPU should not have need to rebase
     /// any more than 2 or three times.
     pub num_qualified_orbits: u32,
-    /// Normalized error threshold between Complex32 distance and rug::Complex distance
-    /// that builds into DeltaC as the camera moves away from the reference orbit. This
-    /// is the primary gate to the evaluate() call once Scout has live orbits and is past
-    /// the scale threshold.
-    pub distance_error_threshold: f32,
     /// Multiplier for normalized depth score for a reference orbit
     pub depth_bonus: f64,
     /// Multiplier for distance score, which is normalized by half-extent
     pub distance_penalty: f64,
-    /// Multiplier for contraction score
-    pub contraction_bonus: f64,
     /// Numer of 'convergence' cycles that scout engine is allowed to
     /// repeat after a camera pan/zoom. Most of the time, only one should be needed,
     /// but if perturbance is behaving poorly, more cycles may be needed to find a better

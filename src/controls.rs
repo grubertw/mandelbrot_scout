@@ -179,7 +179,6 @@ pub struct Controls {
     num_gpu_samples_to_eval: u32,
     glitch_fix: bool,
     perturb_err_threshold: f32,
-    distance_error_threshold: f32,
 
     // Export/save config
     export_img_format: Option<ExportImgFormat>,
@@ -211,6 +210,7 @@ pub enum Message {
     IterRangeMinChanged(String),
     IterRangeMaxChanged(String),
     IterValueChanged(u32),
+    ItersReleased,
 
     CenterXChanged(String),
     CenterYChanged(String),
@@ -271,7 +271,6 @@ pub enum Message {
     GpuSamplesToEvalChanged(u32),
     GlitchFixChanged(bool),
     PerturbErrorThresholdChanged(f32),
-    DistanceErrorThresholdChanged(f32),
 
     ExportImgFormatChanged(ExportImgFormat),
     ExportImgDirChanged(String),
@@ -387,7 +386,6 @@ impl Controls {
             num_gpu_samples_to_eval: settings.num_gpu_samples_to_eval,
             glitch_fix: true,
             perturb_err_threshold: settings.perturb_err_threshold,
-            distance_error_threshold: settings.distance_error_threshold,
             export_img_format: Some(ExportImgFormat::Png),
             export_img_dir: default_export_directory,
             export_img_file_name: settings.default_export_filename.clone(),
@@ -453,6 +451,9 @@ impl Controls {
             Message::IterValueChanged(iter_value) => {
                 self.max_iterations = iter_value;
                 self.scene.borrow_mut().set_max_iterations(self.max_iterations);
+            }
+            Message::ItersReleased => {
+                self.scene.borrow_mut().take_camera_snapshot();
             }
             Message::CenterXChanged(x_str) => {
                 self.center_x = x_str;
@@ -739,13 +740,6 @@ impl Controls {
                 let mut config_g = config.lock();
                 config_g.num_gpu_samples_to_eval = spawn_per_eval;
             }
-            Message::DistanceErrorThresholdChanged(distance_error_threshold) => {
-                self.distance_error_threshold = distance_error_threshold;
-                let scene_b = self.scene.borrow();
-                let config = scene_b.scout_config();
-                let mut config_g = config.lock();
-                config_g.distance_error_threshold = distance_error_threshold;
-            }
             Message::GlitchFixChanged(gitch_fix) => {
                 self.glitch_fix = gitch_fix;
                 let mut scene_b = self.scene.borrow_mut();
@@ -960,6 +954,7 @@ impl Controls {
             space().width(Length::Fixed(10.0)),
             slider(self.iter_range_min..=self.iter_range_max,
                 self.max_iterations, Message::IterValueChanged)
+                .on_release(Message::ItersReleased)
                 .step(self.iter_step)
                 .width(Length::Fixed(240.0)),
             space().width(Length::Fixed(10.0)),
@@ -1384,21 +1379,6 @@ impl Controls {
             space().width(Length::Fixed(5.0)),
             text(format!("{:<1.3}", self.perturb_err_threshold))
                 .width(Length::Fixed(45.0))
-                .align_y(Alignment::Center),
-
-            text("Distance error thresh")
-                .size(10)
-                .width(Length::Fixed(50.0))
-                .align_y(Alignment::Center)
-                .align_x(Alignment::Center),
-            space().width(Length::Fixed(5.0)),
-            slider(2.0 ..= 8.0,
-                self.distance_error_threshold, Message::DistanceErrorThresholdChanged)
-                .step(0.1)
-                .width(Length::Fixed(40.0)),
-            space().width(Length::Fixed(5.0)),
-            text(format!("{:<2.1}", self.distance_error_threshold))
-                .width(Length::Fixed(30.0))
                 .align_y(Alignment::Center),
 
             space().width(Length::Fixed(10.0)),

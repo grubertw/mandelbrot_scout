@@ -10,7 +10,6 @@ pub struct SceneUniform {
     pub max_iter: u32,
     pub ref_orb_count: u32,
     pub perturb_err_threshold: f32,
-    pub grid_feedback_scale: f32,
     pub view_width: f32,
     pub view_height: f32,
     pub render_width: u32,

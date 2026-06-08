@@ -104,10 +104,8 @@ impl Scene {
             ref_iters_multiplier: settings.ref_iters_multiplier,
             num_gpu_samples_to_eval: settings.num_gpu_samples_to_eval,
             num_qualified_orbits: settings.num_qualified_orbits,
-            distance_error_threshold: settings.distance_error_threshold,
             depth_bonus: settings.depth_bonus,
             distance_penalty: settings.distance_penalty,
-            contraction_bonus: settings.contraction_bonus,
             exploration_budget: settings.exploration_budget,
         };
 
@@ -136,7 +134,6 @@ impl Scene {
             max_iter: settings.max_user_iter,
             ref_orb_count: 0,
             perturb_err_threshold: settings.perturb_err_threshold,
-            grid_feedback_scale: settings.grid_feedback_scale,
             grid_size: settings.screen_grid_size,
             grid_width: width as u32 / settings.screen_grid_size,
             sample_count: 1,
