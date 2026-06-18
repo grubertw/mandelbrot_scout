@@ -5,8 +5,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Serialize, Deserialize)]
 pub struct SceneUniform {
     pub center_x: f32,
+    pub center_x_exp: i32,
     pub center_y: f32,
+    pub center_y_exp: i32,
     pub scale: f32,
+    pub scale_exp: i32,
     pub max_iter: u32,
     pub ref_orb_count: u32,
     pub perturb_err_threshold: f32,
@@ -93,6 +96,10 @@ impl SceneUniform {
     pub fn set_enable_rim(&mut self, enable_rim: bool) {
         if enable_rim { self.render_flags |= 1 << 10; } else { self.render_flags &= !(1 << 10) }
     }
+
+    pub fn set_use_fexp(&mut self, use_fexp: bool) {
+        if use_fexp { self.render_flags |= 1 << 11; } else { self.render_flags &= !(1 << 11) }
+    }
 }
 
 #[repr(C)]
@@ -151,6 +158,7 @@ pub struct OrbitFeedbackOut {
 pub struct DebugOut {
     pub center_x:           f32,
     pub center_y:           f32,
+    pub scale:              f32,
     pub max_iters:          u32,
     pub fi:                 f32,
     pub distance:           f32,
@@ -161,10 +169,12 @@ pub struct DebugOut {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuRefOrbitLocation {
-    pub c_ref_re:           f32,
-    pub c_ref_im:           f32,
-    pub max_ref_iters:      u32,
-    pub center_offset_re:   f32,
-    pub center_offset_im:   f32,
+    pub c_ref_re:               f32,
+    pub c_ref_im:               f32,
+    pub max_ref_iters:          u32,
+    pub center_offset_re:       f32,
+    pub center_offset_re_exp:   i32,
+    pub center_offset_im:       f32,
+    pub center_offset_im_exp:   i32,
 }
 

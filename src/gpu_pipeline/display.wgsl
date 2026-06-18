@@ -3,8 +3,11 @@
 // -------------------------------
 struct Uniforms {
     center_x:           f32,
+    center_x_exp:       i32,
     center_y:           f32,
+    center_y_exp:       i32,
     scale:              f32,
+    scale_exp:          i32,
     max_iter:           u32,
     ref_orb_count:      u32,
     perturb_err_thresh: f32,

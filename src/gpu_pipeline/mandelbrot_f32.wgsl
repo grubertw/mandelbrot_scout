@@ -34,8 +34,11 @@ fn c32_mul(a: vec2f, b: vec2f) -> vec2f {
 // -------------------------------
 struct Uniforms {
     center_x:           f32,
+    center_x_exp:       i32,
     center_y:           f32,
+    center_y_exp:       i32,
     scale:              f32,
+    scale_exp:          i32,
     max_iter:           u32,
     ref_orb_count:      u32,
     perturb_err_thresh: f32,
@@ -79,10 +82,17 @@ fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> vec2f {
     let cu = u - 0.5;
     let cv = v - 0.5;
 
-    // Map into world space using VIEW size
-    let offset = vec2f(cu * vw, cv * vh) * uni.scale;
+    // Reconstruct actual scale from FExp mantissa + exponent.
+    let scale = ldexp(uni.scale, uni.scale_exp);
 
-    return vec2f(uni.center_x, uni.center_y) + offset;
+    // Map into world space using VIEW size
+    let offset = vec2f(cu * vw, cv * vh) * scale;
+
+    // Reconstruct center from FExp mantissa + exponent.
+    let cx = ldexp(uni.center_x, uni.center_x_exp);
+    let cy = ldexp(uni.center_y, uni.center_y_exp);
+
+    return vec2f(cx, cy) + offset;
 }
 
 fn mandelbrot(c: vec2f) -> vec4f {
@@ -164,11 +174,13 @@ fn mandelbrot(c: vec2f) -> vec4f {
 }
 
 struct GpuRefOrbitLocation {
-    c_ref_re:           f32,
-    c_ref_im:           f32,
-    max_ref_iters:      u32,
-    center_offset_re:   f32,
-    center_offset_im:   f32,
+    c_ref_re:               f32,
+    c_ref_im:               f32,
+    max_ref_iters:          u32,
+    center_offset_re:       f32,
+    center_offset_re_exp:   i32,
+    center_offset_im:       f32,
+    center_offset_im_exp:   i32,
 };
 
 // Location information for each Reference Orbit
@@ -233,12 +245,16 @@ fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32, jitter: vec2f) 
     let cu = u - 0.5;
     let cv = v - 0.5;
 
-    let offset = vec2f(cu * vw, cv * vh) * uni.scale;
+    // Reconstruct actual scale from FExp mantissa + exponent.
+    let scale = ldexp(uni.scale, uni.scale_exp);
+
+    let offset = vec2f(cu * vw, cv * vh) * scale;
     let orbit = orbit_location[orbit_idx];
 
+    // Reconstruct actual f32 offsets from FExp mantissa + exponent.
     let delta_from_center_to_ref_orb = vec2f(
-        orbit.center_offset_re,
-        orbit.center_offset_im
+        ldexp(orbit.center_offset_re, orbit.center_offset_re_exp),
+        ldexp(orbit.center_offset_im, orbit.center_offset_im_exp)
     );
 
     return delta_from_center_to_ref_orb + offset;
@@ -331,7 +347,7 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
         //let ratio = mag_dz / (mag_z + 1e-30);
         //max_glitch_ratio = max(max_glitch_ratio, ratio);
         if ( ((uni.render_flags & GLITCH_FIX) != 0) &&
-             (mag_z < mag_dz * uni.perturb_err_thresh || ref_i == max_ref_i)) {
+             (mag_z < mag_dz * uni.perturb_err_thresh || ref_i + 1u == max_ref_i)) {
             dz = z;
             ref_i = 0u;
             flags |= PERTURB_ERR_BIT;
@@ -435,6 +451,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         debug_out.center_x = c_for_log.x;
         debug_out.center_y = c_for_log.y;
         debug_out.max_iters = uni.max_iter;
+        debug_out.scale = ldexp(uni.scale, uni.scale_exp);
         debug_out.fi = accum_iters;
         debug_out.distance = accum_dist;
         debug_out.stripe_avg = accum_stripe;
@@ -445,6 +462,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 struct DebugOut {
     center_x:           f32,
     center_y:           f32,
+    scale:              f32,
     max_iters:          u32,
     fi:                 f32,
     distance:           f32,

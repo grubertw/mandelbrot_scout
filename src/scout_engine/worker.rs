@@ -7,7 +7,7 @@ use crate::scout_engine::utils::*;
 use crate::signals::{CameraSnapshot};
 
 use std::sync::Arc;
-use log::{debug, info, error, trace};
+use log::{debug, error, trace};
 
 use futures::task::SpawnExt;
 use futures::StreamExt;
@@ -132,8 +132,8 @@ async fn evaluate_orbits(
     let current_camera = {
         context.last_camera_snapshot.lock().clone()
     };
-    info!("Evaluate orbits for screen center {} and scale {}", 
-        current_camera.center(), current_camera.scale()
+    trace!("Evaluate orbits for screen center {} and scale {} and half extent {}",
+        current_camera.center(), current_camera.scale(), current_camera.half_extent()
     );
     
     let shift = current_camera.scale().shift;
@@ -168,7 +168,7 @@ async fn evaluate_orbits(
         best_sample_escaped = s.sample.escaped;
     }
 
-    debug!("{} GpuGridSamples ranked/sorted", sample_scores.len());
+    trace!("{} GpuGridSamples ranked/sorted", sample_scores.len());
     let cfg = {
         context.config.lock().clone()
     };
@@ -183,7 +183,7 @@ async fn evaluate_orbits(
         .iter()
         .map(|sample| sample.location.clone())
         .collect();
-    debug!("{} GPU seeds will be used to calculate reference orbits", gpu_seeds.len());
+    trace!("{} GPU seeds will be used to calculate reference orbits", gpu_seeds.len());
 
     let mut gpu_orbit_scores = spawn_orbits_from_seeds(
         &gpu_seeds, tp.clone(), context.orbit_id_factory.clone(), cfg, &current_camera
@@ -220,11 +220,12 @@ async fn evaluate_orbits(
             .map(|s| {
                 let orb_g = s.orbit.read();
                 trace_str.push_str(format!("\tPool OrbitId={:<4} escape={:<7} len={:<6}\t\
-            \tSCORING: depth={:<6.4} dist={:<6.4} total={:<6.4}\n",
+            \tSCORING: depth={:<6.4} dist={:<8.4} total={:<8.4} loc={}\n",
                        orb_g.orbit_id,
                        orb_g.escape_index().map_or(String::from("None"), |v| v.to_string()),
                        orb_g.orbit.len(),
-                       s.depth, s.dist, s.total_score
+                       s.depth, s.dist, s.total_score,
+                        orb_g.c_ref
                 ).as_str());
                 s.orbit.clone()
             })
@@ -260,7 +261,7 @@ async fn evaluate_orbits(
     // and communications to/from the GPU can be tightly controlled.
     context.window.request_redraw();
 
-    info!("Evaluate Orbits complete!");
+    trace!("Evaluate Orbits complete!");
 }
 
 async fn spawn_orbits_from_seeds(

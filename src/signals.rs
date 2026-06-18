@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::time;
 
 use num_complex::Complex32;
-use crate::numerics::{FixedComplex, FixedReal};
+use crate::numerics::{FixedComplex, FixedReal, ComplexFExp};
 
 ///////////////////////////////////////////////////////////
 // Consumed by Scout Engine
@@ -91,7 +91,9 @@ pub struct QualifiedOrbit {
     pub orbit_id: OrbitId,
     pub c_ref: FixedComplex,
     pub c_ref_32: Complex32,
+    pub c_ref_fexp: ComplexFExp,
     pub orbit: Vec<Complex32>,
+    pub fexp_orbit: Vec<ComplexFExp>,
     pub escape_index: Option<u32>,
     pub created_at: FrameStamp,
 }

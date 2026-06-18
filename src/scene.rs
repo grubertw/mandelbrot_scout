@@ -121,10 +121,16 @@ impl Scene {
             build_color_palettes_from_settings(settings);
         let default_palette = color_palettes.get("default").unwrap();
 
+        let cx_fexp    = FExp::from_fixed(center.re());
+        let cy_fexp    = FExp::from_fixed(center.im());
+        let scale_fexp = FExp::from_fixed(&scale);
         let uniform = SceneUniform {
-            center_x: center.re().to_f32_lossy(),
-            center_y: center.im().to_f32_lossy(),
-            scale: scale.to_f32_lossy(),
+            center_x:     cx_fexp.m,
+            center_x_exp: cx_fexp.e,
+            center_y:     cy_fexp.m,
+            center_y_exp: cy_fexp.e,
+            scale:        scale_fexp.m,
+            scale_exp:    scale_fexp.e,
             view_width: width as f32,
             view_height: height as f32,
             render_width: width as u32,
@@ -250,9 +256,18 @@ impl Scene {
 
                 // Update/refresh orbit locations before use.
                 self.upload_orbit_locations();
-                cpass.set_pipeline(&self.pipeline.calc_mandel_pipeline);
-                cpass.set_bind_group(0, &self.pipeline.calc_bg, &[]);
-                cpass.set_bind_group(1, &self.pipeline.debug_bg, &[]);
+                let use_fexp = (self.uniform.render_flags & (1 << 11)) != 0;
+                if use_fexp {
+                    debug!("FExp shader enabled");
+                    cpass.set_pipeline(&self.pipeline.calc_mandel_fexp_pipeline);
+                    cpass.set_bind_group(0, &self.pipeline.calc_fexp_bg, &[]);
+                    cpass.set_bind_group(1, &self.pipeline.fexp_debug_bg, &[]);
+                } else {
+                    debug!("f32 shader enabled");
+                    cpass.set_pipeline(&self.pipeline.calc_mandel_pipeline);
+                    cpass.set_bind_group(0, &self.pipeline.calc_bg, &[]);
+                    cpass.set_bind_group(1, &self.pipeline.debug_bg, &[]);
+                }
                 cpass.dispatch_workgroups(gx, gy, 1);
             }
             {
@@ -599,16 +614,18 @@ impl Scene {
 
                 debug!("FROM CPU (Scene struct)");
                 debug!("  center = {} (f64: {} + {}i) (bits: {} {})", self.center, self.center.re.to_f64_lossy(), self.center.im.to_f64_lossy(), self.center.re.mantissa.bits(), self.center.im.mantissa.bits());
+                debug!("  center uni fexp (re m:{} e:{}) (im m:{} e:{})", self.uniform.center_x, self.uniform.center_x_exp, self.uniform.center_y, self.uniform.center_y_exp);
                 debug!("  scale  = {} (f64: {:.5e}) (bits: {})", self.scale, self.scale.to_f64_lossy(), self.scale.mantissa.bits());
                 debug!("  width  = {}\theight = {}", self.width, self.height);
                 debug!("FROM GPU:");
-                debug!("  center = (re:{}, im:{})", dbg.center_x, dbg.center_y);
-                debug!("  max_iters    = {}", dbg.max_iters);
-                debug!("  fi           = {}", dbg.fi);
-                debug!("  distance     = {}", dbg.distance);
-                debug!("  stripe_avg   = {}", dbg.stripe_avg);
-                debug!("  flags        = {}", dbg.flags);
-    
+                debug!("  center     = (re:{}, im:{})", dbg.center_x, dbg.center_y);
+                debug!("  scale      = {}", dbg.scale);
+                debug!("  max_iters  = {}", dbg.max_iters);
+                debug!("  fi         = {}", dbg.fi);
+                debug!("  distance   = {}", dbg.distance);
+                debug!("  stripe_avg = {}", dbg.stripe_avg);
+                debug!("  flags      = {}", dbg.flags);
+
                 drop(data);
                 self.pipeline.debug_readback.unmap();
             }
@@ -734,7 +751,9 @@ impl Scene {
         }
         self.scale = scale;
         self.recalc_fractal = true;
-        self.uniform.scale = self.scale.to_f32_lossy();
+        let scale_fexp = FExp::from_fixed(&self.scale);
+        self.uniform.scale     = scale_fexp.m;
+        self.uniform.scale_exp = scale_fexp.e;
         self.normalize_precision();
         self.update_window_title();
     }
@@ -745,7 +764,9 @@ impl Scene {
             panic!("Scale cannot be zero");
         }
 
-        self.uniform.scale = self.scale.to_f32_lossy();
+        let scale_fexp = FExp::from_fixed(&self.scale);
+        self.uniform.scale     = scale_fexp.m;
+        self.uniform.scale_exp = scale_fexp.e;
         debug!("Scale changed {} (f64 {:.5e}) bits={}",
             self.scale, self.scale.to_f64_lossy(), self.scale.mantissa.bits());
     }
@@ -813,14 +834,25 @@ impl Scene {
 
     fn update_center_offsets(&mut self) {
         let center = self.center().clone();
-        self.uniform.center_x = center.re().to_f32_lossy();
-        self.uniform.center_y = center.im().to_f32_lossy();
+
+        let cx_fexp = FExp::from_fixed(center.re());
+        self.uniform.center_x     = cx_fexp.m;
+        self.uniform.center_x_exp = cx_fexp.e;
+
+        let cy_fexp = FExp::from_fixed(center.im());
+        self.uniform.center_y     = cy_fexp.m;
+        self.uniform.center_y_exp = cy_fexp.e;
 
         for loadout in self.loaded_orbits.iter_mut() {
             loadout.center_offset = complex_delta(&center, &loadout.orbit_c_ref);
 
-            loadout.gpu_orb_loc_info.center_offset_re = loadout.center_offset.re().to_f32_lossy();
-            loadout.gpu_orb_loc_info.center_offset_im = loadout.center_offset.im().to_f32_lossy();
+            let re_fexp = FExp::from_fixed(loadout.center_offset.re());
+            loadout.gpu_orb_loc_info.center_offset_re     = re_fexp.m;
+            loadout.gpu_orb_loc_info.center_offset_re_exp = re_fexp.e;
+
+            let im_fexp = FExp::from_fixed(loadout.center_offset.im());
+            loadout.gpu_orb_loc_info.center_offset_im     = im_fexp.m;
+            loadout.gpu_orb_loc_info.center_offset_im_exp = im_fexp.e;
         }
     }
 
@@ -883,6 +915,11 @@ impl Scene {
 
     pub fn set_use_stripes(&mut self, use_stripes: bool) {
         self.uniform.set_use_stripes(use_stripes);
+        self.recalc_fractal = true;
+    }
+
+    pub fn set_use_fexp(&mut self, use_fexp: bool) {
+        self.uniform.set_use_fexp(use_fexp);
         self.recalc_fractal = true;
     }
 
@@ -1083,7 +1120,7 @@ impl Scene {
             for orb in orbits.iter_mut() {
                 if orb.c_ref.re.shift != self.center.re.shift {
                     let delta_shift = self.center.re.shift as i32 - orb.c_ref.re.shift as i32;
-                    debug!("Rescaling qualified orbit to match viewport. delta_shift={}", delta_shift);
+                    trace!("Rescaling qualified orbit to match viewport. delta_shift={}", delta_shift);
                     orb.c_ref.rescale(delta_shift);
                 }
             }
@@ -1111,6 +1148,7 @@ impl Scene {
         if orbits.len() > 0 {
             let ranked_orb = &orbits[0];
             self.queue.write_buffer(&self.pipeline.rank_one_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
+            self.queue.write_buffer(&self.pipeline.rank_one_orbit_fexp_buf, 0, bytemuck::cast_slice(&ranked_orb.fexp_orbit));
             orbit_count += 1;
             trace!("Wrote Rank One RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
                 ranked_orb.orbit.len() * 8, ranked_orb.orbit.len());
@@ -1119,6 +1157,7 @@ impl Scene {
         if orbits.len() > 1 {
             let ranked_orb = &orbits[1];
             self.queue.write_buffer(&self.pipeline.rank_two_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
+            self.queue.write_buffer(&self.pipeline.rank_two_orbit_fexp_buf, 0, bytemuck::cast_slice(&ranked_orb.fexp_orbit));
             orbit_count += 1;
             trace!("Wrote Rank Two RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
                 ranked_orb.orbit.len() * 8, ranked_orb.orbit.len());
@@ -1135,13 +1174,15 @@ impl Scene {
 
             for load in self.loaded_orbits.iter() {
                 trace_str.push_str(
-                    format!("  Rank #{:<2}\tOrbitId={:<3?} center_offset={} orbit_c_ref={}\n",
+                    format!("  Rank #{:<2}\tOrbitId={:<3?} center_offset={} (fexp: [re m:{} e:{}] [im m:{} e:{}]) orbit_c_ref={}\n",
                         load.rank, load.orbit_id,
                         load.center_offset,
+                        load.gpu_orb_loc_info.center_offset_re, load.gpu_orb_loc_info.center_offset_re_exp,
+                        load.gpu_orb_loc_info.center_offset_im, load.gpu_orb_loc_info.center_offset_im_exp,
                         load.orbit_c_ref
                     ).as_str());
             }
-            trace!("{}", trace_str);
+            debug!("{}", trace_str);
 
             let orb_locations: Vec<GpuRefOrbitLocation> = self.loaded_orbits
                 .iter()
@@ -1214,14 +1255,17 @@ impl Scene {
         let v = (pix_y as f32) / rh;
 
         let cu = u - 0.5;
-        //let cv = 0.5 - v;
         let cv = v - 0.5;
 
-        let off_x = cu * vw * self.uniform.scale;
-        let off_y = cv * vh * self.uniform.scale;
+        let scale = self.uniform.scale * (2.0f32).powi(self.uniform.scale_exp);
+        let cx    = self.uniform.center_x * (2.0f32).powi(self.uniform.center_x_exp);
+        let cy    = self.uniform.center_y * (2.0f32).powi(self.uniform.center_y_exp);
 
-        let c_re = off_x + self.uniform.center_x;
-        let c_im = off_y + self.uniform.center_y;
+        let off_x = cu * vw * scale;
+        let off_y = cv * vh * scale;
+
+        let c_re = off_x + cx;
+        let c_im = off_y + cy;
 
         FixedComplex::with_val_f32( (c_re, c_im), self.scale.shift)
     }
@@ -1234,25 +1278,18 @@ impl Scene {
         pix_y: i32,
         orbit_idx: u32
     ) -> Option<FixedComplex> {
-        let rw = self.uniform.render_width as f32;
-        let rh = self.uniform.render_height as f32;
+        let rw = self.uniform.render_width as f64;
+        let rh = self.uniform.render_height as f64;
+        let vw = self.uniform.view_width as f64;
+        let vh = self.uniform.view_height as f64;
 
-        let vw = self.uniform.view_width;
-        let vh = self.uniform.view_height;
+        // Pixel-to-viewport-fraction is pure integer arithmetic — exact in f64.
+        // Multiplying by FixedReal scale keeps full fixed-point precision at any zoom.
+        let cu_vw = pix_x as f64 / rw * vw - vw * 0.5;
+        let cv_vh = pix_y as f64 / rh * vh - vh * 0.5;
 
-        let u = (pix_x as f32) / rw;
-        let v = (pix_y as f32) / rh;
-
-        let cu = u - 0.5;
-        //let cv = 0.5 - v;
-        let cv = v - 0.5;
-
-        let off_x_f32 = (cu * vw) * self.uniform.scale;
-        let off_y_f32 = (cv * vh) * self.uniform.scale;
-
-        let shift = self.scale.shift;
-        let off_x = FixedReal::from_f32(off_x_f32, shift);
-        let off_y = FixedReal::from_f32(off_y_f32, shift);
+        let off_x = self.scale.scale_by_f64(cu_vw, true);
+        let off_y = self.scale.scale_by_f64(cv_vh, true);
 
         if let Some(loadout_loc) = self.loaded_orbits.get(orbit_idx as usize) {
             let mut c_re = loadout_loc.center_offset.re().clone();
@@ -1348,12 +1385,14 @@ fn build_gpu_orbit_loadout_from_qualified_orbits(
                 orbit_c_ref: orb.c_ref.clone(),
                 center_offset: orbit_offset_from_center.clone(),
                 gpu_orb_loc_info: GpuRefOrbitLocation {
-                    c_ref_re: orb.c_ref_32.re,
-                    c_ref_im: orb.c_ref_32.im,
-                    max_ref_iters: orb.orbit.len() as u32,
-                    center_offset_re: orbit_offset_from_center.re().to_f32_lossy(),
-                    center_offset_im: orbit_offset_from_center.im().to_f32_lossy(),
-            }
+                    c_ref_re:               orb.c_ref_32.re,
+                    c_ref_im:               orb.c_ref_32.im,
+                    max_ref_iters:          orb.orbit.len() as u32,
+                    center_offset_re:       FExp::from_fixed(orbit_offset_from_center.re()).m,
+                    center_offset_re_exp:   FExp::from_fixed(orbit_offset_from_center.re()).e,
+                    center_offset_im:       FExp::from_fixed(orbit_offset_from_center.im()).m,
+                    center_offset_im_exp:   FExp::from_fixed(orbit_offset_from_center.im()).e,
+                }
         }
         })
         .collect()

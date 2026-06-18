@@ -70,6 +70,12 @@ impl From<ColorScalarMappingMode> for u32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalcShader {
+    F32,
+    FExp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq )]
 pub enum ExportImgFormat {
     Png,
@@ -123,6 +129,7 @@ pub struct Controls {
     render_sample_count: u32,
     render_jitter_strength: f32,
     render_sample_avg_bias: f32,
+    calc_shader: CalcShader,
 
     // Color config
     palettes: Vec<PaletteSelection>,
@@ -226,6 +233,7 @@ pub enum Message {
     RenderSampleCountChanged(u32),
     RenderJitterStrengthChanged(f32),
     RenderSampleAvgBiasChanged(f32),
+    CalcShaderChanged(CalcShader),
 
     SelectedPaletteChanged(PaletteSelection),
     ImportPalette,
@@ -339,6 +347,7 @@ impl Controls {
             render_sample_count: 1,
             render_jitter_strength: 0.0,
             render_sample_avg_bias: 0.9,
+            calc_shader: CalcShader::F32,
             palettes,
             selected_palette: Some(palette_selection),
             cycles: 1.0, cycles_max: 10.0,
@@ -540,6 +549,10 @@ impl Controls {
             Message::RenderSampleAvgBiasChanged(bias) => {
                 self.render_sample_avg_bias = bias;
                 self.scene.borrow_mut().set_sample_avg_bias(bias);
+            }
+            Message::CalcShaderChanged(shader) => {
+                self.calc_shader = shader;
+                self.scene.borrow_mut().set_use_fexp(shader == CalcShader::FExp);
             }
             Message::SelectedPaletteChanged(selected_palette) => {
                 let key = selected_palette.key.clone();
@@ -1121,6 +1134,18 @@ impl Controls {
                 .align_y(Alignment::Center)
             )
             .style(inner_container_style)
+            .padding(10),
+            container(row![
+                text("GPU Shader")
+                    .width(Length::Fixed(90.0))
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(10.0)),
+                radio("f32", CalcShader::F32, Some(self.calc_shader), Message::CalcShaderChanged),
+                space().width(Length::Fixed(15.0)),
+                radio("FExp", CalcShader::FExp, Some(self.calc_shader), Message::CalcShaderChanged),
+            ]
+            .align_y(Alignment::Center))
+            .style(inner_container_style)
             .padding(10)
         ]
             .spacing(5)
@@ -1372,13 +1397,13 @@ impl Controls {
                 .align_y(Alignment::Center)
                 .align_x(Alignment::Center),
             space().width(Length::Fixed(5.0)),
-            slider(0.01 ..= 10.0,
+            slider(0.001 ..= 1.0,
                 self.perturb_err_threshold, Message::PerturbErrorThresholdChanged)
-                .step(0.1)
+                .step(0.005)
                 .width(Length::Fixed(40.0)),
             space().width(Length::Fixed(5.0)),
-            text(format!("{:<1.3}", self.perturb_err_threshold))
-                .width(Length::Fixed(45.0))
+            text(format!("{:<5.3}", self.perturb_err_threshold))
+                .width(Length::Fixed(55.0))
                 .align_y(Alignment::Center),
 
             space().width(Length::Fixed(10.0)),

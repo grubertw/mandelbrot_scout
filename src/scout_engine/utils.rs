@@ -54,7 +54,11 @@ impl SampleScore {
             sample.location.rescale(delta_shift);
         }
 
-        let sample_dist_from_cam_center = complex_distance(&sample.location, cam_center).to_f64_lossy().abs();
+        // Subtract FixedReal at same shift (exact), then convert to f64 to avoid
+        // squaring underflow inside complex_distance at deep zoom.
+        let dr = (sample.location.re().clone() - cam_center.re().clone()).to_f64_lossy();
+        let di = (sample.location.im().clone() - cam_center.im().clone()).to_f64_lossy();
+        let sample_dist_from_cam_center = (dr * dr + di * di).sqrt();
 
         let depth = sample.iters_reached as f64 / sample.max_user_iters as f64;
         let dist = 1.0 - (sample_dist_from_cam_center / cam_half_extent.to_f64_lossy())

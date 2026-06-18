@@ -6,7 +6,7 @@ use bytemuck;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 use std::str::FromStr;
 use num_bigint::{BigInt, ParseBigIntError};
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::{FromPrimitive, Signed, ToPrimitive};
 
 pub const DEFAULT_BAILOUT: f64 = 4.0;
 pub const MAX_SAFE_DF_MAG: f64 = 1e30;
@@ -112,6 +112,10 @@ impl FixedReal {
         let numerator = bits.to_f64().unwrap_or(0.0);
 
         (numerator / 2.0_f64.powi(shift as i32)) as f32
+    }
+    
+    pub fn abs(&self) -> Self {
+        Self::new(self.mantissa.abs(), self.shift)
     }
 
     pub fn square_ref(x: &Self) -> Self {
@@ -518,92 +522,63 @@ impl From<ParseIntError> for ParseFixedError {
     }
 }
 
-// Double-float, which is our 'bypass' of WGSL's lack of f64
-// On that note, using two floats in this way is far more robust 
-// accross a wider set of GPUs. While not giving 53 bits of precision,
-// this can theoreticly give us up to 48 bits - i.e. 24+24 as f32 
-// has 24 bits - though in practice it will likely yeild only 40-44.
+// Float-exp: a f32 mantissa paired with a binary exponent (i32).
+// Value = mantissa * 2^exp. No normalization invariant is enforced —
+// the mantissa is allowed to drift during GPU iteration and is only
+// normalized on the CPU side (during conversion) and after multiply
+// in the WGSL shader to prevent f32 overflow.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Df {
-    pub hi: f32,
-    pub lo: f32,
+pub struct FExp {
+    pub m: f32,
+    pub e: i32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ComplexDf {
-    pub re: Df,
-    pub im: Df,
+pub struct ComplexFExp {
+    pub re: FExp,
+    pub im: FExp,
 }
 
-impl Df {
-    pub fn new(hi: f32, lo: f32) -> Self {
-        Self { hi, lo }
+impl FExp {
+    pub fn zero() -> Self {
+        Self { m: 0.0, e: 0 }
     }
 
-    // Convert a Rug Float to double-float
-    // First rounds the arbitary precision to fit into f64, and then seeks to 
-    // preserve what's lost with the initial rounding, and perserves that in 
-    // another f64. Ultilate, these high and low f64s are trunkated again 
-    // before finally being returns as a Df. This strategy tries to preserve
-    // 'the most meaningful' significant digets at the beginning and end of
-    // the arbitraty precision value.
+    pub fn from_f64(val: f64) -> Self {
+        if val == 0.0 {
+            return Self::zero();
+        }
+        // Extract binary exponent from the f64 bit pattern.
+        // f64: 1 sign bit, 11 exponent bits (biased by 1023), 52 mantissa bits.
+        // Raw biased exponent gives floor(log2(|val|)) for normal values.
+        let bits = val.abs().to_bits();
+        let raw_exp = ((bits >> 52) & 0x7FF) as i32 - 1023;
+        // Set e = raw_exp + 1 so mantissa lands in (-1, -0.5] ∪ [0.5, 1).
+        let e = raw_exp + 1;
+        let m = (val / 2f64.powi(e)) as f32;
+        Self { m, e }
+    }
+
     pub fn from_fixed(x: &FixedReal) -> Self {
-        let hi = x.to_f64_lossy();
-
-        // residual = x - hi
-        let mut residual = x.clone();
-        residual -= FixedReal::from_f64(hi, x.shift);
-
-        let lo = residual.to_f64_lossy();
-        
-        Self {hi: hi as f32, lo: lo as f32}
+        Self::from_f64(x.to_f64_lossy())
     }
 
-    pub fn to_fixed(&self, shift: u32) -> FixedReal {
-        let mut res = FixedReal::from_f32(self.hi, shift);
-        res += FixedReal::from_f32(self.lo, shift);
-        res
+    pub fn to_f64(&self) -> f64 {
+        (self.m as f64) * 2f64.powi(self.e)
     }
 }
 
-impl Add for Df {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self {
-        let s = self.hi + rhs.hi;
-        let e = (self.hi - s) + rhs.hi + self.lo + rhs.lo;
-        Self::new(s, e)
-    }
-}
-
-impl Mul for Df {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self {
-        let p = self.hi * rhs.hi;
-        let e = self.hi * rhs.lo + self.lo * rhs.hi;
-        Self::new(p, e)
-    }
-}
-
-impl ComplexDf {
-    pub fn new(re: Df, im: Df) -> Self {
-        Self { re, im }
+impl ComplexFExp {
+    pub fn zero() -> Self {
+        Self { re: FExp::zero(), im: FExp::zero() }
     }
 
-    pub fn from_complex(c: &FixedComplex) -> Self {
-        let real_df = Df::from_fixed(c.re());
-        let imag_df = Df::from_fixed(c.im());
-
-        Self {re: real_df, im: imag_df}
-    }
-    
-    pub fn to_complex(&self, shift: u32) -> FixedComplex {
-        FixedComplex::new(
-            self.re.to_fixed(shift),
-            self.im.to_fixed(shift)
-        )
+    pub fn from_fixed(c: &FixedComplex) -> Self {
+        Self {
+            re: FExp::from_fixed(c.re()),
+            im: FExp::from_fixed(c.im()),
+        }
     }
 }

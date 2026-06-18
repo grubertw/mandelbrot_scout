@@ -1,4 +1,4 @@
-use crate::numerics::*;
+use crate::numerics::{FixedComplex, FixedReal, ComplexFExp};
 use crate::signals::{CameraSnapshot, FrameStamp};
 
 use std::sync::{Arc, Weak};
@@ -7,7 +7,6 @@ use log::{debug, warn};
 use num_complex::{Complex32};
 use parking_lot::{Mutex, RwLock};
 use crate::scout_engine::{ScoutEngineConfig};
-use crate::scout_engine::utils::complex_distance;
 
 /// All ReferenceOrbit object are Arc+Mutex wrapped, to support
 /// the massive concurrency needed when evaluating these orbits both
@@ -68,14 +67,14 @@ impl ReferenceOrbit {
         let orbit_id = id_fac.lock().next_id();
         let shift = *&c_ref.re.shift;
         let c_ref_32 = Complex32::new(c_ref.re().to_f32_lossy(), c_ref.im().to_f32_lossy());
-        
+        let c_ref_fexp = ComplexFExp::from_fixed(&c_ref);
+
         Self {
-            orbit_id, c_ref, 
+            orbit_id, c_ref,
             orbit: Vec::with_capacity(max_ref_orbit_iters as usize),
             escape_index: None,
             created_at: frame_stamp,
-            gpu_payload: OrbitGpuPayload::new(c_ref_32),
-            // Private variables that mutate in-place during mandelbrot computation
+            gpu_payload: OrbitGpuPayload::new(c_ref_32, c_ref_fexp),
             curr_z: FixedComplex::zero(shift),
         }
     }
@@ -129,15 +128,19 @@ impl Eq for ReferenceOrbit {}
 
 #[derive(Clone, Debug)]
 pub struct OrbitGpuPayload {
-    pub c_ref: Complex32,
-    pub c32_orbit: Vec<Complex32>,
+    pub c_ref:      Complex32,
+    pub c_ref_fexp: ComplexFExp,
+    pub c32_orbit:  Vec<Complex32>,
+    pub fexp_orbit: Vec<ComplexFExp>,
 }
 
 impl OrbitGpuPayload {
-    pub fn new(c_ref: Complex32) -> Self {
+    pub fn new(c_ref: Complex32, c_ref_fexp: ComplexFExp) -> Self {
         Self {
             c_ref,
-            c32_orbit: Vec::new(),
+            c_ref_fexp,
+            c32_orbit:  Vec::new(),
+            fexp_orbit: Vec::new(),
         }
     }
 }
@@ -155,7 +158,7 @@ impl OrbitScore {
     pub fn new(orbit: LiveOrbit, cam: &CameraSnapshot, cfg: &ScoutEngineConfig) -> Self {
         let mut orb_g = orbit.write();
         let cam_center = cam.center();
-        let cam_half_extent = cam.half_extent();
+        let cam_half_extent = cam.half_extent().clone();
 
         // Orbits must be rescaled with the current viewport before being compared
         if orb_g.c_ref().re.shift != cam_center.re.shift {
@@ -166,7 +169,12 @@ impl OrbitScore {
 
         let curr_max_ref_iters = cfg.max_user_iters as f64 * cfg.ref_iters_multiplier;
 
-        let sample_dist_from_cam_center = complex_distance(orb_g.c_ref(), cam_center).to_f64_lossy().abs();
+        // FixedReal squaring underflows to zero at deep zoom (delta mantissa < 2^(shift/2)),
+        // so compute the distance in f64 after subtracting — subtraction is exact at the same shift.
+        let dr = (orb_g.c_ref().re().clone() - cam_center.re().clone()).to_f64_lossy();
+        let di = (orb_g.c_ref().im().clone() - cam_center.im().clone()).to_f64_lossy();
+        let sample_dist_f64 = (dr * dr + di * di).sqrt();
+        let half_extent_f64 = cam_half_extent.to_f64_lossy();
 
         let depth = if orb_g.escape_index().is_none() {
             orb_g.orbit.len() as f64 / curr_max_ref_iters
@@ -174,8 +182,8 @@ impl OrbitScore {
             orb_g.escape_index().unwrap() as f64 / curr_max_ref_iters
         };
 
-        let dist = 1.0 - (sample_dist_from_cam_center / cam_half_extent.to_f64_lossy())
-            .log(10.0).clamp(0.0, 1000.0);
+        let dist = 1.0 - (sample_dist_f64 / half_extent_f64)
+            .log2().clamp(0.0, 1000.0);
 
         let total_score =
             depth * cfg.depth_bonus +
