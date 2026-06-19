@@ -237,9 +237,7 @@ impl ScoutEngine {
                     orbit_id:    orb_g.orbit_id,
                     c_ref:       orb_g.c_ref().clone(),
                     c_ref_32:    orb_g.gpu_payload.c_ref,
-                    c_ref_fexp:  orb_g.gpu_payload.c_ref_fexp,
                     orbit:       orb_g.gpu_payload.c32_orbit.clone(),
-                    fexp_orbit:  orb_g.gpu_payload.fexp_orbit.clone(),
                     escape_index: orb_g.escape_index,
                     created_at:  orb_g.created_at,
                 }
@@ -250,11 +248,10 @@ impl ScoutEngine {
             format!("Query Living Orbit Pool for qualified orbits. Found {} total orbits, but only qualifying {}\n",
                 pool_g.len(), num_orbits_to_qualify ).as_str());
         for q_orb in &df_orbits {
-            trace_str.push_str(format!("Rank #{:<2}\torb_id={:<4}\tescape={:?} len={} c_ref_fexp={:?}\n",
+            trace_str.push_str(format!("Rank #{:<2}\torb_id={:<4}\tescape={:?} len={}\n",
                q_orb.rank, q_orb.orbit_id,
                 q_orb.escape_index,
                 q_orb.orbit.len(),
-                q_orb.c_ref_fexp
             ).as_str());
         }
         debug!("{}", trace_str);

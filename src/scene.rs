@@ -617,14 +617,21 @@ impl Scene {
                 debug!("  center uni fexp (re m:{} e:{}) (im m:{} e:{})", self.uniform.center_x, self.uniform.center_x_exp, self.uniform.center_y, self.uniform.center_y_exp);
                 debug!("  scale  = {} (f64: {:.5e}) (bits: {})", self.scale, self.scale.to_f64_lossy(), self.scale.mantissa.bits());
                 debug!("  width  = {}\theight = {}", self.width, self.height);
+                // Reconstruct FExp {m, e} as f64 (valid well past f32's 1e-38 floor;
+                // the raw m * 2^e is also printed so it never silently underflows).
+                let gpu_cx = (dbg.center_x as f64) * 2f64.powi(dbg.center_x_exp);
+                let gpu_cy = (dbg.center_y as f64) * 2f64.powi(dbg.center_y_exp);
+                let gpu_scale = (dbg.scale as f64) * 2f64.powi(dbg.scale_exp);
                 debug!("FROM GPU:");
-                debug!("  center     = (re:{}, im:{})", dbg.center_x, dbg.center_y);
-                debug!("  scale      = {}", dbg.scale);
+                debug!("  center     = (re m:{} e:{} -> {:.6e}, im m:{} e:{} -> {:.6e})",
+                    dbg.center_x, dbg.center_x_exp, gpu_cx, dbg.center_y, dbg.center_y_exp, gpu_cy);
+                debug!("  scale      = m:{} e:{} -> {:.6e}", dbg.scale, dbg.scale_exp, gpu_scale);
                 debug!("  max_iters  = {}", dbg.max_iters);
                 debug!("  fi         = {}", dbg.fi);
                 debug!("  distance   = {}", dbg.distance);
                 debug!("  stripe_avg = {}", dbg.stripe_avg);
                 debug!("  flags      = {}", dbg.flags);
+                debug!("  rebase_cnt = {}  (glitch rebases; end-of-ref wraps excluded)", dbg.rebase_count);
 
                 drop(data);
                 self.pipeline.debug_readback.unmap();
@@ -1148,7 +1155,6 @@ impl Scene {
         if orbits.len() > 0 {
             let ranked_orb = &orbits[0];
             self.queue.write_buffer(&self.pipeline.rank_one_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
-            self.queue.write_buffer(&self.pipeline.rank_one_orbit_fexp_buf, 0, bytemuck::cast_slice(&ranked_orb.fexp_orbit));
             orbit_count += 1;
             trace!("Wrote Rank One RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
                 ranked_orb.orbit.len() * 8, ranked_orb.orbit.len());
@@ -1157,7 +1163,6 @@ impl Scene {
         if orbits.len() > 1 {
             let ranked_orb = &orbits[1];
             self.queue.write_buffer(&self.pipeline.rank_two_orbit_buf, 0, bytemuck::cast_slice(&ranked_orb.orbit));
-            self.queue.write_buffer(&self.pipeline.rank_two_orbit_fexp_buf, 0, bytemuck::cast_slice(&ranked_orb.fexp_orbit));
             orbit_count += 1;
             trace!("Wrote Rank Two RefOrb to GPU! Wrote {} bytes to storage buffer for {} orbits! ",
                 ranked_orb.orbit.len() * 8, ranked_orb.orbit.len());

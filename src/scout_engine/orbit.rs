@@ -1,4 +1,4 @@
-use crate::numerics::{FixedComplex, FixedReal, ComplexFExp};
+use crate::numerics::{FixedComplex, FixedReal};
 use crate::signals::{CameraSnapshot, FrameStamp};
 
 use std::sync::{Arc, Weak};
@@ -67,14 +67,13 @@ impl ReferenceOrbit {
         let orbit_id = id_fac.lock().next_id();
         let shift = *&c_ref.re.shift;
         let c_ref_32 = Complex32::new(c_ref.re().to_f32_lossy(), c_ref.im().to_f32_lossy());
-        let c_ref_fexp = ComplexFExp::from_fixed(&c_ref);
 
         Self {
             orbit_id, c_ref,
             orbit: Vec::with_capacity(max_ref_orbit_iters as usize),
             escape_index: None,
             created_at: frame_stamp,
-            gpu_payload: OrbitGpuPayload::new(c_ref_32, c_ref_fexp),
+            gpu_payload: OrbitGpuPayload::new(c_ref_32),
             curr_z: FixedComplex::zero(shift),
         }
     }
@@ -129,18 +128,14 @@ impl Eq for ReferenceOrbit {}
 #[derive(Clone, Debug)]
 pub struct OrbitGpuPayload {
     pub c_ref:      Complex32,
-    pub c_ref_fexp: ComplexFExp,
     pub c32_orbit:  Vec<Complex32>,
-    pub fexp_orbit: Vec<ComplexFExp>,
 }
 
 impl OrbitGpuPayload {
-    pub fn new(c_ref: Complex32, c_ref_fexp: ComplexFExp) -> Self {
+    pub fn new(c_ref: Complex32) -> Self {
         Self {
             c_ref,
-            c_ref_fexp,
             c32_orbit:  Vec::new(),
-            fexp_orbit: Vec::new(),
         }
     }
 }

@@ -448,26 +448,35 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     // -- DEBUG --
     if (   pix.x == i32(f32(uni.render_width) * 0.5)
         && pix.y == i32(f32(uni.render_height) * 0.5) ) {
-        debug_out.center_x = c_for_log.x;
-        debug_out.center_y = c_for_log.y;
-        debug_out.max_iters = uni.max_iter;
-        debug_out.scale = ldexp(uni.scale, uni.scale_exp);
-        debug_out.fi = accum_iters;
-        debug_out.distance = accum_dist;
-        debug_out.stripe_avg = accum_stripe;
-        debug_out.flags = u32(accum_flags);
+        // exponents 0: the f32 shader's center is a plain world coordinate.
+        debug_out.center_x     = c_for_log.x;
+        debug_out.center_x_exp = 0;
+        debug_out.center_y     = c_for_log.y;
+        debug_out.center_y_exp = 0;
+        debug_out.scale        = uni.scale;
+        debug_out.scale_exp    = uni.scale_exp;
+        debug_out.max_iters    = uni.max_iter;
+        debug_out.fi           = accum_iters;
+        debug_out.distance     = accum_dist;
+        debug_out.stripe_avg   = accum_stripe;
+        debug_out.flags        = u32(accum_flags);
+        debug_out.rebase_count = 0u;
     }
 }
 
 struct DebugOut {
     center_x:           f32,
+    center_x_exp:       i32,
     center_y:           f32,
+    center_y_exp:       i32,
     scale:              f32,
+    scale_exp:          i32,
     max_iters:          u32,
     fi:                 f32,
     distance:           f32,
     stripe_avg:         f32,
     flags:              u32,
+    rebase_count:       u32,
 };
 
 @group(1) @binding(0)

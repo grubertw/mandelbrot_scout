@@ -7,7 +7,7 @@ use std::sync::Arc;
 use log::{trace};
 use num_complex::Complex32;
 use parking_lot::RwLock;
-use crate::numerics::{FixedComplex, ComplexFExp};
+use crate::numerics::FixedComplex;
 
 pub async fn start_reference_orbit(
     c_ref: FixedComplex,
@@ -31,9 +31,6 @@ pub async fn start_reference_orbit(
     for fc in &orbit.orbit {
         orbit.gpu_payload.c32_orbit.push(
             Complex32::new(fc.re().to_f32_lossy(), fc.im().to_f32_lossy())
-        );
-        orbit.gpu_payload.fexp_orbit.push(
-            ComplexFExp::from_fixed(fc)
         );
     }
     Arc::new(RwLock::new(orbit))

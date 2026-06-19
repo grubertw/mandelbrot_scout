@@ -1,5 +1,4 @@
 use crate::gpu_pipeline::structs::*;
-use crate::numerics::ComplexFExp;
 
 use iced_wgpu::wgpu;
 use log::trace;
@@ -17,12 +16,11 @@ pub struct PipelineBundle {
     pub debug_buffer: wgpu::Buffer,
     pub debug_readback: wgpu::Buffer,
     pub ref_orbit_location_buf: wgpu::Buffer,
-    // f32 orbit buffers (vec2f / Complex32 per point)
+    // Shared reference-orbit buffers (vec2f / Complex32 per point). The FExp
+    // shader reads these same f32 buffers and lifts each point to FExp on load —
+    // the reference orbit is bounded by the escape radius, so f32 suffices.
     pub rank_one_orbit_buf: wgpu::Buffer,
     pub rank_two_orbit_buf: wgpu::Buffer,
-    // fexp orbit buffers (ComplexFExp per point — 16 bytes each)
-    pub rank_one_orbit_fexp_buf: wgpu::Buffer,
-    pub rank_two_orbit_fexp_buf: wgpu::Buffer,
     pub noise_texture: wgpu::Texture,
     pub palette_texture: wgpu::Texture,
     pub render_texture: wgpu::Texture,
@@ -77,13 +75,12 @@ impl PipelineBundle {
         ) = build_shader_calc_pipeline(device, &uniform_buff, &mandel_out_tex, &settings);
 
         let (
-            rank_one_orbit_fexp_buf, rank_two_orbit_fexp_buf,
             calc_fexp_bg, fexp_debug_bg,
             calc_mandel_fexp_pipeline
         ) = build_shader_fexp_pipeline(
             device, &uniform_buff, &mandel_out_tex,
             &noise_texture, &ref_orbit_location_buf, &debug_buffer,
-            &settings
+            &rank_one_orbit_buf, &rank_two_orbit_buf,
         );
 
         let (
@@ -112,7 +109,6 @@ impl PipelineBundle {
             debug_buffer, debug_readback,
             ref_orbit_location_buf,
             rank_one_orbit_buf, rank_two_orbit_buf,
-            rank_one_orbit_fexp_buf, rank_two_orbit_fexp_buf,
             noise_texture,
             palette_texture, render_texture,
             render_readback_buf,
@@ -553,27 +549,13 @@ fn build_shader_fexp_pipeline(
     noise_texture: &wgpu::Texture,
     orbit_location_buf: &wgpu::Buffer,
     debug_buffer: &wgpu::Buffer,
-    settings: &Settings,
+    rank_one_orbit_buf: &wgpu::Buffer,
+    rank_two_orbit_buf: &wgpu::Buffer,
 ) -> (
-    wgpu::Buffer, wgpu::Buffer,
     wgpu::BindGroup, wgpu::BindGroup,
     wgpu::ComputePipeline,
 ) {
     let calc_mandel_fexp_shader = device.create_shader_module(wgpu::include_wgsl!("mandelbrot_fexp.wgsl"));
-
-    let rank_one_orbit_fexp_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rank_one_orbit_fexp_buf"),
-        size: (settings.max_ref_orbit as usize * size_of::<ComplexFExp>()) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let rank_two_orbit_fexp_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rank_two_orbit_fexp_buf"),
-        size: (settings.max_ref_orbit as usize * size_of::<ComplexFExp>()) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
 
     let calc_fexp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("calc_fexp bind group layout"),
@@ -683,11 +665,11 @@ fn build_shader_fexp_pipeline(
             },
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: rank_one_orbit_fexp_buf.as_entire_binding(),
+                resource: rank_one_orbit_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 5,
-                resource: rank_two_orbit_fexp_buf.as_entire_binding(),
+                resource: rank_two_orbit_buf.as_entire_binding(),
             },
         ],
     });
@@ -723,7 +705,6 @@ fn build_shader_fexp_pipeline(
         });
 
     (
-        rank_one_orbit_fexp_buf, rank_two_orbit_fexp_buf,
         calc_fexp_bg, fexp_debug_bg,
         calc_mandel_fexp_pipeline,
     )

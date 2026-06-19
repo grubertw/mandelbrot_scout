@@ -89,6 +89,13 @@ fn fexp_to_f32(a: FExp) -> f32 {
     return ldexp(a.m, a.e);
 }
 
+// Lift a plain f32 into a normalized FExp. frexp(0.0) -> (0.0, 0), giving our
+// canonical zero (absorbed by the zero short-circuit in fexp_add).
+fn fexp_from_f32(x: f32) -> FExp {
+    let n = frexp(x);
+    return FExp(n.fract, n.exp);
+}
+
 // -------------------------------
 // Complex float-exp arithmetic
 // -------------------------------
@@ -187,9 +194,11 @@ struct GpuRefOrbitLocation {
 };
 @group(0) @binding(3) var<storage, read> orbit_location: array<GpuRefOrbitLocation>;
 
-// Reference orbit points stored as ComplexFExp (16 bytes each).
-@group(0) @binding(4) var<storage, read> rank_one_orbit: array<ComplexFExp>;
-@group(0) @binding(5) var<storage, read> rank_two_orbit: array<ComplexFExp>;
+// Reference orbit points stored as f32 (vec2f, 8 bytes each) — the SAME buffers
+// the f32 shader uses. |Z_n| is bounded by the escape radius, so f32 is plenty;
+// each point is lifted to FExp on load. Only the deltas need extended range.
+@group(0) @binding(4) var<storage, read> rank_one_orbit: array<vec2f>;
+@group(0) @binding(5) var<storage, read> rank_two_orbit: array<vec2f>;
 
 // -------------------------------
 // Jitter helpers (identical to f32 shader)
@@ -253,9 +262,10 @@ fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32, jitter: vec2f) 
 }
 
 fn load_ref_orbit(orbit_idx: u32, it: u32) -> ComplexFExp {
-    if (orbit_idx == 0u) { return rank_one_orbit[it]; }
-    if (orbit_idx == 1u) { return rank_two_orbit[it]; }
-    return ComplexFExp(FExp(0.0, 0), FExp(0.0, 0));
+    var z = vec2f(0.0, 0.0);
+    if (orbit_idx == 0u) { z = rank_one_orbit[it]; }
+    else if (orbit_idx == 1u) { z = rank_two_orbit[it]; }
+    return ComplexFExp(fexp_from_f32(z.x), fexp_from_f32(z.y));
 }
 
 // -------------------------------
@@ -328,7 +338,8 @@ fn mandelbrot(c: ComplexFExp) -> vec4f {
 // Perturbed Mandelbrot
 // dz_{n+1} = 2*Z_n*dz_n + dz_n^2 + delta_c
 // -------------------------------
-fn mandelbrot_perturb(delta_c: ComplexFExp) -> vec4f {
+fn mandelbrot_perturb(delta_c: ComplexFExp,
+                      rebase_count: ptr<function, u32>) -> vec4f {
     var dz = ComplexFExp(FExp(0.0, 0), FExp(0.0, 0));
     var i: u32     = 0u;
     var ref_i: u32 = 0u;
@@ -342,6 +353,11 @@ fn mandelbrot_perturb(delta_c: ComplexFExp) -> vec4f {
     var stripe_sum: f32   = 0.0;
     var stripe_count: f32 = 0.0;
     var flags: u32        = PERTURB_BIT;
+    // Counts GLITCH rebases only (excludes benign end-of-reference wraps).
+    // A growing count means the perturbed orbit keeps diverging from the
+    // reference faster than the reference covers — the cheapest proxy we have
+    // for precision/reference-match stress.
+    *rebase_count = 0u;
 
     for (i = 0u; i < max_i; i++) {
         // Reconstruct the full value z = Z_n + dz with a VALID ref_i (always in
@@ -392,6 +408,7 @@ fn mandelbrot_perturb(delta_c: ComplexFExp) -> vec4f {
             ref_i = 0u;
             Z_adv = load_ref_orbit(0u, 0u);  // = 0 (critical point)
             flags |= PERTURB_ERR_BIT;
+            if (glitch_rebase) { *rebase_count += 1u; }
         }
 
         if ((uni.render_flags & USE_DE) != 0u) {
@@ -453,6 +470,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var accum_stripe: f32 = 0.0;
     var accum_flags: u32  = 0u;
     var c_for_log = ComplexFExp(FExp(0.0, 0), FExp(0.0, 0));
+    var dbg_rebase: u32 = 0u;
 
     for (sample_idx = 0u; sample_idx < uni.sample_count; sample_idx++) {
         var results = vec4f(0.0, 0.0, 0.0, 0.0);
@@ -460,7 +478,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         if (uni.ref_orb_count > 0u) {
             let delta_c = build_delta_c_from_orbit_location(pix, 0u, jitter);
-            results     = mandelbrot_perturb(delta_c);
+            results     = mandelbrot_perturb(delta_c, &dbg_rebase);
             c_for_log   = delta_c;
         } else {
             let c     = build_c_from_scene(pix, jitter);
@@ -485,25 +503,35 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (pix.x == i32(f32(uni.render_width)  * 0.5) &&
         pix.y == i32(f32(uni.render_height) * 0.5)) {
-        debug_out.center_x   = fexp_to_f32(c_for_log.re);
-        debug_out.center_y   = fexp_to_f32(c_for_log.im);
-        debug_out.scale      = ldexp(uni.scale, uni.scale_exp); 
-        debug_out.max_iters  = uni.max_iter;
-        debug_out.fi         = accum_iters;
-        debug_out.distance   = accum_dist;
-        debug_out.stripe_avg = accum_stripe;
-        debug_out.flags      = accum_flags;
+        // Emit the raw FExp {mantissa, exponent} so the CPU can reconstruct the
+        // true value — fexp_to_f32 would underflow to 0 past ~1e-38.
+        debug_out.center_x     = c_for_log.re.m;
+        debug_out.center_x_exp = c_for_log.re.e;
+        debug_out.center_y     = c_for_log.im.m;
+        debug_out.center_y_exp = c_for_log.im.e;
+        debug_out.scale        = uni.scale;
+        debug_out.scale_exp    = uni.scale_exp;
+        debug_out.max_iters    = uni.max_iter;
+        debug_out.fi           = accum_iters;
+        debug_out.distance     = accum_dist;
+        debug_out.stripe_avg   = accum_stripe;
+        debug_out.flags        = accum_flags;
+        debug_out.rebase_count = dbg_rebase;
     }
 }
 
 struct DebugOut {
     center_x:       f32,
+    center_x_exp:   i32,
     center_y:       f32,
+    center_y_exp:   i32,
     scale:          f32,
+    scale_exp:      i32,
     max_iters:      u32,
     fi:             f32,
     distance:       f32,
     stripe_avg:     f32,
     flags:          u32,
+    rebase_count:   u32,
 };
 @group(1) @binding(0) var<storage, read_write> debug_out: DebugOut;

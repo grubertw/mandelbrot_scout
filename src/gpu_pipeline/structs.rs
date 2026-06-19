@@ -156,14 +156,25 @@ pub struct OrbitFeedbackOut {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DebugOut {
+    // center/scale carried as FExp {mantissa, exponent} so they stay accurate
+    // past 1e-38, where a plain-f32 reconstruction underflows to 0. In the f32
+    // shader the exponents are 0 (mantissa holds the plain value).
     pub center_x:           f32,
+    pub center_x_exp:       i32,
     pub center_y:           f32,
+    pub center_y_exp:       i32,
     pub scale:              f32,
+    pub scale_exp:          i32,
     pub max_iters:          u32,
     pub fi:                 f32,
     pub distance:           f32,
     pub stripe_avg:         f32,
     pub flags:              u32,
+    // Cheap precision/health metric for the probe pixel (FExp shader only):
+    // count of GLITCH rebases (excludes benign end-of-reference wraps). A high
+    // count means the perturbed orbit keeps diverging from the reference =>
+    // reference poorly matched / precision-stressed.
+    pub rebase_count:       u32,
 }
 
 #[repr(C)]
