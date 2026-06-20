@@ -23,7 +23,6 @@ use rand_chacha::ChaCha8Rng;
 use log::{trace, debug, info, warn};
 use std::sync::Arc;
 use std::time;
-use num_bigint::BigInt;
 use parking_lot::Mutex;
 use crate::scene::import::{FractalMetadata, RefOrbitMetadata, META_VERSION};
 use crate::TITLE;
@@ -613,9 +612,9 @@ impl Scene {
                 let dbg = bytemuck::from_bytes::<DebugOut>(&data[..]).clone();
 
                 debug!("FROM CPU (Scene struct)");
-                debug!("  center = {} (f64: {} + {}i) (bits: {} {})", self.center, self.center.re.to_f64_lossy(), self.center.im.to_f64_lossy(), self.center.re.mantissa.bits(), self.center.im.mantissa.bits());
+                debug!("  center = {} (f64: {} + {}i) (bits: {} {})", self.center, self.center.re.to_f64_lossy(), self.center.im.to_f64_lossy(), self.center.re.bits(), self.center.im.bits());
                 debug!("  center uni fexp (re m:{} e:{}) (im m:{} e:{})", self.uniform.center_x, self.uniform.center_x_exp, self.uniform.center_y, self.uniform.center_y_exp);
-                debug!("  scale  = {} (f64: {:.5e}) (bits: {})", self.scale, self.scale.to_f64_lossy(), self.scale.mantissa.bits());
+                debug!("  scale  = {} (f64: {:.5e}) (bits: {})", self.scale, self.scale.to_f64_lossy(), self.scale.bits());
                 debug!("  width  = {}\theight = {}", self.width, self.height);
                 // Reconstruct FExp {m, e} as f64 (valid well past f32's 1e-38 floor;
                 // the raw m * 2^e is also printed so it never silently underflows).
@@ -753,7 +752,7 @@ impl Scene {
     }
 
     pub fn set_scale(&mut self, scale: FixedReal) {
-        if scale.mantissa == BigInt::ZERO {
+        if scale.is_zero() {
             panic!("Scale cannot be zero");
         }
         self.scale = scale;
@@ -767,7 +766,7 @@ impl Scene {
 
     fn change_scale(&mut self, increase: bool) {
         self.scale = self.scale.scale_by_f64(self.scale_factor, increase);
-        if self.scale.mantissa == BigInt::ZERO {
+        if self.scale.is_zero() {
             panic!("Scale cannot be zero");
         }
 
@@ -775,7 +774,7 @@ impl Scene {
         self.uniform.scale     = scale_fexp.m;
         self.uniform.scale_exp = scale_fexp.e;
         debug!("Scale changed {} (f64 {:.5e}) bits={}",
-            self.scale, self.scale.to_f64_lossy(), self.scale.mantissa.bits());
+            self.scale, self.scale.to_f64_lossy(), self.scale.bits());
     }
 
     fn pixel_to_complex_offset(
@@ -816,7 +815,7 @@ impl Scene {
     }
 
     pub fn normalize_precision(&mut self) {
-        let bits_used = self.scale.mantissa.bits();
+        let bits_used = self.scale.bits();
 
         if bits_used < self.min_fixed_bits as u64 {
             debug!("Detected bits used {} below the min threshold {}. rescale up by {}",

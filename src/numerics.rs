@@ -5,15 +5,16 @@ use std::num::ParseIntError;
 use bytemuck;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 use std::str::FromStr;
-use num_bigint::{BigInt, ParseBigIntError};
-use num_traits::{FromPrimitive, Signed, ToPrimitive};
+use rug::Integer;
+use rug::integer::ParseIntegerError;
 
 pub const DEFAULT_BAILOUT: f64 = 4.0;
 pub const MAX_SAFE_DF_MAG: f64 = 1e30;
 
-/// Wraps a BigInt and a u32 to represent a fixed-point value.
-/// The final number is represented as mantissa * 2^shift, where
-/// mantissa is a BigInt - which is internally a Vec<u32> - and
+/// Wraps a rug::Integer (GMP mpz) and a u32 to represent a fixed-point value.
+/// The final number is represented as mantissa * 2^-shift, where
+/// mantissa is a rug::Integer - GMP's arbitrary-precision integer, giving us
+/// sub-quadratic multiply and a dedicated squaring fast-path - and
 /// shift is a u32. Math operations on this type are kept minimal,
 /// and the shift never changes. Instead, the shift is only updated
 /// on zoom operations and on consideration of the viewport scale.
@@ -21,7 +22,7 @@ pub const MAX_SAFE_DF_MAG: f64 = 1e30;
 /// modified once the object is allocated.
 #[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub struct FixedReal {
-    pub mantissa: BigInt,
+    pub mantissa: Integer,
     pub shift: u32,
 }
 
@@ -37,17 +38,28 @@ pub struct FixedComplex {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseFixedError {
     InvalidFormat,
-    InvalidBits(ParseBigIntError),
+    InvalidBits(ParseIntegerError),
     InvalidShift(ParseIntError),
 }
 
 impl FixedReal {
-    pub fn new(bits: BigInt, shift: u32) -> Self {
+    pub fn new(bits: Integer, shift: u32) -> Self {
         Self { mantissa: bits, shift }
     }
 
     pub fn zero(shift: u32) -> Self {
-        Self::new(BigInt::ZERO, shift)
+        Self::new(Integer::new(), shift)
+    }
+
+    /// Number of significant bits in the mantissa (magnitude). Lets callers
+    /// reason about precision headroom without reaching into the backing type.
+    pub fn bits(&self) -> u64 {
+        self.mantissa.significant_bits() as u64
+    }
+
+    /// True when the value is exactly zero, regardless of shift.
+    pub fn is_zero(&self) -> bool {
+        self.mantissa.cmp0() == std::cmp::Ordering::Equal
     }
 
     pub fn from_f32(float: f32, shift: u32) -> Self {
@@ -58,7 +70,7 @@ impl FixedReal {
         let scaled = float * 2.0_f64.powi(shift as i32);
 
         Self::new(
-            BigInt::from_f64(scaled.round()).unwrap(),
+            Integer::from_f64(scaled.round()).unwrap(),
             shift,
         )
     }
@@ -76,20 +88,16 @@ impl FixedReal {
 
             bits >>= reduction;
 
-            if bits != BigInt::ZERO {
+            if bits.cmp0() != std::cmp::Ordering::Equal {
                 shift = MAX_SHIFT;
             } else {
                 bits = original_bits;
             }
         }
 
-        let value = bits.to_f64().unwrap_or_else(|| {
-            if bits.sign() == num_bigint::Sign::Minus {
-                f64::NEG_INFINITY
-            } else {
-                f64::INFINITY
-            }
-        });
+        // rug's to_f64 already rounds to nearest and saturates to +/-inf when
+        // the magnitude exceeds f64 range, so no fallback is needed.
+        let value = bits.to_f64();
 
         value / 2.0_f64.powi(shift as i32)
     }
@@ -100,27 +108,29 @@ impl FixedReal {
         let mut bits = self.mantissa.clone();
         let mut shift = self.shift;
 
-        let bit_count = bits.bits();
+        let bit_count = bits.significant_bits() as u64;
 
         if bit_count > TARGET_BITS {
             let reduction = bit_count - TARGET_BITS;
 
-            bits >>= reduction;
+            bits >>= reduction as u32;
             shift -= reduction as u32;
         }
 
-        let numerator = bits.to_f64().unwrap_or(0.0);
+        let numerator = bits.to_f64();
 
         (numerator / 2.0_f64.powi(shift as i32)) as f32
     }
     
     pub fn abs(&self) -> Self {
-        Self::new(self.mantissa.abs(), self.shift)
+        Self::new(Integer::from(self.mantissa.abs_ref()), self.shift)
     }
 
     pub fn square_ref(x: &Self) -> Self {
+        // square_ref() routes through GMP's dedicated squaring path (~2x faster
+        // than a general multiply), then shift back down to the fixed point.
         Self::new(
-            (&x.mantissa * &x.mantissa) >> x.shift,
+            Integer::from(x.mantissa.square_ref()) >> x.shift,
             x.shift
         )
     }
@@ -131,13 +141,14 @@ impl FixedReal {
     }
 
     pub fn double(self) -> Self {
-        Self::new(self.mantissa << 1, self.shift)
+        Self::new(self.mantissa << 1u32, self.shift)
     }
 
     pub fn sqrt(self) -> Self {
+        let shift = self.shift;
         Self::new(
-            (&self.mantissa << self.shift).sqrt(),
-            self.shift
+            (self.mantissa << shift).sqrt(),
+            shift
         )
     }
 
@@ -180,7 +191,7 @@ impl FromStr for FixedReal {
             .ok_or(ParseFixedError::InvalidFormat)?;
 
         Ok(Self {
-            mantissa: BigInt::from_str(bits)?,
+            mantissa: Integer::from_str(bits)?,
             shift: shift.parse()?,
         })
     }
@@ -199,7 +210,7 @@ impl<'a, 'b> Add<&'b FixedReal> for &'a FixedReal {
     type Output = FixedReal;
     fn add(self, rhs: &'b FixedReal) -> FixedReal {
         FixedReal::new(
-            &self.mantissa + &rhs.mantissa,
+            Integer::from(&self.mantissa + &rhs.mantissa),
             self.shift,
         )
     }
@@ -232,7 +243,7 @@ impl<'a, 'b> Sub<&'b FixedReal> for &'a FixedReal {
     type Output = FixedReal;
     fn sub(self, rhs: &'b FixedReal) -> FixedReal {
         FixedReal::new(
-            &self.mantissa - &rhs.mantissa,
+            Integer::from(&self.mantissa - &rhs.mantissa),
             self.shift,
         )
     }
@@ -271,7 +282,7 @@ impl<'a, 'b> Mul<&'b FixedReal> for &'a FixedReal {
     type Output = FixedReal;
     fn mul(self, rhs: &'b FixedReal) -> FixedReal {
         FixedReal::new(
-            (&self.mantissa * &rhs.mantissa) >> self.shift,
+            Integer::from(&self.mantissa * &rhs.mantissa) >> self.shift,
             self.shift,
         )
     }
@@ -312,7 +323,7 @@ impl<'a, 'b> Div<&'b FixedReal> for &'a FixedReal {
     type Output = FixedReal;
     fn div(self, rhs: &'b FixedReal) -> FixedReal {
         FixedReal::new(
-            (&self.mantissa << self.shift) / &rhs.mantissa,
+            Integer::from(&self.mantissa << self.shift) / &rhs.mantissa,
             self.shift,
         )
     }
@@ -499,7 +510,7 @@ impl Display for ParseFixedError {
                 write!(f, "invalid fixed-point format, expected '<bits>@<shift>'")
             }
             Self::InvalidBits(err) => {
-                write!(f, "invalid BigInt bits: {}", err)
+                write!(f, "invalid integer mantissa: {}", err)
             }
             Self::InvalidShift(err) => {
                 write!(f, "invalid shift value: {}", err)
@@ -510,8 +521,8 @@ impl Display for ParseFixedError {
 
 impl Error for ParseFixedError {}
 
-impl From<ParseBigIntError> for ParseFixedError {
-    fn from(err: ParseBigIntError) -> Self {
+impl From<ParseIntegerError> for ParseFixedError {
+    fn from(err: ParseIntegerError) -> Self {
         Self::InvalidBits(err)
     }
 }
@@ -580,5 +591,95 @@ impl ComplexFExp {
             re: FExp::from_fixed(c.re()),
             im: FExp::from_fixed(c.im()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHIFT: u32 = 64;
+
+    fn fr(v: f64) -> FixedReal {
+        FixedReal::from_f64(v, SHIFT)
+    }
+
+    // f64 -> FixedReal -> f64 must round-trip for values exactly representable
+    // at this shift.
+    #[test]
+    fn f64_round_trip() {
+        for v in [0.0, 1.0, -1.0, 1.5, -2.25, 0.125, 1234.5, -0.0009765625] {
+            assert_eq!(fr(v).to_f64_lossy(), v, "round trip failed for {v}");
+        }
+    }
+
+    // square_ref routes through GMP's squaring fast-path; result must match the
+    // mathematical square and stay at the same shift.
+    #[test]
+    fn square_ref_matches() {
+        let x = fr(1.5);
+        let sq = FixedReal::square_ref(&x);
+        assert_eq!(sq.shift, SHIFT);
+        assert_eq!(sq.to_f64_lossy(), 2.25);
+        // Sign is irrelevant to a square.
+        assert_eq!(FixedReal::square_ref(&fr(-1.5)).to_f64_lossy(), 2.25);
+    }
+
+    // Multiply (both owned and by-ref paths) keeps the fixed point after the
+    // shift-down, including the sign.
+    #[test]
+    fn mul_keeps_fixed_point() {
+        assert_eq!((fr(1.5) * fr(2.0)).to_f64_lossy(), 3.0);
+        assert_eq!((&fr(-1.5) * &fr(2.0)).to_f64_lossy(), -3.0);
+        assert_eq!((&fr(0.5) * &fr(0.5)).to_f64_lossy(), 0.25);
+    }
+
+    #[test]
+    fn add_sub_owned_and_ref() {
+        assert_eq!((fr(1.5) + fr(2.0)).to_f64_lossy(), 3.5);
+        assert_eq!((&fr(1.5) + &fr(2.0)).to_f64_lossy(), 3.5);
+        assert_eq!((fr(1.5) - fr(2.0)).to_f64_lossy(), -0.5);
+        assert_eq!((&fr(1.5) - &fr(2.0)).to_f64_lossy(), -0.5);
+    }
+
+    #[test]
+    fn div_keeps_fixed_point() {
+        assert_eq!((fr(3.0) / fr(2.0)).to_f64_lossy(), 1.5);
+        assert_eq!((&fr(-3.0) / &fr(2.0)).to_f64_lossy(), -1.5);
+    }
+
+    #[test]
+    fn sqrt_floor() {
+        assert_eq!(fr(4.0).sqrt().to_f64_lossy(), 2.0);
+        let two = fr(2.0).sqrt().to_f64_lossy();
+        assert!((two - std::f64::consts::SQRT_2).abs() < 1e-15, "got {two}");
+    }
+
+    #[test]
+    fn is_zero_and_bits() {
+        assert!(FixedReal::zero(SHIFT).is_zero());
+        assert!(!fr(1.0).is_zero());
+        // 1.0 at shift 64 is 2^64, whose magnitude needs 65 significant bits.
+        assert_eq!(fr(1.0).bits(), 65);
+        assert_eq!(FixedReal::zero(SHIFT).bits(), 0);
+    }
+
+    // Storage string -> parse must round-trip the exact mantissa and shift.
+    #[test]
+    fn storage_string_round_trip() {
+        let x = fr(-2.25);
+        let parsed: FixedReal = x.to_storage_string().parse().unwrap();
+        assert_eq!(parsed.mantissa, x.mantissa);
+        assert_eq!(parsed.shift, x.shift);
+    }
+
+    // FixedComplex squaring uses square_ref + the cross term; verify against the
+    // closed form (a+bi)^2 = (a^2 - b^2) + 2ab i.
+    #[test]
+    fn complex_square() {
+        let z = FixedComplex::with_val_f64((1.5, -2.0), SHIFT);
+        let sq = z.square();
+        assert_eq!(sq.re().to_f64_lossy(), 1.5 * 1.5 - 2.0 * 2.0); // -1.75
+        assert_eq!(sq.im().to_f64_lossy(), 2.0 * 1.5 * -2.0); // -6.0
     }
 }
