@@ -38,3 +38,5 @@ strum_macros = "0.28.0"
 [dev-dependencies]
 # Kept only for the bench_fixedreal example, to A/B the old backend vs rug/GMP.
 num-bigint = "0.4.6"
+# Static WGSL validation in tests (same version wgpu 29 uses, so no extra build).
+naga = { version = "29", features = ["wgsl-in"] }

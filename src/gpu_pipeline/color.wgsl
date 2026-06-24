@@ -139,8 +139,9 @@ fn calculate_surface_normals(pix: vec2i) -> vec3f {
     let dx = dx_r - dx_l;
     let dy = dy_t - dy_b;
 
+    let scale = ldexp(uni.scale, uni.scale_exp);
     eps *= 2;
-    let grad = vec3f(dx, dy, uni.scale * f32(eps));
+    let grad = vec3f(dx, dy, scale * f32(eps));
     return normalize(grad);
 }
 
@@ -239,7 +240,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         color *= diffuse;
     }
 
-    d /= uni.scale; // Glow and AO seem to work better with scale as a factor
+    let scale = ldexp(uni.scale, uni.scale_exp);
+    d /= scale; // Glow and AO seem to work better with scale as a factor
 
     if ((uni.render_flags & ENABLE_GLOW) != 0) {
         let glow = 1.0 / (1.0 + d * pow(2.0, uni.distance_multiplier));

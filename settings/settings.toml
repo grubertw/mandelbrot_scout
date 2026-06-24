@@ -85,7 +85,7 @@ default_export_filename = "fractal"
 # Max number of Ref Orbits allowed per frame
 max_orbits_per_frame = 4
 # Max iterations for reference orbits sent to GPU
-max_ref_orbit = 65536
+max_ref_orbit = 500000
 # Render texture size
 # Controls both how large the viewport can be, and the max size of image export
 render_tex_width = 8000

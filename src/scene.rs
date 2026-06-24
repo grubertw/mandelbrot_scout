@@ -8,6 +8,7 @@ use crate::gpu_pipeline::structs::*;
 use crate::signals::*;
 use crate::numerics::*;
 use crate::scout_engine::{ScoutEngineConfig, ScoutEngine, ScoutConfig, ScoutSignal};
+use crate::scout_engine::bla;
 use crate::scout_engine::orbit::OrbitId;
 use crate::scout_engine::utils::complex_delta;
 
@@ -63,6 +64,13 @@ pub struct Scene {
     max_palette_colors: u32,
     scout_engine: ScoutEngine,
     loaded_orbits: Vec<LoadedOrbit>,
+    // (orbit_id, built_len) of the BLA *table* (a/b/l) currently on the GPU, so we
+    // re-upload that view-independent part only when the anchored orbit changes.
+    // The radii are view-dependent and re-uploaded every recalc (see refresh_bla).
+    loaded_bla_table_id: Option<(OrbitId, u32)>,
+    // User toggle (Scout tab checkbox). When off, refresh_bla leaves the shader on
+    // the plain perturbation path regardless of whether a table is resident.
+    bla_enabled: bool,
     uniform: SceneUniform,
     pipeline: PipelineBundle,
     selected_palette: String,
@@ -194,6 +202,8 @@ impl Scene {
             max_palette_colors: settings.max_palette_colors,
             scout_engine,
             loaded_orbits: Vec::new(),
+            loaded_bla_table_id: None,
+            bla_enabled: true,
             uniform, pipeline,
             selected_palette: "default".to_string(),
             palette_changed: true, color_palettes,
@@ -231,6 +241,14 @@ impl Scene {
 
         trace!("Render width={} height={} with uniform={:?}", 
             self.uniform.render_width, self.uniform.render_height, self.uniform);
+
+        // Refresh the rank-1 BLA radii for the current view (and the table when the
+        // orbit changed) before the uniform is written below, so set_use_bla takes
+        // effect this frame and the radii match the delta_c the GPU will use.
+        if self.recalc_fractal {
+            self.refresh_bla();
+        }
+
         // Uniforms must be updated on every draw operation.
         self.queue.write_buffer(&self.pipeline.uniform_buff, 0, bytemuck::cast_slice(&[self.uniform]));
 
@@ -256,17 +274,19 @@ impl Scene {
                 // Update/refresh orbit locations before use.
                 self.upload_orbit_locations();
                 let use_fexp = (self.uniform.render_flags & (1 << 11)) != 0;
-                if use_fexp {
-                    debug!("FExp shader enabled");
+                let compute_used = if use_fexp {
                     cpass.set_pipeline(&self.pipeline.calc_mandel_fexp_pipeline);
                     cpass.set_bind_group(0, &self.pipeline.calc_fexp_bg, &[]);
                     cpass.set_bind_group(1, &self.pipeline.fexp_debug_bg, &[]);
+                    let use_bla = (self.uniform.render_flags & (1 << 12)) != 0;
+                    format!("Compute with FExp GPU shader. use_bla={}", use_bla)
                 } else {
-                    debug!("f32 shader enabled");
                     cpass.set_pipeline(&self.pipeline.calc_mandel_pipeline);
                     cpass.set_bind_group(0, &self.pipeline.calc_bg, &[]);
                     cpass.set_bind_group(1, &self.pipeline.debug_bg, &[]);
-                }
+                    "Compute with f32 GPU shader".to_string()
+                };
+                debug!("{}", compute_used);
                 cpass.dispatch_workgroups(gx, gy, 1);
             }
             {
@@ -631,6 +651,18 @@ impl Scene {
                 debug!("  stripe_avg = {}", dbg.stripe_avg);
                 debug!("  flags      = {}", dbg.flags);
                 debug!("  rebase_cnt = {}  (glitch rebases; end-of-ref wraps excluded)", dbg.rebase_count);
+                debug!("  bla_steps  = {}  (BLA jumps; largest skipped {} iters)",
+                    dbg.bla_step_count, dbg.bla_max_step);
+                // Loop-count reduction at the probe: iterations without BLA (~fi) vs
+                // the loop passes with BLA (jumps + the iters NOT covered by a jump).
+                // This is the theoretical ceiling; wall-clock is less, since a jump
+                // costs more than a single step (lookup + 2 complex muls + a read).
+                let total = dbg.fi as f64;
+                let skipped = dbg.bla_iters_skipped as f64;
+                let bla_work = dbg.bla_step_count as f64 + (total - skipped).max(0.0);
+                let reduction = if bla_work > 0.0 { total / bla_work } else { 1.0 };
+                debug!("  bla_skip   = {} iters covered  (~{:.1}x loop reduction at probe, pre-overhead)",
+                    dbg.bla_iters_skipped, reduction);
 
                 drop(data);
                 self.pipeline.debug_readback.unmap();
@@ -919,6 +951,11 @@ impl Scene {
         self.recalc_fractal = true;
     }
 
+    pub fn set_bla_enabled(&mut self, enabled: bool) {
+        self.bla_enabled = enabled;
+        self.recalc_fractal = true;
+    }
+
     pub fn set_use_stripes(&mut self, use_stripes: bool) {
         self.uniform.set_use_stripes(use_stripes);
         self.recalc_fractal = true;
@@ -1137,9 +1174,66 @@ impl Scene {
             // Build GPU-specific orbit locations from scout-engine's tile-orbit pairs
             self.loaded_orbits =
                 build_gpu_orbit_loadout_from_qualified_orbits(&orbits, self.center());
-            info!("Rebuilt orbit loadout! len={}", self.loaded_orbits.len());
+        }
+    }
 
-            self.upload_orbit_locations();
+    /// Recompute the rank-1 orbit's BLA radii for the CURRENT view and upload them,
+    /// re-uploading the view-independent table (a/b/l) only when the orbit changes.
+    /// Called every fractal recompute, before the uniform is written, so the radii
+    /// always match the delta_c the GPU will actually use this frame (the radii
+    /// scale with delta_c_max, so a stale set could let BLA fire outside its valid
+    /// region). BLA is enabled only when a built table matches the reference orbit
+    /// already uploaded to rank_one_orbit_buf — the async build can lag the pool,
+    /// so a mismatched table must never be applied.
+    fn refresh_bla(&mut self) {
+        // User toggle off: keep the shader on the plain perturbation path.
+        if !self.bla_enabled {
+            self.uniform.set_use_bla(false);
+            self.loaded_bla_table_id = None;
+            return;
+        }
+
+        // Clone the offset up front so we don't borrow self.loaded_orbits across
+        // the &mut self buffer writes below.
+        let rank1 = self.loaded_orbits.first()
+            .map(|l| (l.orbit_id, l.center_offset.clone()));
+
+        match (rank1, self.scout_engine.query_qualified_bla_info()) {
+            (Some((id, center_offset)), Some(info)) if id == info.orbit_id => {
+                // Table (view-independent): upload only when the orbit/len changes.
+                let table_id = (info.orbit_id, info.built_len);
+                if self.loaded_bla_table_id != Some(table_id) {
+                    let (entries, dims) = info.table.flatten();
+                    self.queue.write_buffer(&self.pipeline.bla_entries_buf, 0,
+                        bytemuck::cast_slice(&entries));
+                    self.queue.write_buffer(&self.pipeline.bla_level_offsets_buf, 0,
+                        bytemuck::cast_slice(&dims));
+                    self.loaded_bla_table_id = Some(table_id);
+                    info!("Uploaded BLA table for orbit {} (entries={}, steps={})",
+                        info.orbit_id, entries.len(), dims[1]);
+                }
+
+                // Radii (view-dependent): recompute for this exact render view.
+                let half_extent = self.scale
+                    .scale_by_f64(self.width.max(self.height) / 2.0, true);
+                let dc_max = bla::delta_c_max_bound(&center_offset, &half_extent);
+                let radii = bla::compute_radii(&info.table, bla::BLA_EPSILON, dc_max)
+                    .flatten();
+                debug!("Updating view-dependant BLA radii. len={}", radii.len());
+                self.queue.write_buffer(&self.pipeline.bla_radii_buf, 0,
+                    bytemuck::cast_slice(&radii));
+
+                self.uniform.set_use_bla(true);
+            }
+            _ => {
+                // No table, or it's for a different orbit than the one uploaded
+                // (build still catching up). Run the plain perturbation path.
+                if self.loaded_bla_table_id.is_some() {
+                    self.uniform.set_use_bla(false);
+                    self.loaded_bla_table_id = None;
+                    trace!("BLA disabled (no matching table for rank-1 orbit)");
+                }
+            }
         }
     }
 
@@ -1172,21 +1266,19 @@ impl Scene {
 
     fn upload_orbit_locations(&self) {
         if self.loaded_orbits.len() > 0 && self.loaded_orbits.len() <= self.max_orbits_per_frame as usize {
-            let mut trace_str = String::from(
-                format!("Orbit Loadout has {} orbits. Mapping follows...\n",
-                        self.loaded_orbits.len()).as_str());
+            let mut trace_str = String::from("Orbit Loadout updated. Mapping follows...\n".to_string().as_str());
 
             for load in self.loaded_orbits.iter() {
                 trace_str.push_str(
-                    format!("  Rank #{:<2}\tOrbitId={:<3?} center_offset={} (fexp: [re m:{} e:{}] [im m:{} e:{}]) orbit_c_ref={}\n",
-                        load.rank, load.orbit_id,
-                        load.center_offset,
+                    format!("  Rank #{:<2}\tOrbitId={:<3?} ref_iters={} center_offset={} (fexp: [re m:{} e:{}] [im m:{} e:{}]) orbit_c_ref={}\n",
+                        load.rank, load.orbit_id, load.gpu_orb_loc_info.max_ref_iters,
+                        load.center_offset.to_ui_string(8),
                         load.gpu_orb_loc_info.center_offset_re, load.gpu_orb_loc_info.center_offset_re_exp,
                         load.gpu_orb_loc_info.center_offset_im, load.gpu_orb_loc_info.center_offset_im_exp,
-                        load.orbit_c_ref
+                        load.orbit_c_ref.to_ui_string(8)
                     ).as_str());
             }
-            debug!("{}", trace_str);
+            info!("{}", trace_str);
 
             let orb_locations: Vec<GpuRefOrbitLocation> = self.loaded_orbits
                 .iter()

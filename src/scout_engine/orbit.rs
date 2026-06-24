@@ -3,7 +3,7 @@ use crate::signals::{CameraSnapshot, FrameStamp};
 
 use std::sync::{Arc, Weak};
 
-use log::{debug, warn};
+use log::{warn};
 use num_complex::{Complex32};
 use parking_lot::{Mutex, RwLock};
 use crate::scout_engine::{ScoutEngineConfig};
@@ -158,7 +158,6 @@ impl OrbitScore {
         // Orbits must be rescaled with the current viewport before being compared
         if orb_g.c_ref().re.shift != cam_center.re.shift {
             let delta_shift = cam_center.re.shift as i32 - orb_g.c_ref().re.shift as i32;
-            debug!("Rescaling orbit {} to match viewport. delta_shift={}", orb_g.orbit_id, delta_shift);
             orb_g.c_ref.rescale(delta_shift);
         }
 

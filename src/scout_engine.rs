@@ -1,4 +1,5 @@
 pub mod orbit;
+pub mod bla;
 mod worker;
 mod tasks;
 mod newton;
@@ -84,9 +85,14 @@ pub struct ScoutEngineContext {
     pub living_orbits: LivingOrbits,
     /// Creates unique orbit_id's
     pub orbit_id_factory: OrbitIdFactory,
-    /// the most recent camera snapshot, essential for knowning when the user 
+    /// the most recent camera snapshot, essential for knowning when the user
     /// last changed the viewport. Only scout_worker should update this.
     pub last_camera_snapshot: Arc<Mutex<CameraSnapshot>>,
+    /// BLA table for the current rank-1 (anchored) orbit, built asynchronously
+    /// by scout_worker after each pool re-rank. None until the first build lands;
+    /// swapped wholesale when the rank-1 orbit (or its length) changes. The inner
+    /// `table` is immutable/shared; `radii`+`delta_c_max` refresh on view changes.
+    pub rank1_bla: Arc<Mutex<Option<bla::QualifiedOrbitBLAInfo>>>,
     /// Most recent set of GPU Grid Samples
     /// Polled by Scout worker during tile evaluation
     pub grid_samples: Arc<Mutex<Vec<GpuGridSample>>>,
@@ -114,6 +120,7 @@ impl ScoutEngineContext {
             living_orbits: Arc::new(Mutex::new(Vec::new())),
             orbit_id_factory: Arc::new(Mutex::new(IdFactory::new())),
             last_camera_snapshot: Arc::new(Mutex::new(snapshot)),
+            rank1_bla: Arc::new(Mutex::new(None)),
             grid_samples: Arc::new(Mutex::new(Vec::new())),
             context_changed: Arc::new(AtomicBool::new(false)),
             window,
@@ -257,6 +264,14 @@ impl ScoutEngine {
         debug!("{}", trace_str);
 
         df_orbits
+    }
+
+    /// Snapshot the rank-1 orbit's BLA info (clone), or None if no table is built
+    /// yet. The clone is cheap — `table` and `radii` are Arcs. The renderer checks
+    /// Some/None and matches `orbit_id` against the orbit it has uploaded before
+    /// enabling BLA, since the async build can briefly lag the orbit pool.
+    pub fn query_qualified_bla_info(&self) -> Option<bla::QualifiedOrbitBLAInfo> {
+        self.context.rank1_bla.lock().clone()
     }
 
     /// Api for a lightweight task/job submission system, for allowing parts of the program

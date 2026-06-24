@@ -15,6 +15,15 @@ const SMOOTH_COLORING: u32  = 1u << 2u;
 const USE_DE: u32           = 1u << 3u;
 const USE_STRIPES: u32      = 1u << 4u;
 const USE_FEXP: u32         = 1u << 11u;
+const USE_BLA: u32          = 1u << 12u;
+
+// Off-center debug probe (fraction of render size). The scout's reference orbit
+// usually sits near viewport center, so the dead-center pixel has a near-zero dz
+// and exercises neither rebasing nor BLA. An off-center pixel is far more
+// representative. The offset is a sub-view fraction, so the probe's c still
+// matches the viewport center to well within the logged precision at deep zoom.
+const PROBE_X_FRAC: f32 = 0.66;
+const PROBE_Y_FRAC: f32 = 0.66;
 
 const ESCAPED_BIT: u32      = 1u << 0u;
 const PERTURB_BIT: u32      = 1u << 1u;
@@ -33,6 +42,14 @@ struct FExp {
 struct ComplexFExp {
     re: FExp,
     im: FExp,
+}
+
+// One BLA table entry: dz_out = a*dz + b*dc, valid for `l` reference iterations.
+// Layout MUST match BlaEntry in gpu_pipeline/structs.rs (a@0, b@16, l@32, 36 bytes).
+struct BlaEntry {
+    a: ComplexFExp,
+    b: ComplexFExp,
+    l: u32,
 }
 
 // -------------------------------
@@ -201,6 +218,17 @@ struct GpuRefOrbitLocation {
 @group(0) @binding(5) var<storage, read> rank_two_orbit: array<vec2f>;
 
 // -------------------------------
+// BLA table (rank-1 orbit). a/b/l in bla_entries, validity r^2 in bla_radii
+// (same flat order), and a small dims header that lets us index both:
+//   bla_dims = [level_count, steps(M), off_0=0, off_1, ..., off_L = total]
+// offset(level) = bla_dims[2 + level],  count(level) = bla_dims[3+level] - offset.
+// All three may be zero-filled (no table yet) — bla_lookup then finds nothing.
+// -------------------------------
+@group(0) @binding(6) var<storage, read> bla_entries: array<BlaEntry>;
+@group(0) @binding(7) var<storage, read> bla_radii:   array<FExp>;
+@group(0) @binding(8) var<storage, read> bla_dims:    array<u32>;
+
+// -------------------------------
 // Jitter helpers (identical to f32 shader)
 // -------------------------------
 fn wrap(coord: vec2i, size: vec2i) -> vec2i {
@@ -335,11 +363,56 @@ fn mandelbrot(c: ComplexFExp) -> vec4f {
 }
 
 // -------------------------------
+// BLA lookup
+// -------------------------------
+struct BlaHit {
+    found: bool,
+    idx:   u32,   // flat index into bla_entries / bla_radii
+    l:     u32,   // reference iterations this entry skips
+}
+
+// Largest valid BLA step starting at reference index m (1-based), given the
+// current |dz|^2 = z2. Climbs levels while the entry stays aligned to m and z2
+// is inside its radius, returning the highest such level (the biggest jump).
+// Mirrors the CPU reference lookup() in scout_engine/bla.rs.
+fn bla_lookup(m: u32, z2: FExp) -> BlaHit {
+    var hit: BlaHit;
+    hit.found = false;
+    hit.idx   = 0u;
+    hit.l     = 0u;
+
+    let level_count = bla_dims[0];
+    let steps       = bla_dims[1];
+    if (m == 0u || m >= steps) { return hit; }
+
+    var ix = m - 1u;
+    for (var level = 0u; level < level_count; level = level + 1u) {
+        let off   = bla_dims[2u + level];
+        let count = bla_dims[3u + level] - off;
+        if (ix >= count) { break; }
+        let ixm = (ix << level) + 1u;
+        // Aligned to m AND z2 within radius => record and keep climbing.
+        if (m == ixm && fexp_gt_pos(bla_radii[off + ix], z2)) {
+            hit.found = true;
+            hit.idx   = off + ix;
+            hit.l     = bla_entries[off + ix].l;
+        } else {
+            break;
+        }
+        ix = ix >> 1u;
+    }
+    return hit;
+}
+
+// -------------------------------
 // Perturbed Mandelbrot
 // dz_{n+1} = 2*Z_n*dz_n + dz_n^2 + delta_c
 // -------------------------------
 fn mandelbrot_perturb(delta_c: ComplexFExp,
-                      rebase_count: ptr<function, u32>) -> vec4f {
+                      rebase_count: ptr<function, u32>,
+                      bla_max_step: ptr<function, u32>,
+                      bla_step_count: ptr<function, u32>,
+                      bla_iters_skipped: ptr<function, u32>) -> vec4f {
     var dz = ComplexFExp(FExp(0.0, 0), FExp(0.0, 0));
     var i: u32     = 0u;
     var ref_i: u32 = 0u;
@@ -358,6 +431,17 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
     // reference faster than the reference covers — the cheapest proxy we have
     // for precision/reference-match stress.
     *rebase_count = 0u;
+    *bla_max_step = 0u;
+    *bla_step_count = 0u;
+    *bla_iters_skipped = 0u;
+
+    // BLA accelerates only plain iteration/escape coloring: a jump skips l steps,
+    // which would under-accumulate the per-iteration DE derivative and stripe
+    // average. Gate it off when either is active — they then single-step (correct,
+    // just unaccelerated). Uniform-constant, so hoisted out of the loop.
+    let bla_enabled = ((uni.render_flags & USE_BLA) != 0u)
+                   && ((uni.render_flags & USE_DE) == 0u)
+                   && ((uni.render_flags & USE_STRIPES) == 0u);
 
     for (i = 0u; i < max_i; i++) {
         // Reconstruct the full value z = Z_n + dz with a VALID ref_i (always in
@@ -409,6 +493,29 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
             Z_adv = load_ref_orbit(0u, 0u);  // = 0 (critical point)
             flags |= PERTURB_ERR_BIT;
             if (glitch_rebase) { *rebase_count += 1u; }
+        }
+
+        // === BLA fast-forward (after rebase, before the single-step advance) ===
+        // Replace a run of linear steps with a single dz = A*dz + B*delta_c. Only
+        // fires while |dz|^2 is within the entry's validity radius, so it can never
+        // skip an escape: a diverging pixel grows dz past every radius and falls
+        // back to single stepping (where the escape test above catches it). After
+        // a rebase ref_i == 0, so bla_lookup returns nothing — the rebased step is
+        // taken as a normal single step. mag_dz_fexp is the pre-rebase |dz|^2,
+        // which is exactly |dz|^2 when not rebased, and unused when rebased.
+        if (bla_enabled) {
+            let hit = bla_lookup(ref_i, mag_dz_fexp);
+            if (hit.found && (i + hit.l) <= max_i) {
+                let e = bla_entries[hit.idx];
+                dz = cfexp_add(cfexp_mul(e.a, dz), cfexp_mul(e.b, delta_c));
+                ref_i += hit.l;
+                i     += hit.l - 1u;  // the loop's i++ adds the final step
+                // Cheap, on-jump only (not per-iteration), so safe in the hot loop.
+                *bla_max_step = max(*bla_max_step, hit.l);
+                *bla_step_count += 1u;
+                *bla_iters_skipped += hit.l;
+                continue;
+            }
         }
 
         if ((uni.render_flags & USE_DE) != 0u) {
@@ -470,7 +577,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var accum_stripe: f32 = 0.0;
     var accum_flags: u32  = 0u;
     var c_for_log = ComplexFExp(FExp(0.0, 0), FExp(0.0, 0));
-    var dbg_rebase: u32 = 0u;
+    var dbg_rebase: u32    = 0u;
+    var dbg_bla_max: u32     = 0u;
+    var dbg_bla_count: u32   = 0u;
+    var dbg_bla_skipped: u32 = 0u;
 
     for (sample_idx = 0u; sample_idx < uni.sample_count; sample_idx++) {
         var results = vec4f(0.0, 0.0, 0.0, 0.0);
@@ -478,7 +588,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         if (uni.ref_orb_count > 0u) {
             let delta_c = build_delta_c_from_orbit_location(pix, 0u, jitter);
-            results     = mandelbrot_perturb(delta_c, &dbg_rebase);
+            results     = mandelbrot_perturb(delta_c, &dbg_rebase, &dbg_bla_max, &dbg_bla_count, &dbg_bla_skipped);
             c_for_log   = delta_c;
         } else {
             let c     = build_c_from_scene(pix, jitter);
@@ -501,22 +611,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(calc_out_tex, pix,
         vec4f(accum_iters, accum_dist, accum_stripe, f32(accum_flags)));
 
-    if (pix.x == i32(f32(uni.render_width)  * 0.5) &&
-        pix.y == i32(f32(uni.render_height) * 0.5)) {
+    if (pix.x == i32(f32(uni.render_width)  * PROBE_X_FRAC) &&
+        pix.y == i32(f32(uni.render_height) * PROBE_Y_FRAC)) {
         // Emit the raw FExp {mantissa, exponent} so the CPU can reconstruct the
         // true value — fexp_to_f32 would underflow to 0 past ~1e-38.
-        debug_out.center_x     = c_for_log.re.m;
-        debug_out.center_x_exp = c_for_log.re.e;
-        debug_out.center_y     = c_for_log.im.m;
-        debug_out.center_y_exp = c_for_log.im.e;
-        debug_out.scale        = uni.scale;
-        debug_out.scale_exp    = uni.scale_exp;
-        debug_out.max_iters    = uni.max_iter;
-        debug_out.fi           = accum_iters;
-        debug_out.distance     = accum_dist;
-        debug_out.stripe_avg   = accum_stripe;
-        debug_out.flags        = accum_flags;
-        debug_out.rebase_count = dbg_rebase;
+        debug_out.center_x      = c_for_log.re.m;
+        debug_out.center_x_exp  = c_for_log.re.e;
+        debug_out.center_y      = c_for_log.im.m;
+        debug_out.center_y_exp  = c_for_log.im.e;
+        debug_out.scale         = uni.scale;
+        debug_out.scale_exp     = uni.scale_exp;
+        debug_out.max_iters     = uni.max_iter;
+        debug_out.fi            = accum_iters;
+        debug_out.distance      = accum_dist;
+        debug_out.stripe_avg    = accum_stripe;
+        debug_out.flags         = accum_flags;
+        debug_out.rebase_count  = dbg_rebase;
+        debug_out.bla_max_step     = dbg_bla_max;
+        debug_out.bla_step_count   = dbg_bla_count;
+        debug_out.bla_iters_skipped = dbg_bla_skipped;
     }
 }
 
@@ -533,5 +646,8 @@ struct DebugOut {
     stripe_avg:     f32,
     flags:          u32,
     rebase_count:   u32,
+    bla_max_step:   u32,
+    bla_step_count: u32,
+    bla_iters_skipped: u32,
 };
 @group(1) @binding(0) var<storage, read_write> debug_out: DebugOut;

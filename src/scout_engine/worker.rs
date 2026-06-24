@@ -3,18 +3,20 @@ use crate::scout_engine::{ScoutContext, CameraSnapshotReceiver, OrbitObservation
 use crate::scout_engine::orbit::*;
 use crate::scout_engine::tasks::*;
 use crate::scout_engine::utils::*;
+use crate::scout_engine::bla::{self, QualifiedOrbitBLAInfo};
 
 use crate::signals::{CameraSnapshot};
 
 use std::sync::Arc;
 use log::{debug, error, trace};
+use num_complex::Complex32;
 
 use futures::task::SpawnExt;
 use futures::StreamExt;
 use futures::select;
 use futures::future::{join_all, RemoteHandle};
 use futures::executor::{ThreadPool};
-use crate::numerics::FixedComplex;
+use crate::numerics::{ComplexFExp, FixedComplex};
 
 // ScoutEngine's internal work loop, a long-lived future that uses select to poll the
 // the camera snaphot & gpu feedback channels.
@@ -193,6 +195,11 @@ async fn evaluate_orbits(
     let mut best_orbit_id: u64 = 0;
     let mut best_orbit_len: u32 = 0;
     let mut best_oribt_escape_index: Option<u32> = None;
+    // Inputs for a BLA (re)build, captured under the pool/orbit locks below and
+    // consumed after they're released: (orbit_id, ref_len, weak orbit, truncated
+    // f32 orbit, c_ref at camera shift).
+    let mut bla_build_inputs:
+        Option<(OrbitId, u32, WeakOrbit, Vec<Complex32>)> = None;
 
     {
         // Re-score old orbits
@@ -214,19 +221,24 @@ async fn evaluate_orbits(
 
         let mut trace_str = String::from(
             format!("Re-Scored LiveOrbits. len={}\n", scored_pool_orbs.len()).as_str());
+        let mut print_orb_count = 0u32;
 
         *pool_g = scored_pool_orbs
             .iter()
             .map(|s| {
                 let orb_g = s.orbit.read();
-                trace_str.push_str(format!("\tPool OrbitId={:<4} escape={:<7} len={:<6}\t\
+                if print_orb_count < 5 {
+                    trace_str.push_str(
+                    format!("\tPool OrbitId={:<4} escape={:<7} len={:<6}\t\
             \tSCORING: depth={:<6.4} dist={:<8.4} total={:<8.4} loc={}\n",
-                       orb_g.orbit_id,
-                       orb_g.escape_index().map_or(String::from("None"), |v| v.to_string()),
-                       orb_g.orbit.len(),
-                       s.depth, s.dist, s.total_score,
-                        orb_g.c_ref
-                ).as_str());
+                           orb_g.orbit_id,
+                           orb_g.escape_index().map_or(String::from("None"), |v| v.to_string()),
+                           orb_g.orbit.len(),
+                           s.depth, s.dist, s.total_score,
+                           orb_g.c_ref
+                    ).as_str());
+                }
+                print_orb_count += 1;
                 s.orbit.clone()
             })
             .collect();
@@ -239,7 +251,49 @@ async fn evaluate_orbits(
             best_orbit_id = orb_g.orbit_id;
             best_orbit_len = orb_g.orbit.len() as u32;
             best_oribt_escape_index = orb_g.escape_index();
+
+            // (Re)build the BLA table when the anchored orbit changes — or when
+            // the same orbit grows (future: extending on a raised iteration
+            // count). The staleness check avoids upgrading the weak ref.
+            let needs_bla = match context.rank1_bla.lock().as_ref() {
+                Some(info) => info.orbit_id != best_orbit_id
+                           || info.built_len != best_orbit_len,
+                None => true,
+            };
+            if needs_bla {
+                bla_build_inputs = Some((
+                    best_orbit_id, best_orbit_len,
+                    Arc::downgrade(s),
+                    orb_g.gpu_payload.c32_orbit.clone(),
+                ));
+            }
         }
+    }
+
+    // Spawn the BLA build off the eval loop. The renderer falls back to the plain
+    // perturbation path until the table lands in context.rank1_bla.
+    if let Some((oid, olen, weak, c32)) = bla_build_inputs {
+        let orbit_fexp: Vec<ComplexFExp> = c32
+            .iter()
+            .map(|z| ComplexFExp::from_f64_pair(z.re as f64, z.im as f64))
+            .collect();
+        let ctx = context.clone();
+        let pool = tp.clone();
+        tp.spawn_ok(async move {
+            // Build only the view-independent table; the renderer computes radii.
+            let table = bla::build_bla(Arc::new(orbit_fexp), pool).await;
+            let bla_info = Some(QualifiedOrbitBLAInfo {
+                orbit_id: oid, built_len: olen,
+                orbit_ref: weak, table: Arc::new(table),
+            });
+            trace!("BLA table built for rank-1 orbit {:?}", bla_info);
+            *ctx.rank1_bla.lock() = bla_info;
+            ctx.context_changed();
+            // The build finishes after evaluate_orbits' own redraw request, so
+            // ask for another frame: without it the new table sits unused until
+            // the next pan/zoom. (No-op for pixels until the GPU consumes it.)
+            ctx.window.request_redraw();
+        });
     }
 
     context.write_diagnostics(

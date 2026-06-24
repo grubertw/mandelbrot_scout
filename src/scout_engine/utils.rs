@@ -1,4 +1,3 @@
-use log::debug;
 use num_complex::{Complex32};
 use crate::signals::{CameraSnapshot, GpuGridSample};
 use crate::numerics::{FixedComplex, FixedReal};
@@ -50,7 +49,6 @@ impl SampleScore {
 
         if sample.location.re.shift != cam.center().re.shift {
             let delta_shift = cam.center().re.shift as i32 - sample.location.re.shift as i32;
-            debug!("Rescaling sample to match viewport. delta_shift={}", delta_shift);
             sample.location.rescale(delta_shift);
         }
 

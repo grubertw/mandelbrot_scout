@@ -19,6 +19,11 @@ const ORBIT_SHIFT: u32              = 20u;
 const MAX_U32: u32 = 0xFFFFFFFFu;
 const MAX_P: u32 = 32u;
 
+// Off-center debug probe (must match mandelbrot_fexp.wgsl so the shared debug
+// buffer samples the same screen location regardless of which shader ran).
+const PROBE_X_FRAC: f32 = 0.66;
+const PROBE_Y_FRAC: f32 = 0.66;
+
 // For multiplying 2 complex numbers,
 // which is NOT the same is a matrix multiply (or dot product)
 fn c32_mul(a: vec2f, b: vec2f) -> vec2f {
@@ -446,8 +451,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         vec4f(accum_iters, accum_dist, accum_stripe, f32(accum_flags)));
 
     // -- DEBUG --
-    if (   pix.x == i32(f32(uni.render_width) * 0.5)
-        && pix.y == i32(f32(uni.render_height) * 0.5) ) {
+    if (   pix.x == i32(f32(uni.render_width) * PROBE_X_FRAC)
+        && pix.y == i32(f32(uni.render_height) * PROBE_Y_FRAC) ) {
         // exponents 0: the f32 shader's center is a plain world coordinate.
         debug_out.center_x     = c_for_log.x;
         debug_out.center_x_exp = 0;
@@ -461,6 +466,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         debug_out.stripe_avg   = accum_stripe;
         debug_out.flags        = u32(accum_flags);
         debug_out.rebase_count = 0u;
+        debug_out.bla_max_step     = 0u;  // BLA is FExp-path only
+        debug_out.bla_step_count   = 0u;
+        debug_out.bla_iters_skipped = 0u;
     }
 }
 
@@ -477,6 +485,9 @@ struct DebugOut {
     stripe_avg:         f32,
     flags:              u32,
     rebase_count:       u32,
+    bla_max_step:       u32,
+    bla_step_count:     u32,
+    bla_iters_skipped:  u32,
 };
 
 @group(1) @binding(0)

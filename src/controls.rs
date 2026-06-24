@@ -182,7 +182,7 @@ pub struct Controls {
 
     // Scout config
     auto_start: bool,
-    ref_iters_multiplier: f64,
+    use_bla: bool,
     num_gpu_samples_to_eval: u32,
     glitch_fix: bool,
     perturb_err_threshold: f32,
@@ -275,7 +275,7 @@ pub enum Message {
     ResetScoutEngine,
     GoScout,
     AutoStartChanged(bool),
-    RefItersMultiplierChanged(f64),
+    UseBlaChanged(bool),
     GpuSamplesToEvalChanged(u32),
     GlitchFixChanged(bool),
     PerturbErrorThresholdChanged(f32),
@@ -391,7 +391,7 @@ impl Controls {
             rim_power: settings.rim_power,
             rim_power_range: settings.rim_power_range,
             auto_start: settings.auto_start,
-            ref_iters_multiplier:  settings.ref_iters_multiplier,
+            use_bla: true,
             num_gpu_samples_to_eval: settings.num_gpu_samples_to_eval,
             glitch_fix: true,
             perturb_err_threshold: settings.perturb_err_threshold,
@@ -739,12 +739,9 @@ impl Controls {
                 let mut config_g = config.lock();
                 config_g.auto_start = auto_start;
             }
-            Message::RefItersMultiplierChanged(ref_iters_multiplier) => {
-                self.ref_iters_multiplier = ref_iters_multiplier;
-                let scene_b = self.scene.borrow();
-                let config = scene_b.scout_config();
-                let mut config_g = config.lock();
-                config_g.ref_iters_multiplier = ref_iters_multiplier;
+            Message::UseBlaChanged(use_bla) => {
+                self.use_bla = use_bla;
+                self.scene.borrow_mut().set_bla_enabled(use_bla);
             }
             Message::GpuSamplesToEvalChanged(spawn_per_eval) => {
                 self.num_gpu_samples_to_eval = spawn_per_eval;
@@ -1351,23 +1348,6 @@ impl Controls {
             .on_press(Message::ResetScoutEngine)
             .width(Length::Fixed(60.0)),
 
-            space().width(Length::Fixed(10.0)),
-            text("Ref Iters Multiplier")
-                .size(10)
-                .width(Length::Fixed(50.0))
-                .align_y(Alignment::Center)
-                .align_x(Alignment::Center),
-            space().width(Length::Fixed(5.0)),
-            slider(1.0 ..= 5.0,
-                self.ref_iters_multiplier, Message::RefItersMultiplierChanged)
-                .step(0.1)
-                .width(Length::Fixed(40.0)),
-            space().width(Length::Fixed(5.0)),
-            text(format!("{:<2.1}", self.ref_iters_multiplier))
-                .width(Length::Fixed(25.0))
-                .align_y(Alignment::Center),
-            space().width(Length::Fixed(5.0)),
-
             text("GPU Samples per eval")
                 .size(10)
                 .width(Length::Fixed(50.0))
@@ -1412,6 +1392,15 @@ impl Controls {
             space().width(Length::Fixed(10.0)),
             text("Auto Start")
                 .width(Length::Fixed(35.0))
+                .align_y(Alignment::Center),
+
+            space().width(Length::Fixed(20.0)),
+
+            checkbox(self.use_bla)
+                .on_toggle(Message::UseBlaChanged),
+            space().width(Length::Fixed(10.0)),
+            text("Use BLA")
+                .width(Length::Fixed(50.0))
                 .align_y(Alignment::Center),
 
             space().width(Length::Fixed(20.0)),

@@ -5,6 +5,11 @@ use log::trace;
 use num_complex::Complex32;
 use wgpu::util::DeviceExt;
 use crate::settings::Settings;
+use crate::numerics::FExp;
+
+/// Upper bound on the BLA `dims` header length: [level_count, steps] + (L+1)
+/// offsets. L = ilog2(2*max_ref_orbit)+1 is well under 32, so 64 is safe.
+const BLA_DIMS_CAP: usize = 64;
 
 #[derive(Debug)]
 pub struct PipelineBundle {
@@ -21,6 +26,12 @@ pub struct PipelineBundle {
     // the reference orbit is bounded by the escape radius, so f32 suffices.
     pub rank_one_orbit_buf: wgpu::Buffer,
     pub rank_two_orbit_buf: wgpu::Buffer,
+    // BLA table for the rank-1 orbit (FExp deep-zoom path only). entries (a/b/l)
+    // and dims are uploaded when the anchored orbit changes; radii (r^2) also on
+    // view changes. See scout_engine::bla and mandelbrot_fexp.wgsl.
+    pub bla_entries_buf: wgpu::Buffer,
+    pub bla_radii_buf: wgpu::Buffer,
+    pub bla_level_offsets_buf: wgpu::Buffer,
     pub noise_texture: wgpu::Texture,
     pub palette_texture: wgpu::Texture,
     pub render_texture: wgpu::Texture,
@@ -75,12 +86,13 @@ impl PipelineBundle {
         ) = build_shader_calc_pipeline(device, &uniform_buff, &mandel_out_tex, &settings);
 
         let (
+            bla_entries_buf, bla_radii_buf, bla_level_offsets_buf,
             calc_fexp_bg, fexp_debug_bg,
             calc_mandel_fexp_pipeline
         ) = build_shader_fexp_pipeline(
             device, &uniform_buff, &mandel_out_tex,
             &noise_texture, &ref_orbit_location_buf, &debug_buffer,
-            &rank_one_orbit_buf, &rank_two_orbit_buf,
+            &rank_one_orbit_buf, &rank_two_orbit_buf, settings,
         );
 
         let (
@@ -109,6 +121,7 @@ impl PipelineBundle {
             debug_buffer, debug_readback,
             ref_orbit_location_buf,
             rank_one_orbit_buf, rank_two_orbit_buf,
+            bla_entries_buf, bla_radii_buf, bla_level_offsets_buf,
             noise_texture,
             palette_texture, render_texture,
             render_readback_buf,
@@ -551,11 +564,37 @@ fn build_shader_fexp_pipeline(
     debug_buffer: &wgpu::Buffer,
     rank_one_orbit_buf: &wgpu::Buffer,
     rank_two_orbit_buf: &wgpu::Buffer,
+    settings: &Settings,
 ) -> (
+    wgpu::Buffer, wgpu::Buffer, wgpu::Buffer,
     wgpu::BindGroup, wgpu::BindGroup,
     wgpu::ComputePipeline,
 ) {
     let calc_mandel_fexp_shader = device.create_shader_module(wgpu::include_wgsl!("mandelbrot_fexp.wgsl"));
+
+    // Total BLA entries across all levels is < 2*M; cap at 2*max_ref_orbit.
+    let bla_entry_cap = settings.max_ref_orbit as usize * 2;
+
+    let bla_entries_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bla_entries_buf"),
+        size: (bla_entry_cap * size_of::<BlaEntry>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bla_radii_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bla_radii_buf"),
+        size: (bla_entry_cap * size_of::<FExp>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bla_level_offsets_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bla_level_offsets_buf"),
+        size: (BLA_DIMS_CAP * size_of::<u32>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     let calc_fexp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("calc_fexp bind group layout"),
@@ -620,6 +659,39 @@ fn build_shader_fexp_pipeline(
                 },
                 count: None,
             },
+            // BLA entries (a/b/l)
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // BLA radii (r^2)
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // BLA level offsets/dims header
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
 
@@ -671,6 +743,18 @@ fn build_shader_fexp_pipeline(
                 binding: 5,
                 resource: rank_two_orbit_buf.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: bla_entries_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: bla_radii_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: bla_level_offsets_buf.as_entire_binding(),
+            },
         ],
     });
 
@@ -705,6 +789,7 @@ fn build_shader_fexp_pipeline(
         });
 
     (
+        bla_entries_buf, bla_radii_buf, bla_level_offsets_buf,
         calc_fexp_bg, fexp_debug_bg,
         calc_mandel_fexp_pipeline,
     )

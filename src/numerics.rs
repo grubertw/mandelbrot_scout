@@ -594,6 +594,180 @@ impl ComplexFExp {
     }
 }
 
+// -----------------------------------------------------------------------------
+// FExp / ComplexFExp arithmetic — the CPU mirror of mandelbrot_fexp.wgsl.
+//
+// Invariant (same as the shader): after every op the mantissa is renormalized
+// into [0.5, 1) via frexp, with a true zero (m == 0) handled explicitly. The
+// stored mantissa is f32 to match the GPU representation; intermediate math
+// promotes to f64 and rounds back on normalize. This is what keeps a deeply
+// merged BLA coefficient (the orbit derivative, which over/underflows plain f64)
+// representable at any scale.
+// -----------------------------------------------------------------------------
+
+/// Split x into (m, e) with x == m * 2^e and m in [0.5, 1) (or x itself for 0/inf/nan).
+fn frexp_f64(x: f64) -> (f64, i32) {
+    if x == 0.0 || !x.is_finite() {
+        return (x, 0);
+    }
+    let bits = x.to_bits();
+    let exp_field = ((bits >> 52) & 0x7ff) as i32;
+    if exp_field == 0 {
+        // Subnormal: scale into normal range (x * 2^64), then correct the exponent.
+        let (m, e) = frexp_f64(x * 18446744073709551616.0);
+        return (m, e - 64);
+    }
+    let e = exp_field - 1022; // value = m * 2^e with m in [0.5, 1)
+    let m = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
+    (m, e)
+}
+
+impl FExp {
+    /// The value 1.0 in canonical form (0.5 * 2^1).
+    pub fn one() -> Self {
+        Self { m: 0.5, e: 1 }
+    }
+
+    /// Normalize a (value * 2^exp) pair into a canonical FExp.
+    fn from_parts(value: f64, exp: i32) -> Self {
+        let (m, e) = frexp_f64(value);
+        Self { m: m as f32, e: exp + e }
+    }
+
+    pub fn abs(self) -> Self {
+        Self { m: self.m.abs(), e: self.e }
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.m == 0.0
+    }
+
+    /// Square root for non-negative values.
+    pub fn sqrt(self) -> Self {
+        if self.m <= 0.0 {
+            return Self::zero();
+        }
+        // Halve the exponent; if it's odd, fold one factor of 2 into the mantissa
+        // first so the remaining exponent halves exactly.
+        let (m, e) = if self.e & 1 == 0 {
+            (self.m as f64, self.e >> 1)
+        } else {
+            (self.m as f64 * 2.0, (self.e - 1) >> 1)
+        };
+        Self::from_parts(m.sqrt(), e)
+    }
+
+    /// Strict less-than for non-negative operands (mantissas >= 0). Valid because
+    /// both operands are renormalized, so the exponent is the primary key.
+    pub fn lt_pos(self, other: Self) -> bool {
+        if self.m == 0.0 {
+            return other.m != 0.0;
+        }
+        if other.m == 0.0 {
+            return false;
+        }
+        if self.e != other.e {
+            return self.e < other.e;
+        }
+        self.m < other.m
+    }
+
+    pub fn min_pos(self, other: Self) -> Self {
+        if self.lt_pos(other) { self } else { other }
+    }
+}
+
+impl Mul for FExp {
+    type Output = FExp;
+    fn mul(self, rhs: FExp) -> FExp {
+        FExp::from_parts(self.m as f64 * rhs.m as f64, self.e + rhs.e)
+    }
+}
+
+impl Add for FExp {
+    type Output = FExp;
+    fn add(self, rhs: FExp) -> FExp {
+        // A true zero carries no meaningful exponent, so let the other operand win.
+        if self.m == 0.0 {
+            return rhs;
+        }
+        if rhs.m == 0.0 {
+            return self;
+        }
+        // Align to the larger exponent; the shift exponent is always <= 0, so
+        // powi never overflows (it underflows to 0 when an operand is negligible).
+        let (sum, e) = if self.e >= rhs.e {
+            (self.m as f64 + rhs.m as f64 * 2f64.powi(rhs.e - self.e), self.e)
+        } else {
+            (self.m as f64 * 2f64.powi(self.e - rhs.e) + rhs.m as f64, rhs.e)
+        };
+        FExp::from_parts(sum, e)
+    }
+}
+
+impl Sub for FExp {
+    type Output = FExp;
+    fn sub(self, rhs: FExp) -> FExp {
+        self + FExp { m: -rhs.m, e: rhs.e }
+    }
+}
+
+impl Div for FExp {
+    type Output = FExp;
+    fn div(self, rhs: FExp) -> FExp {
+        FExp::from_parts(self.m as f64 / rhs.m as f64, self.e - rhs.e)
+    }
+}
+
+impl ComplexFExp {
+    /// The value 1 + 0i.
+    pub fn one() -> Self {
+        Self { re: FExp::one(), im: FExp::zero() }
+    }
+
+    pub fn from_f64_pair(re: f64, im: f64) -> Self {
+        Self { re: FExp::from_f64(re), im: FExp::from_f64(im) }
+    }
+
+    /// |z|^2 as FExp — correct at any scale (no squaring through f64 range).
+    pub fn mag2(self) -> FExp {
+        self.re * self.re + self.im * self.im
+    }
+
+    /// |z| as FExp.
+    pub fn mag(self) -> FExp {
+        self.mag2().sqrt()
+    }
+
+    pub fn double(self) -> Self {
+        Self { re: self.re + self.re, im: self.im + self.im }
+    }
+}
+
+impl Add for ComplexFExp {
+    type Output = ComplexFExp;
+    fn add(self, rhs: ComplexFExp) -> ComplexFExp {
+        ComplexFExp { re: self.re + rhs.re, im: self.im + rhs.im }
+    }
+}
+
+impl Sub for ComplexFExp {
+    type Output = ComplexFExp;
+    fn sub(self, rhs: ComplexFExp) -> ComplexFExp {
+        ComplexFExp { re: self.re - rhs.re, im: self.im - rhs.im }
+    }
+}
+
+impl Mul for ComplexFExp {
+    type Output = ComplexFExp;
+    fn mul(self, rhs: ComplexFExp) -> ComplexFExp {
+        ComplexFExp {
+            re: self.re * rhs.re - self.im * rhs.im,
+            im: self.re * rhs.im + self.im * rhs.re,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,5 +855,72 @@ mod tests {
         let sq = z.square();
         assert_eq!(sq.re().to_f64_lossy(), 1.5 * 1.5 - 2.0 * 2.0); // -1.75
         assert_eq!(sq.im().to_f64_lossy(), 2.0 * 1.5 * -2.0); // -6.0
+    }
+
+    // ---- FExp / ComplexFExp arithmetic ----
+
+    fn approx(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol * b.abs().max(1.0)
+    }
+
+    #[test]
+    fn fexp_mul_add_sub_div() {
+        let three = FExp::from_f64(3.0);
+        let five = FExp::from_f64(5.0);
+        assert!(approx((three * five).to_f64(), 15.0, 1e-6));
+        assert!(approx((three + five).to_f64(), 8.0, 1e-6));
+        assert!(approx((three - five).to_f64(), -2.0, 1e-6));
+        assert!(approx((FExp::from_f64(7.0) / FExp::from_f64(2.0)).to_f64(), 3.5, 1e-6));
+        // Exact cancellation yields a canonical zero.
+        assert!((three - three).is_zero());
+    }
+
+    #[test]
+    fn fexp_add_disparate_exponents() {
+        // 1 + 2^-100: the tiny term vanishes into f32 mantissa but must not corrupt
+        // the result or the exponent.
+        let big = FExp::from_f64(1.0);
+        let tiny = FExp { m: 0.5, e: -99 }; // 2^-100
+        let sum = big + tiny;
+        assert!(approx(sum.to_f64(), 1.0, 1e-6));
+        // The tiny value on its own keeps its deep exponent.
+        assert_eq!(tiny.e, -99);
+    }
+
+    #[test]
+    fn fexp_survives_deep_exponents() {
+        // 1e-300 squared underflows f64 (~1e-600) but FExp keeps it: mantissa
+        // finite & non-zero, exponent far below f64's floor.
+        let small = FExp::from_f64(1e-300);
+        let sq = small * small;
+        assert!(sq.m != 0.0 && sq.m.is_finite());
+        assert!(sq.e < -1900, "exponent should be ~ -1993, got {}", sq.e);
+        // And it normalizes back: sqrt(1e-300^2) == 1e-300.
+        assert!(approx(sq.sqrt().to_f64(), 1e-300, 1e-5));
+    }
+
+    #[test]
+    fn fexp_sqrt_and_compare() {
+        assert!(approx(FExp::from_f64(16.0).sqrt().to_f64(), 4.0, 1e-6));
+        assert!(approx(FExp::from_f64(2.0).sqrt().to_f64(), std::f64::consts::SQRT_2, 1e-6));
+        assert!(FExp::from_f64(3.0).lt_pos(FExp::from_f64(5.0)));
+        assert!(!FExp::from_f64(5.0).lt_pos(FExp::from_f64(3.0)));
+        assert_eq!(FExp::from_f64(3.0).min_pos(FExp::from_f64(5.0)).to_f64(), 3.0);
+    }
+
+    #[test]
+    fn cfexp_mul_and_mag() {
+        // (1 + 2i)(3 + 4i) = -5 + 10i
+        let a = ComplexFExp::from_f64_pair(1.0, 2.0);
+        let b = ComplexFExp::from_f64_pair(3.0, 4.0);
+        let p = a * b;
+        assert!(approx(p.re.to_f64(), -5.0, 1e-6));
+        assert!(approx(p.im.to_f64(), 10.0, 1e-6));
+        // |3 + 4i| = 5
+        assert!(approx(ComplexFExp::from_f64_pair(3.0, 4.0).mag().to_f64(), 5.0, 1e-6));
+        // double
+        let d = ComplexFExp::from_f64_pair(1.5, -2.0).double();
+        assert!(approx(d.re.to_f64(), 3.0, 1e-6));
+        assert!(approx(d.im.to_f64(), -4.0, 1e-6));
     }
 }

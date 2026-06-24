@@ -1,6 +1,8 @@
 use bytemuck;
 use serde::{Deserialize, Serialize};
 
+use crate::numerics::ComplexFExp;
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Serialize, Deserialize)]
 pub struct SceneUniform {
@@ -100,6 +102,10 @@ impl SceneUniform {
     pub fn set_use_fexp(&mut self, use_fexp: bool) {
         if use_fexp { self.render_flags |= 1 << 11; } else { self.render_flags &= !(1 << 11) }
     }
+
+    pub fn set_use_bla(&mut self, use_bla: bool) {
+        if use_bla { self.render_flags |= 1 << 12; } else { self.render_flags &= !(1 << 12) }
+    }
 }
 
 #[repr(C)]
@@ -175,6 +181,29 @@ pub struct DebugOut {
     // count means the perturbed orbit keeps diverging from the reference =>
     // reference poorly matched / precision-stressed.
     pub rebase_count:       u32,
+    // BLA probe stats (FExp shader only; 0 on the f32 path). Collected at the
+    // off-center probe pixel — more representative than dead-center, where the
+    // scout's reference orbit usually sits and dz stays trivially small.
+    pub bla_max_step:       u32,   // largest single BLA jump (l) taken
+    pub bla_step_count:     u32,   // number of BLA jumps taken
+    pub bla_iters_skipped:  u32,   // total iterations covered by BLA jumps (sum of l)
+}
+
+/// One BLA (Bivariate Linear Approximation) table entry as uploaded to the GPU:
+/// `dz_out = a*dz + b*dc`, valid for `l` reference iterations. Mandelbrot is
+/// holomorphic, so `a`/`b` are complex scalars (`ComplexFExp`), not 2x2 matrices.
+/// The validity radius (r^2) is uploaded separately in the `bla_radii` buffer
+/// because it depends on the view (delta_c_max), while a/b/l do not.
+///
+/// repr(C): a@0, b@16, l@32, size 36, align 4 — matches the std430 `BlaEntry`
+/// declared in mandelbrot_fexp.wgsl. Built by scout_engine::bla, which imports
+/// this type so there is a single source of truth for the layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BlaEntry {
+    pub a: ComplexFExp,
+    pub b: ComplexFExp,
+    pub l: u32,
 }
 
 #[repr(C)]
