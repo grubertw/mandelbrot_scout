@@ -1063,7 +1063,7 @@ impl Controls {
                 text(format!("{:<3.2}", self.render_res_factor_during_pan))
                     .width(Length::Fixed(30.0))
                     .align_y(Alignment::Center),
-                space().width(Length::Fixed(15.0)),
+                space().width(Length::Fixed(30.0)),
 
                 text("Scale Factor")
                     .width(Length::Fixed(90.0))
@@ -1073,58 +1073,9 @@ impl Controls {
                 slider(1.05..=4.0,
                     self.scale_factor, Message::ScaleFactorChanged)
                     .step(0.05)
-                    .width(Length::Fixed(60.0)),
+                    .width(Length::Fixed(80.0)),
                 space().width(Length::Fixed(5.0)),
                 text(format!("{:<1.2}", self.scale_factor))
-                    .width(Length::Fixed(30.0))
-                    .align_y(Alignment::Center),
-                ]
-                .align_y(Alignment::Center)
-            )
-            .style(inner_container_style)
-            .padding(10),
-            container(row![
-                text("Samples")
-                    .width(Length::Fixed(80.0))
-                    .align_y(Alignment::Center)
-                    .align_x(Alignment::Center),
-                space().width(Length::Fixed(5.0)),
-                slider(1..=16,
-                    self.render_sample_count, Message::RenderSampleCountChanged)
-                    .step(1_u32)
-                    .width(Length::Fixed(60.0)),
-                space().width(Length::Fixed(5.0)),
-                text(format!("{:<2}", self.render_sample_count))
-                    .width(Length::Fixed(10.0))
-                    .align_y(Alignment::Center),
-                space().width(Length::Fixed(10.0)),
-
-                text("Jitter")
-                    .width(Length::Fixed(60.0))
-                    .align_y(Alignment::Center)
-                    .align_x(Alignment::Center),
-                space().width(Length::Fixed(5.0)),
-                slider(0.0..=1.0,
-                    self.render_jitter_strength, Message::RenderJitterStrengthChanged)
-                    .step(0.01)
-                    .width(Length::Fixed(60.0)),
-                space().width(Length::Fixed(5.0)),
-                text(format!("{:<1.2}", self.render_jitter_strength))
-                    .width(Length::Fixed(30.0))
-                    .align_y(Alignment::Center),
-                space().width(Length::Fixed(10.0)),
-
-                text("Averaging Bias")
-                    .width(Length::Fixed(120.0))
-                    .align_y(Alignment::Center)
-                    .align_x(Alignment::Center),
-                space().width(Length::Fixed(5.0)),
-                slider(0.0..=1.0,
-                    self.render_sample_avg_bias, Message::RenderSampleAvgBiasChanged)
-                    .step(0.01)
-                    .width(Length::Fixed(60.0)),
-                space().width(Length::Fixed(5.0)),
-                text(format!("{:<1.2}", self.render_sample_avg_bias))
                     .width(Length::Fixed(30.0))
                     .align_y(Alignment::Center),
                 ]
@@ -1140,10 +1091,56 @@ impl Controls {
                 radio("f32", CalcShader::F32, Some(self.calc_shader), Message::CalcShaderChanged),
                 space().width(Length::Fixed(15.0)),
                 radio("FExp", CalcShader::FExp, Some(self.calc_shader), Message::CalcShaderChanged),
-            ]
-            .align_y(Alignment::Center))
+                space().width(Length::Fixed(20.0)),
+
+                text("Samples")
+                    .width(Length::Fixed(60.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(1..=16,
+                    self.render_sample_count, Message::RenderSampleCountChanged)
+                    .step(1_u32)
+                    .width(Length::Fixed(50.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<2}", self.render_sample_count))
+                    .width(Length::Fixed(10.0))
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(10.0)),
+
+                text("Jitter")
+                    .width(Length::Fixed(60.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(0.0..=1.2,
+                    self.render_jitter_strength, Message::RenderJitterStrengthChanged)
+                    .step(0.01)
+                    .width(Length::Fixed(40.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<1.2}", self.render_jitter_strength))
+                    .width(Length::Fixed(25.0))
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(10.0)),
+
+                text("Averaging Bias")
+                    .width(Length::Fixed(120.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::Center),
+                space().width(Length::Fixed(5.0)),
+                slider(0.0..=1.0,
+                    self.render_sample_avg_bias, Message::RenderSampleAvgBiasChanged)
+                    .step(0.01)
+                    .width(Length::Fixed(40.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<1.2}", self.render_sample_avg_bias))
+                    .width(Length::Fixed(30.0))
+                    .align_y(Alignment::Center),
+                ]
+                .align_y(Alignment::Center)
+            )
             .style(inner_container_style)
-            .padding(10)
+            .padding(10),
         ]
             .spacing(5)
             .padding(5)

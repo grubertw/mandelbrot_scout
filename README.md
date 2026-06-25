@@ -1,9 +1,11 @@
 # Mandelbrot Scout
-Renders the Mandelbrot Set on the GPU using Rusts's WGPU library and WGSL shaders, and Iced as the GUI overlay. Leverages perturbation theory to overcome the GPU's float 32 precision limitation, and instead discovers qualified reference orbits 'in the neighborhood', which are computed on the CPU in high precision.  
+Renders the Mandelbrot Set on the GPU using Rusts's WGPU library and WGSL shaders, and Iced as the GUI overlay. Leverages perturbation theory to overcome the GPU's float 32 precision limitation, and instead discovers 'quality' reference orbits which are computed on the CPU in high precision. While working Mandelbrot renderers have demonstrated that perturbation can work well for almost any reference orbit as long as it is 'in the neighborhood' (of pixels being rendered by the GPU), the 'Scout' component tries to do better, by leveraging GPU feedback to pick complex-C locations that demonstrate late escape (i.e. high iteration counts) and use these locations as 'seeds' to span new (and better) reference orbits. 
 
-As a hobby project, the state of the repo is always a work-in-progress, especially for perturbation theory. That being said, I have made some very good progress lately, and can see quite visibly the drastic difference perturbation makes to overcome the GPU's precision wall! See in the screenshots section below!  
+What makes these reference orbits better? Simply stated, orbits with a higher iteration count (with respect to current GPU pixels), are less likely to cause 'perturbation glitches'. And while there are techniques to correct these glitches when they are detected, because low-precision math is being used, this presents more opportunity for error to accumulate, which distorts the image and makes it fuzzy, and thus best avoided, if possible! 
 
-I always try to keep HEAD of the repo tested and running, even if/when experimental features are still being developed. As a stickler for quality UX, I will likely always remain hesitant to label 'official' releases on a regular basis.
+As a hobby project, the state of the repo is always a work-in-progress. That being said, the most recent v3.x releases are now stable and well tested.
+
+I also try to keep HEAD of the repo tested and running, even if/when experimental features are still being developed.
 
 ## To compile:
 `$> cargo build`
@@ -13,7 +15,7 @@ I always try to keep HEAD of the repo tested and running, even if/when experimen
 
 **If you don't have Rust on your system yet, it is very easy to install! Simply download the rustup shell script from [rust-lang.org](https://rust-lang.org/tools/install/), install rust, and then run `cargo run` from the shell once inside the project directory (where Cargo.toml is located). Cargo downloads and builds all the library dependencies, then the project, and then runs! Rust is also very portable, and works perfectly fine, right on Windows! While the shell script installer is meant for posix systems, the Rust community recommends Chocolaty.**
 
-Update (06/08/2026): Mandelbrot Scout v3.3 no longer depends on Rug MPFR! This means the program is much easier to compile in windows, and no longer requires mingw. This means that following the instructions from rust-lang.org for windows is now sufficient, and you can compile right in the command.exe window! OFC I still recommend something like Git For Windows and Git Bash, but it's not necessary.
+Update (06/24/2026): Mandelbrot Scout v3.4 reduces the use of Rug to Integer only, but still requires GMP, which on windows, needs MSYS and mingw.
 
 Update (03/23/2026): Mandelbrot Scout v3.1 has been released successfully! I created a Windows VM with a properly configured environment to build the program! For me, what worked best was to use 'Git for Windows', and configure it's PATH - which is the Windows User PATH anyways - to include where MSYS installs mingw and it's binaries (when it's pacman command is run). This makes it so cargo can find gcc and use it to build MPFR. 
 
@@ -36,8 +38,10 @@ That being said, my foremost goal with the project has always been: Make it fast
 5. UI-driven color palette selection 
    1. Color palettes are IN, and now configurable in settings.toml!
    2. Import MAP palettes also IN!
-6. Arbitrary Deep Zooms that leverage v3.3's FixedReal and FixedComplex numbers
-   1. The introduction of Fixed-point presents an interesting opportunity to use integers instead of f32 values, which use an implicit fixed exponent - i.e. the 'shift' value contained within FixedReal values, which is driven by changes to the viewport scale. The goal now is to achieve something similar to float-exp on the GPU, but with 'exp' (and possibly also the sign) being made implicit!
+6. Arbitrary Deep Zooms past f32's perturbation limit of 1e-36
+   1. Use of FloatExp is IN
+   2. Use of BLA and iteration skipping is IN
+   3. More on these below!
 7. Julia sets & cubic Mandelbrot 
 
 I've been iterating with ChatGPT on the 'Scout Engine' concept for a while now, and sometimes, if I am being honest, I wonder what the heck I was thinking to trust the AI to help me with design. It took me down some frightenting over-enginering paths - and this probably happened because of my own lack of understanding of perturbance - which created a hot-soup of complexity that I should have questened earlier on. That being said, it did help me understand the math better, and was useful for pouring through 10,000+ line log output.
@@ -50,9 +54,19 @@ With the detection and application of Perturbation 'glitches', it does seem like
 
 Having functional GPU perturbation glitch-fix/rebase logic also provides another wonderful benefit - it makes my reduce shader, which sends the 'latest escaped/deepest' pixel locations to the Scout *much* more accurate! Without glitch-fix, GPU pixel calculations could never make it past the current reference orbit depth, and the only way to find a deeper orbit was for the CPU/Scout to test a lot of these seeds - aimlessly taking shots in the dark. With glich-fix however, the GPU can get much closer to the 'true' bailout point of iterations, and hence give a much better seed value to the Scout. Then, once the scout has calculated a deeper refernece orbit for the viewport, that orbit can be used instead, which then minimizes the need for the glitch-fix criteria to even trigger!
 
-# User Manual
-While the GUI is still being heavily worked-on - and is highly subject to change. As such, this might not be the most up-to-date, as I push changes.
+About number systems on the GPU.
 
+Even with Perterbation Theory, there is only so far the GPU can take us when we restrict ourselves to f32 math only. While it's fast, and pretty much every GPU supports them, at some point f32 values will fail to represent the delta between pixels, in complex space - i.e. near the smallest number that can be represented by f32, which is 1e-39. At least 2-3 significant digits are needed for per-pixel spacing, otherwise the entire image simply 'flips' to a single color.
+
+So how do we get around this? FloatExp. One f32 value for the mantissa, and an i32 value for the exponent. Performing math on values like these is fairly well documented, but what is crutial for the mandelbrot recurrence, is the normilization of 'z' (or 'dz' in the perturbation recurrence) after every math step. In other words, keeping the mantissa bounded between 0.5 and 1.0. If care is not taken here, then bailout either happens too early or too late, which cause all sorts of weird artifacts to appear in the images!
+
+Concerning BLA.
+
+I should note here that I would not have solved this alone. Firstly, I decided to try out Anthropic's Calude-Code - but again, the AI could not divine these advanced algorithms on their own. To get things actually working, I needed to feed it a working implementation - i.e. Fraktaler-3, which is written by a real Claude rather than a fake Claude! AS impressive as AI seems sometimes - and there is no question it saved me time - it may still be a while before it invents anything 'ground-breaking' on its own!
+
+I am pleased to say though that BLA is now working pretty well in my codebase now. Note that it only speeds-up pixel calculations/itertions in my new FExp shader (i.e. float-exponent), and also note that for zooms that have not yet gone past 1e-38, using the f32 shader is still going to be faster, even at 50k+ iterations. In the future, I might decide to add BLA to the f32 shader, but I don't think it's necessary, as BLA only begins to shine when you start into the 100k+ iterations territory, which are really only needed for deep zooms past 1e-38.
+
+# User Manual
 v3.3 now has a much-improved navigation system. While not perfect, left-click/touch operations are now supported, and should work as expected. A single left-click will zoom-in where the mouse pointer is on the screen, and a right-click will zoom out. Pressing and holding the left mouse will enable drag and pan the camera, until the mouse is released. Zoom-in/out can also be performed with the mouse wheel, as well as pinch gestures on a tablet. Controls in the 'Res' tab are also helpful for navigation, and mainly the "Scale Factor", which controls the multiplier for zoom/scale operations. Changing the "RF During Pan" to less than 1.0 can help speed-up drag/pan operations, as less samples are taken than there are pixels in the window (see the section on Resolution Controls below).
 
 1) Iteration Controls
@@ -80,16 +94,16 @@ v3.3 now has a much-improved navigation system. While not perfect, left-click/to
 3) Scout Controls
    1) "Reset Scout" button will delete from program memory all reference orbits, and stop perturbation mode
       1) i.e. Absolute iteration will resume, with no reference orbit being used.
-   2) Reference Iters Multiplier
-      1) For the calculation of reference orbits, the max iterations used by the GPU will be multiplied using this value. Pertubation prefers orbits 'at least' as long as user/pixel max, but is better that it goes a little further. It also helps for reference orbit qualification, so this way the Scout can rank 'deeper' orbits before supplying them to the GPU.
-   3) GPU Samples per eval
+   2) GPU Samples per eval
       1) ScoutEngine uses 'evaluation cycles' to evaluate reference orbits. This value represents the number of reference orbits it will spawn from GPU-supplied seed values. If there are at least 'some' pixels 'in the set', then the reduce/compute shader will find them, and the Scout will seed from these coordinates. If the viewport is in filaments, then this value should be set higher, as it could take more samples to find a reference orbit that has a sufficient depth.
-   4) Glitch Fix toggle
+   3) Glitch Fix toggle
       1) Leave this enabled, unless you are closely monitoring the logs, and are curious what the difference is, when using an orbit that has insufficient depth for the viewport.
-   5) Perturb Error Threshold
+   4) Perturb Error Threshold
       1) Multiplier on the magnitude of DeltaZ when checking if it falls below 'reconstructed z', for the glitch-fix.
-   6) Auto Start
+   5) Auto Start
       1) Scout/Perturbance will begin at the starting scale, and evaluate on changes to the viewport.
+   6) Use BLA
+      1) While BLA is mainly for use within the FExp shader, ScoutEngine builds the BLA table. Also, a table is only build for the current 'rank-1' orbit - i.e. the orbit being used by the GPU for perturbation - and will be rebuilt when a different orbit becomes rank-1. There are also protections in the Scene to prevent the incorrect BLA table from being used when the reference orbit changes - as well as calculate new BLA radii whenever the scale changes.
    7) "Scout!" button manually triggers the evaluate function, and is good for forcing a new reference orbit.
       1) For the most part, this is intended for use when Auto Start is disabled, and the user wishes to manually trigger orbit evaluation. Scout *can* still be pressed with Auto Start however, if it seems like the viewport wound benefit from a better reference orbit.
 4) Coordinate/Scale Controls
@@ -124,6 +138,8 @@ v3.3 now has a much-improved navigation system. While not perfect, left-click/to
       1) Note that pixel jitter is computed using a 128x128 PRNG (ChaCha8) white-noise texture, and is NOT blue noise (i.e. Poisson Disk). In later implementations, I may improve on this, and migrate to using true blue noise, and a geometric median for sample averages.
    6) "Averaging Bias" - Rather than take a basic average of iterations across samples, a mix() invocation is used. The bias is then used to mix between min_iters and max_iters found across samples.
       1) Effectively, this slider acts as sharpness. With Jitter and Bias both set to 1.0, the shader more aggressively includes pixels "into the set", making the image appear "sharper". Conversely, with Jitter left at 1 and Bias at 0, the set and it's filaments become "thinner". Ultimately, this is NOT sharpness, and depending on the color palette use, and how colors are mapped across iterations, using a bias of 0.0 may seem to "sharpen" the image - which was why I decided to make a slider for this value, as opposite extremes of this value may better suit the current color mapping. 
+   7) GPU shaders radio
+      1) Toggle between f32 and FExp (float-exponent) GPU shaders. Note that the Fexp shader is about 4x slower than the f32 shader, and while it can be used at all zoom levels, it is not really necessary until the scale is below 1e-38.
 
 ## Helpful environment variables to use on CLI while running
 The RUST_LOG environment variable controls all the logging output, which is essential for debugging. Also, many other library dependencies (critically, WGPU) use the Rust logger, so this turns into the most essential environment variable for debugging!
@@ -190,6 +206,30 @@ And the final PNG export.
 ![FarDareisMayPainting export](screenshots/screenshot1.png)
 
 Ultimately, it all comes down to finding the right aesthetic appeal, which is why I like sliders so much. With a good range of values, these sliders give users highly interactive and highly responsive feedback, especially when making very small changes to values, which would be nearly impossible to see the difference otherwise. Rendering on the GPU is also what makes these kinds of successive coloring+calculation changes even possible - at least at high frame-rates - and I feel like that matters a lot for these types of fine-tuning.   
+
+With pertubation working well, we are able to 'stretch' the use of f32 values on the GPU to their fullest. All the rounding error that accumulates while using 'naive' Mandelbrot recursion is avoided by using a high-precision reference orbit - even if that orbit is ultimately truncated down to f32 values in the vector/list that is sent to the GPU. While it might seem counter-intuitive at first that this can be done, the thing to remember here is that in any math operation, the most significant bits matter most, and as long as MSB's are accurate, the LSB's can safely be ignored anyways - and besides, rounding occurs anyways in the pertubation accumulation of 'dz' - just as it does for 'z' without perturbation - but unlike how we recurse during naive Mandelbrot, we also have an extra check we can make that detects when this rounding error becomes a problem and do somethign about it. A.k.a. the perturbation glitch-fix!! With this technique - and couppled with a good reference orbit to begin with, perturbation error is kept to the bare minimum and allows f32 values very close to 1.175e-38, which is the smallest possible (positive) f32 value.
+
+![Deepest f32 zoom](/screenshots/Screenshot%202026-06-25%20at%2011.24.14 AM.png)
+Above, the per-pixel scale shows how close we are to f32's absolute minimum number representation.
+
+For pixels to resolve, we need at least 2-3 digits of precision, so the GPU can still compute the difference between pixels. Even with my lowest scale-factor though (which is 1.05x), the image 'suddenly collapses' into a single color.
+
+![Below deepeast f32 zoom](/screenshots/Screenshot%202026-06-25%20at%2011.25.28 AM.png)
+Notice the scale is at 1.139e-38 now, which is below 1.175e-38, and thus a complete collapse of pixels/color.
+
+So where do we go from here? How do we push our fractal zooms to even further depths? The answer is: Float-Exponent - i.e. a 32-bit float for the mantissa, and a 32-bit (signed) integer for the exponent. While the math is slower (about 4x the cost of f32), the operations are well understood - as they are pretty much the same ops that GPU/CPU hardware registers do for us, except we need to emulate with software instead - which is of course much slower. With a powerful enough GPU however, this slow-down will be much less noticeable however - at least until you start increasing iteration counts into the 100k+ range.
+
+![Use of FExp shader to push past f32 boundry](/screenshots/Screenshot%202026-06-25%20at%2011.25.57 AM.png)
+Scale remains at 1.139e-38, but we switch to the FExp shader.
+
+Now we can keep descending into the fractal and increasing iterations!
+![Deeper with FExp](/screenshots/Screenshot%202026-06-25%20at%2011.28.09 AM.png)
+
+But we may need to increase iterations to resolve inner structure first, and find the minibort!
+![Deeper yet with Fexp](/screenshots/Screenshot%202026-06-25%20at%2011.29.19 AM.png)
+
+Minibrot found at 120k iterations!
+![Minibrot found with FExp](/screenshots/Screenshot%202026-06-25%20at%2011.34.34 AM.png)
 
 ## 3.1 Update - Distance Estimation is working now!
 
