@@ -153,9 +153,13 @@ impl Scene {
             jitter_strength: 0.0,
             sample_avg_bias: 0.9,
             render_flags: 2,
-            stripe_density: settings.stripe_density,
-            stripe_strength: settings.stripe_strength,
-            stripe_gamma: settings.stripe_gamma,
+            stripe_trap_arg1: settings.stripe_density,
+            stripe_trap_arg2: settings.stripe_strength,
+            stripe_trap_arg3: settings.stripe_gamma,
+            stripe_trap_arg4: 0.5,
+            trap_shape: 0,
+            trap_palette_cycles: 1.0,
+            trap_iter_skip_frac: 0.0,
             color_scalar_mapping_mode: 0,
             color_scaler_mapping_strength: 1.0,
             palette_tex_width: settings.max_palette_colors,
@@ -961,6 +965,16 @@ impl Scene {
         self.recalc_fractal = true;
     }
 
+    pub fn set_use_traps(&mut self, use_traps: bool) {
+        self.uniform.set_use_traps(use_traps);
+        self.recalc_fractal = true;
+    }
+
+    pub fn set_use_trap_interior(&mut self, use_trap_interior: bool) {
+        self.uniform.set_use_trap_interior(use_trap_interior);
+        self.recalc_color = true;
+    }
+
     pub fn set_use_fexp(&mut self, use_fexp: bool) {
         self.uniform.set_use_fexp(use_fexp);
         self.recalc_fractal = true;
@@ -1109,20 +1123,55 @@ impl Scene {
     }
 
     pub fn set_stripe_density(&mut self, stripe_density: f32) {
-        self.uniform.stripe_density = stripe_density;
+        self.uniform.stripe_trap_arg1 = stripe_density;
         self.recalc_fractal = true;
     }
 
     pub fn set_stripe_strength(&mut self, stripe_strength: f32) {
-        self.uniform.stripe_strength = stripe_strength;
+        self.uniform.stripe_trap_arg2 = stripe_strength;
         self.recalc_fractal = true;
     }
 
     pub fn set_stripe_gamma(&mut self, stripe_gamma: f32) {
-        self.uniform.stripe_gamma = stripe_gamma;
+        self.uniform.stripe_trap_arg3 = stripe_gamma;
         self.recalc_fractal = true;
     }
-    
+
+    pub fn set_trap_shape(&mut self, shape: u32) {
+        self.uniform.trap_shape = shape;
+        self.recalc_fractal = true;
+    }
+
+    pub fn set_trap_radius(&mut self, radius: f32) {
+        self.uniform.stripe_trap_arg1 = radius;
+        self.recalc_fractal = true;
+    }
+
+    pub fn set_trap_palette_cycles(&mut self, cycles: f32) {
+        self.uniform.trap_palette_cycles = cycles;
+        self.recalc_color = true;
+    }
+
+    pub fn set_trap_blend(&mut self, blend: f32) {
+        self.uniform.stripe_trap_arg4 = blend;
+        self.recalc_color = true;
+    }
+
+    pub fn set_trap_sharpness(&mut self, sharpness: f32) {
+        self.uniform.stripe_trap_arg3 = sharpness;
+        self.recalc_fractal = true;
+    }
+
+    pub fn set_trap_iter_skip_frac(&mut self, frac: f32) {
+        self.uniform.trap_iter_skip_frac = frac;
+        self.recalc_fractal = true;
+    }
+
+    pub fn set_trap_arg2(&mut self, v: f32) {
+        self.uniform.stripe_trap_arg2 = v;
+        self.recalc_fractal = true;
+    }
+
     pub fn set_rim_intensity(&mut self, rim_intensity: f32) {
         self.uniform.rim_intensity = rim_intensity;
         self.recalc_color = true;

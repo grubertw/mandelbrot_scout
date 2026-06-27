@@ -27,9 +27,15 @@ pub struct SceneUniform {
     pub jitter_strength: f32,
     pub sample_avg_bias: f32,
     pub render_flags: u32,
-    pub stripe_density: f32,
-    pub stripe_strength: f32,
-    pub stripe_gamma: f32,
+    // Shared args for stripe averaging and orbit traps (only one active at a time;
+    // traps override stripes when USE_TRAPS is set). Stripe meanings kept as comments.
+    pub stripe_trap_arg1: f32,  // stripes: density  | traps: radius / size
+    pub stripe_trap_arg2: f32,  // stripes: strength  | traps: sides (ngon) / spiral arms
+    pub stripe_trap_arg3: f32,  // stripes: gamma     | traps: extra shape param
+    pub stripe_trap_arg4: f32,  // stripes: (unused)  | traps: trap blend weight
+    pub trap_shape: u32,
+    pub trap_palette_cycles: f32,
+    pub trap_iter_skip_frac: f32,
     pub color_scalar_mapping_mode: u32,
     pub color_scaler_mapping_strength: f32,
     pub palette_tex_width: u32,
@@ -105,6 +111,14 @@ impl SceneUniform {
 
     pub fn set_use_bla(&mut self, use_bla: bool) {
         if use_bla { self.render_flags |= 1 << 12; } else { self.render_flags &= !(1 << 12) }
+    }
+
+    pub fn set_use_traps(&mut self, use_traps: bool) {
+        if use_traps { self.render_flags |= 1 << 13; } else { self.render_flags &= !(1 << 13) }
+    }
+
+    pub fn set_use_trap_interior(&mut self, use_trap_interior: bool) {
+        if use_trap_interior { self.render_flags |= 1 << 14; } else { self.render_flags &= !(1 << 14) }
     }
 }
 

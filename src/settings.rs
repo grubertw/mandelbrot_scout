@@ -77,6 +77,17 @@ pub struct Settings {
     pub stripe_strength_range: (f32, f32),
     pub stripe_gamma: f32,
     pub stripe_gamma_range: (f32, f32),
+    pub trap_radius: f32,
+    pub trap_radius_range: (f32, f32),
+    pub trap_cycles: f32,
+    pub trap_cycles_range: (f32, f32),
+    pub trap_blend: f32,
+    pub trap_sharpness: f32,
+    pub trap_iter_skip_frac: f32,
+    pub trap_spiral_tightness: f32,
+    pub trap_spiral_tightness_range: (f32, f32),
+    pub trap_spiral_arms: f32,
+    pub trap_spiral_arms_range: (f32, f32),
     pub rim_intensity: f32,
     pub rim_power: f32,
     pub rim_power_range: (f32, f32),
@@ -206,6 +217,17 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("stripe_strength_range", vec![0.1, 8.0])?
         .set_default("stripe_gamma", 0.8)?
         .set_default("stripe_gamma_range", vec![0.1, 2.0])?
+        .set_default("trap_radius", 0.0)?
+        .set_default("trap_radius_range", vec![0.0, 4.0])?
+        .set_default("trap_cycles", 1.0)?
+        .set_default("trap_cycles_range", vec![0.01, 20.0])?
+        .set_default("trap_blend", 0.5)?
+        .set_default("trap_sharpness", 0.0)?
+        .set_default("trap_iter_skip_frac", 0.0)?
+        .set_default("trap_spiral_tightness", 0.5)?
+        .set_default("trap_spiral_tightness_range", vec![0.05, 3.0])?
+        .set_default("trap_spiral_arms", 1.0)?
+        .set_default("trap_spiral_arms_range", vec![1.0, 8.0])?
         .set_default("rim_intensity", 0.3)?
         .set_default("rim_power", 1.0)?
         .set_default("rim_power_range", vec![0.01, 4.0])?

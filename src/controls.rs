@@ -70,6 +70,35 @@ impl From<ColorScalarMappingMode> for u32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display)]
+pub enum TrapShape {
+    #[strum(to_string = "Circle")]
+    Circle,
+    #[strum(to_string = "Cross")]
+    Cross,
+    #[strum(to_string = "Square")]
+    Square,
+    #[strum(to_string = "Line Re")]
+    LineRe,
+    #[strum(to_string = "Line Im")]
+    LineIm,
+    #[strum(to_string = "Log Spiral")]
+    LogSpiral,
+}
+
+impl From<TrapShape> for u32 {
+    fn from(s: TrapShape) -> Self {
+        match s {
+            TrapShape::Circle    => 0,
+            TrapShape::Cross     => 1,
+            TrapShape::Square    => 2,
+            TrapShape::LineRe    => 3,
+            TrapShape::LineIm    => 4,
+            TrapShape::LogSpiral => 5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalcShader {
     F32,
@@ -146,6 +175,20 @@ pub struct Controls {
     smooth_coloring: bool,
     use_de: bool,
     use_stripes: bool,
+    use_traps: bool,
+    trap_shape: Option<TrapShape>,
+    trap_radius: f32,
+    trap_radius_range: (f32, f32),
+    trap_cycles: f32,
+    trap_cycles_range: (f32, f32),
+    trap_blend: f32,
+    trap_sharpness: f32,
+    trap_iter_skip_frac: f32,
+    trap_spiral_tightness: f32,
+    trap_spiral_tightness_range: (f32, f32),
+    trap_spiral_arms: f32,
+    trap_spiral_arms_range: (f32, f32),
+    use_trap_interior: bool,
     debug_coloring: bool,
     // DE controls
     enable_glow: bool,
@@ -246,6 +289,16 @@ pub enum Message {
     SmoothColoringChanged(bool),
     UseDEChanged(bool),
     UseStripesChanged(bool),
+    UseTrapsChanged(bool),
+    TrapShapeChanged(TrapShape),
+    TrapRadiusChanged(f32),
+    TrapCyclesChanged(f32),
+    TrapBlendChanged(f32),
+    TrapSharpnessChanged(f32),
+    TrapIterSkipFracChanged(f32),
+    TrapSpiralTightnessChanged(f32),
+    TrapSpiralArmsChanged(f32),
+    UseTrapInteriorChanged(bool),
     EnableGlowChanged(bool),
     DebugColoringChanged(bool),
     DistanceMultiplierChanged(f32),
@@ -358,7 +411,22 @@ impl Controls {
             scalar_mapping_log_range: settings.scalar_mapping_log_range,
             scalar_mapping_atan_range: settings.scalar_mapping_atan_range,
             smooth_coloring: false,
-            use_de: false, use_stripes: false, debug_coloring: false,
+            use_de: false, use_stripes: false,
+            use_traps: false,
+            trap_shape: Some(TrapShape::Circle),
+            trap_radius: settings.trap_radius,
+            trap_radius_range: settings.trap_radius_range,
+            trap_cycles: settings.trap_cycles,
+            trap_cycles_range: settings.trap_cycles_range,
+            trap_blend: settings.trap_blend,
+            trap_sharpness: settings.trap_sharpness,
+            trap_iter_skip_frac: settings.trap_iter_skip_frac,
+            trap_spiral_tightness: settings.trap_spiral_tightness,
+            trap_spiral_tightness_range: settings.trap_spiral_tightness_range,
+            trap_spiral_arms: settings.trap_spiral_arms,
+            trap_spiral_arms_range: settings.trap_spiral_arms_range,
+            use_trap_interior: false,
+            debug_coloring: false,
             enable_glow: false,
             distance_multiplier: settings.distance_multiplier,
             distance_multiplier_range: settings.distance_multiplier_range,
@@ -622,7 +690,84 @@ impl Controls {
             }
             Message::UseStripesChanged(use_stripes) => {
                 self.use_stripes = use_stripes;
+                if use_stripes {
+                    self.use_traps = false;
+                    self.scene.borrow_mut().set_use_traps(false);
+                    // Push current stripe values so the scene uniform matches the GUI.
+                    let mut s = self.scene.borrow_mut();
+                    s.set_stripe_density(self.stripe_density);
+                    s.set_stripe_strength(self.stripe_strength);
+                    s.set_stripe_gamma(self.stripe_gamma);
+                }
                 self.scene.borrow_mut().set_use_stripes(use_stripes);
+            }
+            Message::UseTrapsChanged(use_traps) => {
+                self.use_traps = use_traps;
+                if use_traps {
+                    self.use_stripes = false;
+                    self.scene.borrow_mut().set_use_stripes(false);
+                    // Push current trap values so the scene uniform matches the GUI.
+                    let mut s = self.scene.borrow_mut();
+                    let shape = self.trap_shape.unwrap_or(TrapShape::Circle);
+                    s.set_trap_shape(u32::from(shape));
+                    match shape {
+                        TrapShape::LogSpiral => {
+                            s.set_trap_radius(self.trap_spiral_tightness);
+                            s.set_trap_arg2(self.trap_spiral_arms);
+                        }
+                        _ => s.set_trap_radius(self.trap_radius),
+                    }
+                    s.set_trap_palette_cycles(self.trap_cycles);
+                    s.set_trap_blend(self.trap_blend);
+                    s.set_trap_sharpness(self.trap_sharpness);
+                    s.set_trap_iter_skip_frac(self.trap_iter_skip_frac);
+                    s.set_use_trap_interior(self.use_trap_interior);
+                }
+                self.scene.borrow_mut().set_use_traps(use_traps);
+            }
+            Message::TrapShapeChanged(shape) => {
+                self.trap_shape = Some(shape);
+                let mut s = self.scene.borrow_mut();
+                s.set_trap_shape(u32::from(shape));
+                match shape {
+                    TrapShape::LogSpiral => {
+                        s.set_trap_radius(self.trap_spiral_tightness);
+                        s.set_trap_arg2(self.trap_spiral_arms);
+                    }
+                    _ => s.set_trap_radius(self.trap_radius),
+                }
+            }
+            Message::TrapRadiusChanged(radius) => {
+                self.trap_radius = radius;
+                self.scene.borrow_mut().set_trap_radius(radius);
+            }
+            Message::TrapCyclesChanged(cycles) => {
+                self.trap_cycles = cycles;
+                self.scene.borrow_mut().set_trap_palette_cycles(cycles);
+            }
+            Message::TrapBlendChanged(blend) => {
+                self.trap_blend = blend;
+                self.scene.borrow_mut().set_trap_blend(blend);
+            }
+            Message::TrapSharpnessChanged(sharpness) => {
+                self.trap_sharpness = sharpness;
+                self.scene.borrow_mut().set_trap_sharpness(sharpness);
+            }
+            Message::TrapIterSkipFracChanged(frac) => {
+                self.trap_iter_skip_frac = frac;
+                self.scene.borrow_mut().set_trap_iter_skip_frac(frac);
+            }
+            Message::TrapSpiralTightnessChanged(tightness) => {
+                self.trap_spiral_tightness = tightness;
+                self.scene.borrow_mut().set_trap_radius(tightness); // arg1
+            }
+            Message::TrapSpiralArmsChanged(arms) => {
+                self.trap_spiral_arms = arms;
+                self.scene.borrow_mut().set_trap_arg2(arms); // arg2
+            }
+            Message::UseTrapInteriorChanged(use_trap_interior) => {
+                self.use_trap_interior = use_trap_interior;
+                self.scene.borrow_mut().set_use_trap_interior(use_trap_interior);
             }
             Message::DebugColoringChanged(coloring) => {
                 self.debug_coloring = coloring;
@@ -1177,7 +1322,14 @@ impl Controls {
                 text("Stripe Averaging")
                     .align_y(Alignment::Center),
                 space().width(Length::Fixed(15.0)),
-                
+
+                checkbox(self.use_traps)
+                    .on_toggle(Message::UseTrapsChanged),
+                space().width(Length::Fixed(5.0)),
+                text("Orbit Traps")
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(15.0)),
+
                 checkbox(self.debug_coloring)
                     .on_toggle(Message::DebugColoringChanged),
                     space().width(Length::Fixed(5.0)),
@@ -1285,6 +1437,131 @@ impl Controls {
                     .padding(10),
             );
         }
+        if self.use_traps {
+            let trap_shapes: Vec<TrapShape> = TrapShape::iter().collect();
+            let mut trap_rows = column![
+                row![
+                    text("Shape")
+                        .width(Length::Fixed(60.0))
+                        .align_y(Alignment::Center)
+                        .align_x(Alignment::Center),
+                    pick_list(trap_shapes, self.trap_shape, Message::TrapShapeChanged)
+                        .width(Length::Fixed(100.0)),
+                    space().width(Length::Fixed(20.0)),
+                    text("Trap Cycles")
+                        .width(Length::Fixed(75.0))
+                        .align_y(Alignment::Center)
+                        .align_x(Alignment::Center),
+                    slider(self.trap_cycles_range.0..=self.trap_cycles_range.1, self.trap_cycles, Message::TrapCyclesChanged)
+                        .step((self.trap_cycles_range.1 - self.trap_cycles_range.0) / 1000.0)
+                        .width(Length::Fixed(100.0)),
+                    space().width(Length::Fixed(5.0)),
+                    text(format!("{:<4.2}", self.trap_cycles))
+                        .width(Length::Fixed(35.0))
+                        .align_y(Alignment::Center),
+                    space().width(Length::Fixed(20.0)),
+                    text("Blend")
+                        .width(Length::Fixed(45.0))
+                        .align_y(Alignment::Center)
+                        .align_x(Alignment::Center),
+                    slider(0.0_f32..=1.0, self.trap_blend, Message::TrapBlendChanged)
+                        .step(0.001)
+                        .width(Length::Fixed(80.0)),
+                    space().width(Length::Fixed(5.0)),
+                    text(format!("{:<4.3}", self.trap_blend))
+                        .width(Length::Fixed(35.0))
+                        .align_y(Alignment::Center),
+                    space().width(Length::Fixed(20.0)),
+                    checkbox(self.use_trap_interior)
+                        .on_toggle(Message::UseTrapInteriorChanged),
+                    space().width(Length::Fixed(5.0)),
+                    text("Interior")
+                        .align_y(Alignment::Center),
+                ].padding(5),
+            ].spacing(2);
+            if self.trap_shape == Some(TrapShape::Circle) {
+                trap_rows = trap_rows.push(
+                    row![
+                        text("Radius")
+                            .width(Length::Fixed(60.0))
+                            .align_y(Alignment::Center)
+                            .align_x(Alignment::Center),
+                        slider(self.trap_radius_range.0..=self.trap_radius_range.1, self.trap_radius, Message::TrapRadiusChanged)
+                            .step((self.trap_radius_range.1 - self.trap_radius_range.0) / 1000.0)
+                            .width(Length::Fixed(120.0)),
+                        space().width(Length::Fixed(5.0)),
+                        text(format!("{:<5.3}", self.trap_radius))
+                            .width(Length::Fixed(40.0))
+                            .align_y(Alignment::Center),
+                    ].padding(5)
+                );
+            } else if self.trap_shape == Some(TrapShape::LogSpiral) {
+                trap_rows = trap_rows.push(
+                    row![
+                        text("Tightness")
+                            .width(Length::Fixed(70.0))
+                            .align_y(Alignment::Center)
+                            .align_x(Alignment::Center),
+                        slider(self.trap_spiral_tightness_range.0..=self.trap_spiral_tightness_range.1, self.trap_spiral_tightness, Message::TrapSpiralTightnessChanged)
+                            .step((self.trap_spiral_tightness_range.1 - self.trap_spiral_tightness_range.0) / 1000.0)
+                            .width(Length::Fixed(120.0)),
+                        space().width(Length::Fixed(5.0)),
+                        text(format!("{:<5.3}", self.trap_spiral_tightness))
+                            .width(Length::Fixed(40.0))
+                            .align_y(Alignment::Center),
+                        space().width(Length::Fixed(20.0)),
+                        text("Arms")
+                            .width(Length::Fixed(40.0))
+                            .align_y(Alignment::Center)
+                            .align_x(Alignment::Center),
+                        slider(self.trap_spiral_arms_range.0..=self.trap_spiral_arms_range.1, self.trap_spiral_arms, Message::TrapSpiralArmsChanged)
+                            .step(1.0)
+                            .width(Length::Fixed(80.0)),
+                        space().width(Length::Fixed(5.0)),
+                        text(format!("{:.0}", self.trap_spiral_arms))
+                            .width(Length::Fixed(20.0))
+                            .align_y(Alignment::Center),
+                    ].padding(5)
+                );
+            }
+            trap_rows = trap_rows.push(
+                row![
+                    text("Sharpness")
+                        .width(Length::Fixed(75.0))
+                        .align_y(Alignment::Center)
+                        .align_x(Alignment::Center),
+                    slider(0.0_f32..=40.0, self.trap_sharpness, Message::TrapSharpnessChanged)
+                        .step(0.1)
+                        .width(Length::Fixed(160.0)),
+                    space().width(Length::Fixed(5.0)),
+                    text(if self.trap_sharpness == 0.0 {
+                        "hard min".to_string()
+                    } else {
+                        format!("{:.1}", self.trap_sharpness)
+                    })
+                        .width(Length::Fixed(55.0))
+                        .align_y(Alignment::Center),
+                    space().width(Length::Fixed(15.0)),
+                    text("Skip Iters")
+                        .width(Length::Fixed(70.0))
+                        .align_y(Alignment::Center)
+                        .align_x(Alignment::Center),
+                    slider(0.0_f32..=1.0, self.trap_iter_skip_frac, Message::TrapIterSkipFracChanged)
+                        .step(0.001)
+                        .width(Length::Fixed(160.0)),
+                    space().width(Length::Fixed(5.0)),
+                    text(format!("{:.1}%", self.trap_iter_skip_frac * 100.0))
+                        .width(Length::Fixed(40.0))
+                        .align_y(Alignment::Center),
+                ].padding(5)
+            );
+            color_controls = color_controls.push(
+                container(trap_rows)
+                    .style(inner_container_style)
+                    .padding(10)
+            );
+        }
+
         if self.use_stripes {
             color_controls = color_controls.push(
                 container(

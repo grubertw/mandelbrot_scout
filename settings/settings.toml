@@ -158,6 +158,19 @@ stripe_strength_range = [0.001, 0.5]
 stripe_gamma = 0.8
 stripe_gamma_range = [0.1, 2.0]
 
+# Controls for orbit traps
+trap_radius = 0.0
+trap_radius_range = [0.0, 4.0]
+trap_cycles = 1.0
+trap_cycles_range = [0.01, 20.0]
+trap_blend = 0.5
+trap_sharpness = 0.0
+trap_iter_skip_frac = 0.0
+trap_spiral_tightness = 0.5
+trap_spiral_tightness_range = [0.05, 3.0]
+trap_spiral_arms = 1.0
+trap_spiral_arms_range = [1.0, 8.0]
+
 # Rim lighting
 # Sometimes glow works better, sometimes Rim.
 # For very complex scenes with no fast escaping areas, this is useless

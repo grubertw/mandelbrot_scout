@@ -4,6 +4,7 @@ const SMOOTH_COLORING: u32  = 1u << 2;
 const USE_DE: u32           = 1u << 3;
 const USE_STRIPES: u32      = 1u << 4;
 const ENABLE_GLOW: u32      = 1u << 5;
+const USE_TRAPS: u32        = 1u << 13; // overrides USE_STRIPES; shares stripe_trap_arg slots
 const ENABLE_KEY_LIGHT: u32 = 1u << 6;
 const ENABLE_FILL_LIGHT: u32= 1u << 7;
 const ENABLE_SPEC: u32      = 1u << 8;
@@ -59,9 +60,13 @@ struct Uniforms {
     jitter_strength:    f32,
     sample_avg_bias:    f32,
     render_flags:       u32,
-    stripe_density:     f32,
-    stripe_strength:    f32,
-    stripe_gamma:       f32,
+    stripe_trap_arg1:   f32,
+    stripe_trap_arg2:   f32,
+    stripe_trap_arg3:   f32,
+    stripe_trap_arg4:   f32,
+    trap_shape:          u32,
+    trap_palette_cycles: f32,
+    trap_iter_skip_frac: f32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
@@ -100,6 +105,33 @@ fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> vec2f {
     return vec2f(cx, cy) + offset;
 }
 
+// Trap shapes (trap_shape values):
+//   0 = circle ring       : |  |z| - arg1  |   (arg1=0 → point at origin)
+//   1 = cross             :  min(|Re(z)|, |Im(z)|)
+//   2 = square            :  max(|Re(z)|, |Im(z)|)
+//   3 = line Re           :  |Re(z)|
+//   4 = line Im           :  |Im(z)|
+//   5 = log spiral        :  arg1=tightness (b, growth rate), arg2=arm count
+fn trap_dist(z: vec2f) -> f32 {
+    switch (uni.trap_shape) {
+        case 1u: { return min(abs(z.x), abs(z.y)); }
+        case 2u: { return max(abs(z.x), abs(z.y)); }
+        case 3u: { return abs(z.x); }
+        case 4u: { return abs(z.y); }
+        case 5u: { // logarithmic spiral
+            let r = length(z);
+            if (r < 1e-10) { return 1e10; }
+            let theta = atan2(z.y, z.x);
+            let b = max(uni.stripe_trap_arg1, 0.01);
+            let arms = max(uni.stripe_trap_arg2, 1.0);
+            let phase = (log(r) / b - theta) * arms / 6.283185307;
+            let frac = phase - floor(phase);
+            return min(frac, 1.0 - frac) * 2.0;
+        }
+        default: { return abs(length(z) - uni.stripe_trap_arg1); }
+    }
+}
+
 fn mandelbrot(c: vec2f) -> vec4f {
     var z = vec2f(0.0, 0.0);
 
@@ -113,6 +145,12 @@ fn mandelbrot(c: vec2f) -> vec4f {
     // For stripe-averaging
     var stripe_sum: f32 = 0.0;
     var stripe_count: f32 = 0.0;
+    // For orbit traps (only one of stripes/traps is active at a time)
+    var trap_min: f32 = 1e30;
+    var trap_sum: f32 = 0.0;   // smooth accumulation path (sharpness > 0)
+    var trap_count: f32 = 0.0;
+    let trap_skip: u32 = u32(f32(max_i) * uni.trap_iter_skip_frac);
+    let trap_sharpness: f32 = uni.stripe_trap_arg3;
     var flags: u32 = 0u;
 
     for (i = 0u; i < max_i; i = i + 1u) {
@@ -124,11 +162,18 @@ fn mandelbrot(c: vec2f) -> vec4f {
         // update z
         z = c32_mul(z, z) + c;
 
-        if ((uni.render_flags & USE_STRIPES) != 0) {
-            // for stripe-averaging
+        if ((uni.render_flags & USE_TRAPS) != 0 && i >= trap_skip) {
+            let td = trap_dist(z);
+            if (trap_sharpness > 0.0) {
+                trap_sum += exp(-td * trap_sharpness);
+                trap_count += 1.0;
+            } else {
+                trap_min = min(trap_min, td);
+            }
+        } else if ((uni.render_flags & USE_STRIPES) != 0) {
             let angle = atan2(z.y, z.x);
-            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
-            stripe = pow(stripe, uni.stripe_gamma);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_trap_arg1);
+            stripe = pow(stripe, uni.stripe_trap_arg3);
             stripe_sum += stripe;
             stripe_count += 1.0;
         }
@@ -169,13 +214,19 @@ fn mandelbrot(c: vec2f) -> vec4f {
         let dr = max(length(dz), 1e-30);
         distance = 0.5 * r * log(r) / dr;
     }
-    // final stripe average
-    var stripe_avg: f32 = 0.0;
-    if ((uni.render_flags & USE_STRIPES) != 0) {
-        stripe_avg = stripe_sum / stripe_count;
+    // Channel z carries either trap value or stripe average (mutually exclusive).
+    var chan_z: f32 = 0.0;
+    if ((uni.render_flags & USE_TRAPS) != 0) {
+        if (trap_sharpness > 0.0) {
+            chan_z = trap_sum / max(trap_count, 1.0);
+        } else {
+            chan_z = trap_min;
+        }
+    } else if ((uni.render_flags & USE_STRIPES) != 0) {
+        chan_z = stripe_sum / stripe_count;
     }
 
-    return vec4(fi, distance, stripe_avg, f32(flags));
+    return vec4(fi, distance, chan_z, f32(flags));
 }
 
 struct GpuRefOrbitLocation {
@@ -299,6 +350,12 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
     // For stripe-averaging
     var stripe_sum: f32 = 0.0;
     var stripe_count: f32 = 0.0;
+    // For orbit traps (only one of stripes/traps is active at a time)
+    var trap_min: f32 = 1e30;
+    var trap_sum: f32 = 0.0;   // smooth accumulation path (sharpness > 0)
+    var trap_count: f32 = 0.0;
+    let trap_skip: u32 = u32(f32(max_i) * uni.trap_iter_skip_frac);
+    let trap_sharpness: f32 = uni.stripe_trap_arg3;
     var flags: u32 = PERTURB_BIT;
 
     for (i = 0u; i < max_i; i = i + 1u) {
@@ -321,11 +378,18 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
         Z = load_ref_orbit(0u, ref_i);
         z = Z + dz;
 
-        if ((uni.render_flags & USE_STRIPES) != 0) {
-            // for stripe-averaging
+        if ((uni.render_flags & USE_TRAPS) != 0 && i >= trap_skip) {
+            let td = trap_dist(z);
+            if (trap_sharpness > 0.0) {
+                trap_sum += exp(-td * trap_sharpness);
+                trap_count += 1.0;
+            } else {
+                trap_min = min(trap_min, td);
+            }
+        } else if ((uni.render_flags & USE_STRIPES) != 0) {
             let angle = atan2(z.y, z.x);
-            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
-            stripe = pow(stripe, uni.stripe_gamma);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_trap_arg1);
+            stripe = pow(stripe, uni.stripe_trap_arg3);
             stripe_sum += stripe;
             stripe_count += 1.0;
         }
@@ -380,13 +444,19 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
         distance = 0.5 * r * log(r) / dr;
     }
 
-    // final stripe average
-    var stripe_avg: f32 = 0.0;
-    if ((uni.render_flags & USE_STRIPES) != 0) {
-        stripe_avg = stripe_sum / stripe_count;
+    // Channel z carries either trap value or stripe average (mutually exclusive).
+    var chan_z: f32 = 0.0;
+    if ((uni.render_flags & USE_TRAPS) != 0) {
+        if (trap_sharpness > 0.0) {
+            chan_z = trap_sum / max(trap_count, 1.0);
+        } else {
+            chan_z = trap_min;
+        }
+    } else if ((uni.render_flags & USE_STRIPES) != 0) {
+        chan_z = stripe_sum / stripe_count;
     }
 
-    return vec4f(fi, distance, stripe_avg, f32(flags));
+    return vec4f(fi, distance, chan_z, f32(flags));
 }
 
 // The texture sampler in display.wgsl likes to have a few more pixels to interplolate

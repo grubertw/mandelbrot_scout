@@ -16,6 +16,7 @@ const USE_DE: u32           = 1u << 3u;
 const USE_STRIPES: u32      = 1u << 4u;
 const USE_FEXP: u32         = 1u << 11u;
 const USE_BLA: u32          = 1u << 12u;
+const USE_TRAPS: u32        = 1u << 13u; // overrides USE_STRIPES; shares stripe_trap_arg slots
 
 // Off-center debug probe (fraction of render size). The scout's reference orbit
 // usually sits near viewport center, so the dead-center pixel has a near-zero dz
@@ -186,9 +187,13 @@ struct Uniforms {
     jitter_strength:    f32,
     sample_avg_bias:    f32,
     render_flags:       u32,
-    stripe_density:     f32,
-    stripe_strength:    f32,
-    stripe_gamma:       f32,
+    stripe_trap_arg1:   f32,
+    stripe_trap_arg2:   f32,
+    stripe_trap_arg3:   f32,
+    stripe_trap_arg4:   f32,
+    trap_shape:          u32,
+    trap_palette_cycles: f32,
+    trap_iter_skip_frac: f32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
@@ -297,6 +302,30 @@ fn load_ref_orbit(orbit_idx: u32, it: u32) -> ComplexFExp {
 }
 
 // -------------------------------
+// Orbit trap distance (operates on reconstructed f32 z)
+// Trap shapes: 0=circle ring, 1=cross, 2=square, 3=line Re, 4=line Im, 5=log spiral
+// -------------------------------
+fn trap_dist(z: vec2f) -> f32 {
+    switch (uni.trap_shape) {
+        case 1u: { return min(abs(z.x), abs(z.y)); }
+        case 2u: { return max(abs(z.x), abs(z.y)); }
+        case 3u: { return abs(z.x); }
+        case 4u: { return abs(z.y); }
+        case 5u: { // logarithmic spiral; arg1=tightness (b), arg2=arm count
+            let r = length(z);
+            if (r < 1e-10) { return 1e10; }
+            let theta = atan2(z.y, z.x);
+            let b = max(uni.stripe_trap_arg1, 0.01);
+            let arms = max(uni.stripe_trap_arg2, 1.0);
+            let phase = (log(r) / b - theta) * arms / 6.283185307;
+            let frac = phase - floor(phase);
+            return min(frac, 1.0 - frac) * 2.0;
+        }
+        default: { return abs(length(z) - uni.stripe_trap_arg1); }
+    }
+}
+
+// -------------------------------
 // Direct Mandelbrot (no reference orbit available)
 // -------------------------------
 fn mandelbrot(c: ComplexFExp) -> vec4f {
@@ -309,6 +338,11 @@ fn mandelbrot(c: ComplexFExp) -> vec4f {
     var extra: u32       = 0u;
     var stripe_sum: f32  = 0.0;
     var stripe_count: f32 = 0.0;
+    var trap_min: f32    = 1e30;
+    var trap_sum: f32    = 0.0;
+    var trap_count: f32  = 0.0;
+    let trap_skip: u32   = u32(f32(max_i) * uni.trap_iter_skip_frac);
+    let trap_sharpness: f32 = uni.stripe_trap_arg3;
     var flags: u32       = 0u;
 
     for (i = 0u; i < max_i; i++) {
@@ -320,11 +354,20 @@ fn mandelbrot(c: ComplexFExp) -> vec4f {
 
         z = cfexp_add(cfexp_mul(z, z), c);
 
-        if ((uni.render_flags & USE_STRIPES) != 0u) {
+        if ((uni.render_flags & USE_TRAPS) != 0u && i >= trap_skip) {
+            let zf = cfexp_to_vec2f(z);
+            let td = trap_dist(zf);
+            if (trap_sharpness > 0.0) {
+                trap_sum  += exp(-td * trap_sharpness);
+                trap_count += 1.0;
+            } else {
+                trap_min = min(trap_min, td);
+            }
+        } else if ((uni.render_flags & USE_STRIPES) != 0u) {
             let zf = cfexp_to_vec2f(z);
             let angle = atan2(zf.y, zf.x);
-            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
-            stripe = pow(stripe, uni.stripe_gamma);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_trap_arg1);
+            stripe = pow(stripe, uni.stripe_trap_arg3);
             stripe_sum  += stripe;
             stripe_count += 1.0;
         }
@@ -354,12 +397,18 @@ fn mandelbrot(c: ComplexFExp) -> vec4f {
         distance = 0.5 * r * log(r) / dr;
     }
 
-    var stripe_avg: f32 = 0.0;
-    if ((uni.render_flags & USE_STRIPES) != 0u) {
-        stripe_avg = stripe_sum / stripe_count;
+    var chan_z: f32 = 0.0;
+    if ((uni.render_flags & USE_TRAPS) != 0u) {
+        if (trap_sharpness > 0.0) {
+            chan_z = trap_sum / max(trap_count, 1.0);
+        } else {
+            chan_z = trap_min;
+        }
+    } else if ((uni.render_flags & USE_STRIPES) != 0u) {
+        chan_z = stripe_sum / stripe_count;
     }
 
-    return vec4f(fi, distance, stripe_avg, f32(flags));
+    return vec4f(fi, distance, chan_z, f32(flags));
 }
 
 // -------------------------------
@@ -425,6 +474,11 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
     var extra: u32        = 0u;
     var stripe_sum: f32   = 0.0;
     var stripe_count: f32 = 0.0;
+    var trap_min: f32     = 1e30;
+    var trap_sum: f32     = 0.0;
+    var trap_count: f32   = 0.0;
+    let trap_skip: u32    = u32(f32(max_i) * uni.trap_iter_skip_frac);
+    let trap_sharpness: f32 = uni.stripe_trap_arg3;
     var flags: u32        = PERTURB_BIT;
     // Counts GLITCH rebases only (excludes benign end-of-reference wraps).
     // A growing count means the perturbed orbit keeps diverging from the
@@ -436,12 +490,13 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
     *bla_iters_skipped = 0u;
 
     // BLA accelerates only plain iteration/escape coloring: a jump skips l steps,
-    // which would under-accumulate the per-iteration DE derivative and stripe
-    // average. Gate it off when either is active — they then single-step (correct,
-    // just unaccelerated). Uniform-constant, so hoisted out of the loop.
+    // which would under-accumulate the per-iteration DE derivative, stripe average,
+    // or trap accumulator. Gate it off when any of those are active.
+    // Uniform-constant, so hoisted out of the loop.
     let bla_enabled = ((uni.render_flags & USE_BLA) != 0u)
                    && ((uni.render_flags & USE_DE) == 0u)
-                   && ((uni.render_flags & USE_STRIPES) == 0u);
+                   && ((uni.render_flags & USE_STRIPES) == 0u)
+                   && ((uni.render_flags & USE_TRAPS) == 0u);
 
     for (i = 0u; i < max_i; i++) {
         // Reconstruct the full value z = Z_n + dz with a VALID ref_i (always in
@@ -451,10 +506,18 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
         let z = cfexp_add(Z, dz);
         z_f32 = cfexp_to_vec2f(z);
 
-        if ((uni.render_flags & USE_STRIPES) != 0u) {
+        if ((uni.render_flags & USE_TRAPS) != 0u && i >= trap_skip) {
+            let td = trap_dist(z_f32);
+            if (trap_sharpness > 0.0) {
+                trap_sum  += exp(-td * trap_sharpness);
+                trap_count += 1.0;
+            } else {
+                trap_min = min(trap_min, td);
+            }
+        } else if ((uni.render_flags & USE_STRIPES) != 0u) {
             let angle = atan2(z_f32.y, z_f32.x);
-            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_density);
-            stripe = pow(stripe, uni.stripe_gamma);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_trap_arg1);
+            stripe = pow(stripe, uni.stripe_trap_arg3);
             stripe_sum  += stripe;
             stripe_count += 1.0;
         }
@@ -548,12 +611,18 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
         distance = 0.5 * r * log(r) / dr;
     }
 
-    var stripe_avg: f32 = 0.0;
-    if ((uni.render_flags & USE_STRIPES) != 0u) {
-        stripe_avg = stripe_sum / stripe_count;
+    var chan_z: f32 = 0.0;
+    if ((uni.render_flags & USE_TRAPS) != 0u) {
+        if (trap_sharpness > 0.0) {
+            chan_z = trap_sum / max(trap_count, 1.0);
+        } else {
+            chan_z = trap_min;
+        }
+    } else if ((uni.render_flags & USE_STRIPES) != 0u) {
+        chan_z = stripe_sum / stripe_count;
     }
 
-    return vec4f(fi, distance, stripe_avg, f32(flags));
+    return vec4f(fi, distance, chan_z, f32(flags));
 }
 
 // -------------------------------
