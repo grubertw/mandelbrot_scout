@@ -231,6 +231,34 @@ But we may need to increase iterations to resolve inner structure first, and fin
 Minibrot found at 120k iterations!
 ![Minibrot found with FExp](/screenshots/Screenshot%202026-06-25%20at%2011.34.34 AM.png)
 
+## 3.4 Updates
+
+### Orbit Traps
+At first I was skeptical that Orbit Traps would be worth the time, but exponential averaging over iterators instead of an absolute minimum distance, and with skipping a percentage of beginning iterations, some interesting patterns arise! It was also important to provide a separate parameter to tune color palette stretching across these distance value, and at the same time using the same palette that would be used with normal iteration-based coloring, regardless of blend.
+
+All images below are 'pure' traps, with no iteration-based coloring!
+
+![Point traps](/screenshots/fractal_260627_195807.png)
+Point Traps
+
+![Circle traps](/screenshots/fractal_260627_212549.png)
+Circle Traps
+
+![Cross traps](/screenshots/fractal_260627_213434.png)
+Cross Traps
+
+![Square traps](/screenshots/fractal_260627_222913.png)
+Square Traps
+
+![Re line traps](/screenshots/fractal_260627_224614.png)
+Re Line Traps
+
+![Im line traps](/screenshots/fractal_260628_101829.png)
+Im Line Traps
+
+![Golden Spiral traps](/screenshots/fractal_260628_110005.png)
+Golden Spiral Traps
+
 ## 3.1 Update - Distance Estimation is working now!
 
 ![De demo 1](screenshots/de_demo.gif)
