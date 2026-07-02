@@ -1115,7 +1115,7 @@ impl Controls {
             space().width(Length::Fixed(10.0)),
             text_input("...", &self.iter_range_max.to_string())
                 .on_input(Message::IterRangeMaxChanged)
-                .width(Length::Fixed(50.0))
+                .width(Length::Fixed(85.0))
                 .align_x(Alignment::Start),
             space().width(Length::Fixed(15.0)),
             text("max iterations: ")
@@ -1530,7 +1530,7 @@ impl Controls {
                         .width(Length::Fixed(75.0))
                         .align_y(Alignment::Center)
                         .align_x(Alignment::Center),
-                    slider(0.0_f32..=40.0, self.trap_sharpness, Message::TrapSharpnessChanged)
+                    slider(0.0_f32..=60.0, self.trap_sharpness, Message::TrapSharpnessChanged)
                         .step(0.1)
                         .width(Length::Fixed(160.0)),
                     space().width(Length::Fixed(5.0)),
