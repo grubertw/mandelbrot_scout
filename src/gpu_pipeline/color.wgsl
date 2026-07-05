@@ -30,6 +30,11 @@ struct Uniforms {
     trap_shape:          u32,
     trap_palette_cycles: f32,
     trap_iter_skip_frac: f32,
+    // Unused by color; declared to keep the uniform layout aligned with the
+    // calc shaders (fractal-function fields live mid-struct in SceneUniform).
+    formula_power:       u32,
+    julia_c_re:          f32,
+    julia_c_im:          f32,
     color_scalar_mapping_mode:      u32,
     color_scaler_mapping_strength:  f32,
     palette_tex_width:  u32,

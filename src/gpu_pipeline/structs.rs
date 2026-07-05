@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::numerics::ComplexFExp;
 
+fn default_formula_power() -> u32 { 2 }
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Serialize, Deserialize)]
 pub struct SceneUniform {
@@ -36,6 +38,17 @@ pub struct SceneUniform {
     pub trap_shape: u32,
     pub trap_palette_cycles: f32,
     pub trap_iter_skip_frac: f32,
+    // --- Fractal function (naive-path Julia + Power-of-X) ---
+    // Placed here (mid-struct) so the calc shaders, which declare only the
+    // prefix up to this point, can see them without pulling in the color/light
+    // tail. color.wgsl pads for them to keep its later offsets aligned.
+    // serde defaults keep older PNG metadata (which lacks these) loadable.
+    #[serde(default = "default_formula_power")]
+    pub formula_power: u32,     // z^power for the naive path (2 = classic)
+    #[serde(default)]
+    pub julia_c_re: f32,        // fixed Julia constant (world coords, f32 ok at
+    #[serde(default)]
+    pub julia_c_im: f32,        // naive/shallow scales); active via USE_JULIA bit
     pub color_scalar_mapping_mode: u32,
     pub color_scaler_mapping_strength: f32,
     pub palette_tex_width: u32,
@@ -119,6 +132,21 @@ impl SceneUniform {
 
     pub fn set_use_trap_interior(&mut self, use_trap_interior: bool) {
         if use_trap_interior { self.render_flags |= 1 << 14; } else { self.render_flags &= !(1 << 14) }
+    }
+
+    pub fn set_use_julia(&mut self, use_julia: bool) {
+        if use_julia { self.render_flags |= 1 << 15; } else { self.render_flags &= !(1 << 15) }
+    }
+
+    pub fn set_formula_power(&mut self, power: u32) {
+        self.formula_power = power;
+    }
+
+    /// Set the fixed Julia constant `c` (world coordinates). Only consulted by
+    /// the shader when the USE_JULIA flag is set.
+    pub fn set_julia_c(&mut self, c_re: f32, c_im: f32) {
+        self.julia_c_re = c_re;
+        self.julia_c_im = c_im;
     }
 }
 

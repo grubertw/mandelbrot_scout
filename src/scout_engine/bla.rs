@@ -49,6 +49,11 @@ pub struct BlaTable {
     pub levels: Vec<Vec<BlaEntry>>,
     /// Number of reference steps the table spans (orbit length - 1).
     pub m: usize,
+    /// |Z_m|^2 per leaf (view-independent), one entry per `levels[0]` leaf. The
+    /// leaf validity radius is eps*|Z|/(power-1), which can't be recovered from
+    /// the leaf `A = power*Z^(power-1)` without a (power-1)-th root, so we keep
+    /// |Z|^2 here for `compute_radii`. Not uploaded to the GPU (radii are).
+    pub leaf_z2: Vec<FExp>,
 }
 
 /// The view-dependent validity radii, shaped exactly like `BlaTable.levels`:
@@ -67,6 +72,9 @@ pub struct BlaRadii {
 pub struct QualifiedOrbitBLAInfo {
     pub orbit_id: OrbitId,
     pub built_len: u32,
+    /// The formula power the table was built with; the renderer feeds it back to
+    /// `compute_radii` so the leaf radii stay consistent with the leaf `A`.
+    pub power: u32,
     pub orbit_ref: WeakOrbit,
     // Only the view-INDEPENDENT table (A/B/l), wrapped so a reader can clone the
     // whole struct cheaply. The validity radii are view-dependent (they scale with
@@ -99,10 +107,20 @@ pub fn delta_c_max_bound(center_offset: &FixedComplex, half_extent: &FixedReal) 
     ComplexFExp::from_fixed(center_offset).mag() + FExp::from_fixed(half_extent)
 }
 
-/// A single-step leaf at reference point `z = Z_m`: `A = 2Z`, `B = 1`, `l = 1`.
+/// A single-step leaf at reference point `z = Z_m` for f(z) = z^power + c:
+/// `A = f'(Z) = power * Z^(power-1)`, `B = 1`, `l = 1`. Power 2 keeps the exact
+/// `2Z` form (byte-identical to the original power-2 path).
 #[inline]
-fn make_leaf(z: ComplexFExp) -> BlaEntry {
-    BlaEntry { a: z.double(), b: ComplexFExp::one(), l: 1 }
+fn make_leaf(z: ComplexFExp, power: u32) -> BlaEntry {
+    let a = if power == 2 {
+        z.double() // 2Z
+    } else {
+        // power * Z^(power-1)
+        let mut zpow = z; // Z^1
+        for _ in 2..power { zpow = zpow * z; } // -> Z^(power-1)
+        zpow * ComplexFExp::from_f64_pair(power as f64, 0.0)
+    };
+    BlaEntry { a, b: ComplexFExp::one(), l: 1 }
 }
 
 /// Compose `x` (the earlier block) then `y` (the later block) into one BLA:
@@ -166,7 +184,7 @@ where
 /// `orbit[0]` is the critical point (0) and is skipped; leaf `dst` uses
 /// `orbit[dst+1]`. Each level is computed in parallel after its child level is
 /// complete (a barrier between levels; ~log2(M) of them).
-pub async fn build_bla(orbit: Arc<Vec<ComplexFExp>>, pool: ThreadPool) -> BlaTable {
+pub async fn build_bla(orbit: Arc<Vec<ComplexFExp>>, power: u32, pool: ThreadPool) -> BlaTable {
     let m = orbit.len().saturating_sub(1);
     if m == 0 {
         return BlaTable::default();
@@ -174,9 +192,13 @@ pub async fn build_bla(orbit: Arc<Vec<ComplexFExp>>, pool: ThreadPool) -> BlaTab
 
     let leaves = parallel_map(&pool, m, {
         let orbit = orbit.clone();
-        move |dst| make_leaf(orbit[dst + 1])
+        move |dst| make_leaf(orbit[dst + 1], power)
     })
     .await;
+
+    // |Z_m|^2 per leaf — view-independent, needed by compute_radii for the leaf
+    // radius. Cheap (a magnitude each), so just gather serially.
+    let leaf_z2: Vec<FExp> = (0..m).map(|dst| orbit[dst + 1].mag2()).collect();
 
     let mut levels: Vec<Arc<Vec<BlaEntry>>> = vec![Arc::new(leaves)];
     while levels.last().unwrap().len() > 1 {
@@ -200,6 +222,7 @@ pub async fn build_bla(orbit: Arc<Vec<ComplexFExp>>, pool: ThreadPool) -> BlaTab
             .map(|lvl| Arc::try_unwrap(lvl).unwrap_or_else(|a| (*a).clone()))
             .collect(),
         m,
+        leaf_z2,
     }
 }
 
@@ -207,24 +230,24 @@ pub async fn build_bla(orbit: Arc<Vec<ComplexFExp>>, pool: ThreadPool) -> BlaTab
 /// |dc| over the image). Cheap: only magnitudes/mins, no complex multiplies — so
 /// it can be re-run when the view moves while the tree itself is reused.
 ///
-/// Leaf radius `r = epsilon * |Z| = epsilon * |A|/2` (since `A = 2Z`) is
-/// view-independent; the `delta_c_max` dependence enters only when merging:
+/// Leaf radius (view-independent) for f(z)=z^power: the linear step
+/// `dz' = A*dz` breaks when the leading nonlinear term C(p,2) Z^(p-2) dz^2
+/// overtakes it, giving `r = epsilon * |Z| / (power - 1)`. For power 2 this is
+/// `epsilon * |Z|` (= the original `epsilon*|A|/2` since A=2Z). |Z| comes from
+/// `table.leaf_z2` — it is NOT `|A|/2` once A = power*Z^(power-1). The
+/// `delta_c_max` dependence enters only when merging:
 ///   r = min( r_x, max(0, (r_y - |B_x|*c) / |A_x|) )
 /// i.e. `dz` must stay inside `x`'s radius *and* land inside `y`'s after `x`.
-pub fn compute_radii(table: &BlaTable, epsilon: f32, delta_c_max: FExp) -> BlaRadii {
+pub fn compute_radii(table: &BlaTable, epsilon: f32, power: u32, delta_c_max: FExp) -> BlaRadii {
     let mut levels: Vec<Vec<FExp>> = Vec::with_capacity(table.levels.len());
     if table.levels.is_empty() {
         return BlaRadii { levels };
     }
 
-    let half_eps = FExp::from_f64(epsilon as f64 * 0.5);
-    let leaf_r2: Vec<FExp> = table.levels[0]
-        .iter()
-        .map(|e| {
-            let r = e.a.mag() * half_eps; // epsilon * |Z|
-            r * r
-        })
-        .collect();
+    // r = (epsilon/(power-1)) * |Z|  =>  r^2 = k^2 * |Z|^2.
+    let k = FExp::from_f64(epsilon as f64 / (power.max(2) - 1) as f64);
+    let k2 = k * k;
+    let leaf_r2: Vec<FExp> = table.leaf_z2.iter().map(|z2| k2 * *z2).collect();
     levels.push(leaf_r2);
 
     for k in 1..table.levels.len() {
@@ -356,7 +379,7 @@ mod tests {
     fn merge_reproduces_linear_recurrence() {
         let n = 17; // M = 16
         let orbit = Arc::new(ref_orbit(-0.75, 0.06, n));
-        let table = block_on(build_bla(orbit.clone(), pool()));
+        let table = block_on(build_bla(orbit.clone(), 2, pool()));
 
         let dz0 = ComplexFExp::from_f64_pair(0.5, 0.3);
         let dc = ComplexFExp::from_f64_pair(0.1, -0.2);
@@ -379,11 +402,58 @@ mod tests {
             "im: bla={} direct={}", dz_bla.im.to_f64(), dz.im.to_f64());
     }
 
+    /// Power-3: leaf A = 3*Z^2, the merged top reproduces the LINEAR recurrence
+    /// dz' = 3*Z^2*dz + dc, and the leaf radius uses the eps/(p-1) factor.
+    #[test]
+    fn power3_leaf_merge_and_radius() {
+        // Reference orbit for z^3 + c (bounded near the origin).
+        let n = 17; // M = 16
+        let (cre, cim) = (0.1_f64, 0.05_f64);
+        let mut v = Vec::with_capacity(n);
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for _ in 0..n {
+            v.push(ComplexFExp::from_f64_pair(re, im));
+            let (r2, i2) = (re * re - im * im, 2.0 * re * im); // z^2
+            let (r3, i3) = (r2 * re - i2 * im, r2 * im + i2 * re); // z^3
+            re = r3 + cre;
+            im = i3 + cim;
+        }
+        let orbit = Arc::new(v);
+        let table = block_on(build_bla(orbit.clone(), 3, pool()));
+
+        let three = ComplexFExp::from_f64_pair(3.0, 0.0);
+
+        // Leaf A for m=1 must be 3*Z[1]^2.
+        let expect_a = (orbit[1] * orbit[1]) * three;
+        let leaf_a = table.levels[0][0].a;
+        assert!(approx(leaf_a.re.to_f64(), expect_a.re.to_f64(), 1e-9));
+        assert!(approx(leaf_a.im.to_f64(), expect_a.im.to_f64(), 1e-9));
+
+        // Merged top == direct linear propagation dz' = 3*Z^2*dz + dc.
+        let dz0 = ComplexFExp::from_f64_pair(0.02, -0.01);
+        let dc = ComplexFExp::from_f64_pair(0.003, 0.004);
+        let mut dz = dz0;
+        for i in 1..n {
+            dz = ((orbit[i] * orbit[i]) * three) * dz + dc;
+        }
+        let top = table.levels.last().unwrap();
+        assert_eq!(top[0].l, 16);
+        let dz_bla = top[0].a * dz0 + top[0].b * dc;
+        assert!(approx(dz_bla.re.to_f64(), dz.re.to_f64(), 1e-3));
+        assert!(approx(dz_bla.im.to_f64(), dz.im.to_f64(), 1e-3));
+
+        // Leaf radius: r^2 = (eps/(p-1))^2 * |Z1|^2, p=3 => (eps/2)^2 |Z1|^2.
+        let radii = compute_radii(&table, BLA_EPSILON, 3, FExp::from_f64(1e-30));
+        let expect_r2 = (BLA_EPSILON as f64 / 2.0).powi(2) * orbit[1].mag2().to_f64();
+        assert!(approx(radii.levels[0][0].to_f64(), expect_r2, 1e-2),
+            "leaf r^2 = {} expected {}", radii.levels[0][0].to_f64(), expect_r2);
+    }
+
     /// A two-step (level-1) entry must equal applying its two leaves in sequence.
     #[test]
     fn level1_equals_two_leaves() {
         let orbit = Arc::new(ref_orbit(-0.12, 0.75, 9)); // M = 8
-        let table = block_on(build_bla(orbit.clone(), pool()));
+        let table = block_on(build_bla(orbit.clone(), 2, pool()));
 
         let dz0 = ComplexFExp::from_f64_pair(0.2, -0.1);
         let dc = ComplexFExp::from_f64_pair(0.05, 0.07);
@@ -403,12 +473,12 @@ mod tests {
     #[test]
     fn structure_and_leaf_radius() {
         let orbit = Arc::new(ref_orbit(-0.75, 0.06, 17)); // M = 16
-        let table = block_on(build_bla(orbit.clone(), pool()));
+        let table = block_on(build_bla(orbit.clone(), 2, pool()));
         let sizes: Vec<usize> = table.levels.iter().map(|l| l.len()).collect();
         assert_eq!(sizes, vec![16, 8, 4, 2, 1]);
         assert_eq!(table.m, 16);
 
-        let radii = compute_radii(&table, BLA_EPSILON, FExp::from_f64(1e-30));
+        let radii = compute_radii(&table, BLA_EPSILON, 2, FExp::from_f64(1e-30));
         // leaf 0 covers m=1 -> Z[1] = c. r = epsilon * |c|.
         let z1_mag = orbit[1].mag().to_f64();
         let expect_r2 = (BLA_EPSILON as f64 * z1_mag).powi(2);
@@ -421,8 +491,8 @@ mod tests {
     #[test]
     fn flatten_roundtrips_indexing() {
         let orbit = Arc::new(ref_orbit(-0.75, 0.06, 17)); // M = 16
-        let table = block_on(build_bla(orbit.clone(), pool()));
-        let radii = compute_radii(&table, BLA_EPSILON, FExp::from_f64(1e-30));
+        let table = block_on(build_bla(orbit.clone(), 2, pool()));
+        let radii = compute_radii(&table, BLA_EPSILON, 2, FExp::from_f64(1e-30));
         let (entries, dims) = table.flatten();
         let flat_radii = radii.flatten();
 
@@ -453,8 +523,8 @@ mod tests {
     #[test]
     fn lookup_picks_by_radius() {
         let orbit = Arc::new(ref_orbit(-0.75, 0.06, 17));
-        let table = block_on(build_bla(orbit.clone(), pool()));
-        let radii = compute_radii(&table, BLA_EPSILON, FExp::from_f64(1e-30));
+        let table = block_on(build_bla(orbit.clone(), 2, pool()));
+        let radii = compute_radii(&table, BLA_EPSILON, 2, FExp::from_f64(1e-30));
 
         // Tiny |dz|^2 at m=1 should resolve to the highest aligned level.
         let tiny = FExp::from_f64(1e-90);

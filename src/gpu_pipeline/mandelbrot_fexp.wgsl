@@ -17,6 +17,7 @@ const USE_STRIPES: u32      = 1u << 4u;
 const USE_FEXP: u32         = 1u << 11u;
 const USE_BLA: u32          = 1u << 12u;
 const USE_TRAPS: u32        = 1u << 13u; // overrides USE_STRIPES; shares stripe_trap_arg slots
+const USE_JULIA: u32        = 1u << 15u; // naive path: seed z0 = pixel, c = julia const
 
 // Off-center debug probe (fraction of render size). The scout's reference orbit
 // usually sits near viewport center, so the dead-center pixel has a near-zero dz
@@ -163,6 +164,94 @@ fn cfexp_to_vec2f(z: ComplexFExp) -> vec2f {
 }
 
 // -------------------------------
+// Formula: z^power + c  (power-2 = classic Mandelbrot/Julia)
+// Single source of truth for the iteration map on this (FExp) shader.
+//   - f_step:        used by the NAIVE path (honors uni.formula_power + Julia).
+//   - f_perturb_step: used by the PERTURBATION path (still power-2 only).
+//   - f_deriv_step:  DE derivative (f32); power/Julia-aware. For the perturbation
+//                    path's only valid regime (power 2, Julia off) it is exactly
+//                    2*z*deriv + 1, byte-identical to before.
+// Mirrors the CPU Formula::ref_step in src/scout_engine/formula.rs.
+// -------------------------------
+
+// c32 complex multiply (f32) — used by the f32-domain derivative below.
+fn c32_mul(a: vec2f, b: vec2f) -> vec2f {
+    return vec2f(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+// z^p in the FExp domain (p small; p==2 is the hot case).
+fn cpow_fexp(z: ComplexFExp, p: u32) -> ComplexFExp {
+    if (p == 2u) { return cfexp_mul(z, z); }
+    var acc = z;
+    for (var k = 1u; k < p; k = k + 1u) { acc = cfexp_mul(acc, z); }
+    return acc;
+}
+
+// z^p in f32 (for the derivative).
+fn cpow_f32(z: vec2f, p: u32) -> vec2f {
+    if (p == 0u) { return vec2f(1.0, 0.0); }
+    if (p == 2u) { return c32_mul(z, z); }
+    var acc = z;
+    for (var k = 1u; k < p; k = k + 1u) { acc = c32_mul(acc, z); }
+    return acc;
+}
+
+// Absolute step: z_{n+1} = z^power + c
+fn f_step(z: ComplexFExp, c: ComplexFExp) -> ComplexFExp {
+    return cfexp_add(cpow_fexp(z, uni.formula_power), c);
+}
+
+// Perturbation advance: dz_{n+1} = (Z+dz)^p - Z^p + dc
+//   = sum_{k=1}^{p} C(p,k) Z^{p-k} dz^k + dc, computed from Z and dz separately
+// (never forming Z+dz) to keep the small dz's precision. Z is the reference value
+// being advanced against (post-rebase selection stays in the caller — rebasing is
+// perturbation machinery, not formula).
+fn f_perturb_step(Z: ComplexFExp, dz: ComplexFExp, dc: ComplexFExp) -> ComplexFExp {
+    let p = uni.formula_power;
+    // Power-2 fast path: byte-identical to the proven power-2 recurrence.
+    if (p == 2u) {
+        let lambda = cfexp_add(Z, Z);
+        return cfexp_add(cfexp_add(cfexp_mul(lambda, dz), cfexp_mul(dz, dz)), dc);
+    }
+    let one = ComplexFExp(fexp_from_f32(1.0), fexp_from_f32(0.0));
+    var zpows: array<ComplexFExp, 8>;             // zpows[i] = Z^i (p <= 7)
+    zpows[0] = one;
+    for (var i = 1u; i <= p; i = i + 1u) { zpows[i] = cfexp_mul(zpows[i - 1u], Z); }
+
+    var result = dc;
+    var dzk = one;                                // dz^0
+    var binom = 1.0;                              // C(p,0)
+    for (var k = 1u; k <= p; k = k + 1u) {
+        dzk = cfexp_mul(dzk, dz);                 // dz^k
+        binom = binom * f32(p - k + 1u) / f32(k); // C(p,k) from C(p,k-1)
+        let term = cfexp_mul(zpows[p - k], dzk);  // Z^{p-k} dz^k
+        let scaled = ComplexFExp(fexp_scale(binom, term.re), fexp_scale(binom, term.im));
+        result = cfexp_add(result, scaled);
+    }
+    return result;
+}
+
+// Derivative recurrence for DE, kept in f32. f'(z) = power * z^(power-1); the
+// "+1" (d c / d param) is present for Mandelbrot only — Julia's per-pixel
+// variable is z0, so it is dropped (and the accumulator seeds at 1).
+fn f_deriv_step(deriv: vec2f, z: vec2f) -> vec2f {
+    let dfdz = f32(uni.formula_power) * cpow_f32(z, uni.formula_power - 1u);
+    var out = c32_mul(dfdz, deriv);
+    if ((uni.render_flags & USE_JULIA) == 0u) {
+        out += vec2f(1.0, 0.0);
+    }
+    return out;
+}
+
+// Continuous (smooth) iteration offset for z^p escape: 1 - log_p(log|z|).
+// mag2 = |z|^2, so 0.5*log(mag2) = log|z|. Dividing by log(power) instead of a
+// hardcoded log(2) fixes the gradient for higher powers; for power 2 this equals
+// the old 1 - log2(log|z|).
+fn smooth_offset(mag2: f32) -> f32 {
+    return 1.0 - log(log(mag2) * 0.5) / log(f32(uni.formula_power));
+}
+
+// -------------------------------
 // Uniforms
 // -------------------------------
 struct Uniforms {
@@ -194,6 +283,9 @@ struct Uniforms {
     trap_shape:          u32,
     trap_palette_cycles: f32,
     trap_iter_skip_frac: f32,
+    formula_power:       u32,
+    julia_c_re:          f32,
+    julia_c_im:          f32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
@@ -328,13 +420,22 @@ fn trap_dist(z: vec2f) -> f32 {
 // -------------------------------
 // Direct Mandelbrot (no reference orbit available)
 // -------------------------------
-fn mandelbrot(c: ComplexFExp) -> vec4f {
+fn mandelbrot(pix: ComplexFExp) -> vec4f {
+    // Parameterization: Mandelbrot iterates the parameter (z0 = 0, c = pixel);
+    // Julia iterates the initial value (z0 = pixel, c = fixed constant).
     var z = ComplexFExp(FExp(0.0, 0), FExp(0.0, 0));
+    var c = pix;
+    if ((uni.render_flags & USE_JULIA) != 0u) {
+        z = pix;
+        c = ComplexFExp(fexp_from_f32(uni.julia_c_re), fexp_from_f32(uni.julia_c_im));
+    }
     var i: u32 = 0u;
     let max_i = uni.max_iter;
     var mag_z: f32       = 0.0;
     var escape_mag_z: f32 = 0.0;
-    var dz_de = vec2f(0.0, 0.0); // d(z)/d(c) in f32 for DE, grows but only used for color
+    // DE derivative d z / d(param): Mandelbrot param = c (seeds 0), Julia = z0 (seeds 1).
+    var dz_de = vec2f(0.0, 0.0);
+    if ((uni.render_flags & USE_JULIA) != 0u) { dz_de = vec2f(1.0, 0.0); }
     var extra: u32       = 0u;
     var stripe_sum: f32  = 0.0;
     var stripe_count: f32 = 0.0;
@@ -347,12 +448,10 @@ fn mandelbrot(c: ComplexFExp) -> vec4f {
 
     for (i = 0u; i < max_i; i++) {
         if ((uni.render_flags & USE_DE) != 0u) {
-            let zf = cfexp_to_vec2f(z);
-            dz_de = 2.0 * vec2f(zf.x * dz_de.x - zf.y * dz_de.y,
-                                 zf.x * dz_de.y + zf.y * dz_de.x) + vec2f(1.0, 0.0);
+            dz_de = f_deriv_step(dz_de, cfexp_to_vec2f(z));
         }
 
-        z = cfexp_add(cfexp_mul(z, z), c);
+        z = f_step(z, c);
 
         if ((uni.render_flags & USE_TRAPS) != 0u && i >= trap_skip) {
             let zf = cfexp_to_vec2f(z);
@@ -386,7 +485,7 @@ fn mandelbrot(c: ComplexFExp) -> vec4f {
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0u) {
         let safe_mag = max(escape_mag_z, 1e-30);
-        fi = clamp(fi + 1.0 - log2(log(safe_mag) * 0.5), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(safe_mag), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 
@@ -462,7 +561,14 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
                       bla_max_step: ptr<function, u32>,
                       bla_step_count: ptr<function, u32>,
                       bla_iters_skipped: ptr<function, u32>) -> vec4f {
-    var dz = ComplexFExp(FExp(0.0, 0), FExp(0.0, 0));
+    // Parameterization: Mandelbrot perturbs c (dz0 = 0, dc = pixel offset);
+    // Julia perturbs z0 (dz0 = pixel offset, dc = 0 since c is shared image-wide).
+    // Either way the pixel's geometric offset arrives as `delta_c`.
+    let julia = (uni.render_flags & USE_JULIA) != 0u;
+    let zero = ComplexFExp(FExp(0.0, 0), FExp(0.0, 0));
+    var dz = zero;
+    var dc = delta_c;
+    if (julia) { dz = delta_c; dc = zero; }
     var i: u32     = 0u;
     var ref_i: u32 = 0u;
     let max_i      = uni.max_iter;
@@ -470,6 +576,7 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
     var mag_z: f32        = 0.0;
     var escape_mag_z: f32 = 0.0;
     var dzdc = vec2f(0.0, 0.0); // d(z)/d(c) in f32 for DE
+    if (julia) { dzdc = vec2f(1.0, 0.0); }  // d z0/d z0 = 1 (Julia param is z0)
     var z_f32 = vec2f(0.0, 0.0);
     var extra: u32        = 0u;
     var stripe_sum: f32   = 0.0;
@@ -491,12 +598,15 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
 
     // BLA accelerates only plain iteration/escape coloring: a jump skips l steps,
     // which would under-accumulate the per-iteration DE derivative, stripe average,
-    // or trap accumulator. Gate it off when any of those are active.
+    // or trap accumulator. Gate it off when any of those are active. Also off for
+    // Julia — its table is never built (viewport-centered reference breaks the BLA
+    // math), so this is defensive against a stale table surviving a mode switch.
     // Uniform-constant, so hoisted out of the loop.
     let bla_enabled = ((uni.render_flags & USE_BLA) != 0u)
                    && ((uni.render_flags & USE_DE) == 0u)
                    && ((uni.render_flags & USE_STRIPES) == 0u)
-                   && ((uni.render_flags & USE_TRAPS) == 0u);
+                   && ((uni.render_flags & USE_TRAPS) == 0u)
+                   && ((uni.render_flags & USE_JULIA) == 0u);
 
     for (i = 0u; i < max_i; i++) {
         // Reconstruct the full value z = Z_n + dz with a VALID ref_i (always in
@@ -551,9 +661,11 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
                             fexp_gt_pos(fexp_scale(uni.perturb_err_thresh, mag_dz_fexp), mag_z_fexp);
         var Z_adv = Z;
         if (glitch_rebase || (ref_i + 1u >= max_ref_i)) {
-            dz    = z;
             ref_i = 0u;
-            Z_adv = load_ref_orbit(0u, 0u);  // = 0 (critical point)
+            Z_adv = load_ref_orbit(0u, 0u);  // Mandelbrot: 0 (critical point)
+            // dz becomes z - Z[0], keeping the reconstruction z = Z_adv + dz
+            // exact. Mandelbrot Z[0]=0 so dz = z (unchanged); Julia Z[0]=z0_ref.
+            if (julia) { dz = cfexp_sub(z, Z_adv); } else { dz = z; }
             flags |= PERTURB_ERR_BIT;
             if (glitch_rebase) { *rebase_count += 1u; }
         }
@@ -570,7 +682,7 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
             let hit = bla_lookup(ref_i, mag_dz_fexp);
             if (hit.found && (i + hit.l) <= max_i) {
                 let e = bla_entries[hit.idx];
-                dz = cfexp_add(cfexp_mul(e.a, dz), cfexp_mul(e.b, delta_c));
+                dz = cfexp_add(cfexp_mul(e.a, dz), cfexp_mul(e.b, dc));
                 ref_i += hit.l;
                 i     += hit.l - 1u;  // the loop's i++ adds the final step
                 // Cheap, on-jump only (not per-iteration), so safe in the hot loop.
@@ -582,16 +694,16 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
         }
 
         if ((uni.render_flags & USE_DE) != 0u) {
-            dzdc = 2.0 * vec2f(z_f32.x * dzdc.x - z_f32.y * dzdc.y,
-                               z_f32.x * dzdc.y + z_f32.y * dzdc.x) + vec2f(1.0, 0.0);
+            // TODO(DE-deep): dzdc is plain f32 (vec2f) and under-accumulates at
+            // high iteration — the perturbation-path derivative overflows/loses
+            // precision well before |z| does. FExp (f32+i32) is NOT enough here
+            // either; this needs a double-float (hi/lo) accumulator. Deferred.
+            // Until then, DE on the FExp perturbation path degrades at depth.
+            dzdc = f_deriv_step(dzdc, z_f32);
         }
 
         // Advance: dz_{n+1} = 2*Z_adv*dz + dz^2 + delta_c
-        let lambda = cfexp_add(Z_adv, Z_adv);
-        dz = cfexp_add(
-            cfexp_add(cfexp_mul(lambda, dz), cfexp_mul(dz, dz)),
-            delta_c
-        );
+        dz = f_perturb_step(Z_adv, dz, dc);
         ref_i += 1u;
     }
 
@@ -600,7 +712,7 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0u) {
         let safe_mag = max(escape_mag_z, 1e-30);
-        fi = clamp(fi + 1.0 - log2(log(safe_mag) * 0.5), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(safe_mag), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 

@@ -1,4 +1,5 @@
 use crate::numerics::{FixedComplex, FixedReal};
+use crate::scout_engine::formula::{Formula, Parameterization};
 use crate::signals::{CameraSnapshot, FrameStamp};
 
 use std::sync::{Arc, Weak};
@@ -40,7 +41,11 @@ impl IdFactory {
 pub struct ReferenceOrbit {
     /// Uniquely identifies the orbit, system-wide
     pub orbit_id: OrbitId,
-    /// The starting co-ordinate of the orbit
+    /// Anchor point in the IMAGE plane (formerly "the c value"). For a
+    /// Mandelbrot image this is a c-plane point; for a Julia image it is a
+    /// z-plane point. Everything spatial (scoring, center_offset, BLA
+    /// delta_c_max) treats it purely as a position, so it is parameterization-
+    /// agnostic. The actual (z0, c) fed to the recurrence is derived from it.
     pub c_ref: FixedComplex,
     /// May not be complete until anchored
     pub orbit: Vec<FixedComplex>,
@@ -53,6 +58,12 @@ pub struct ReferenceOrbit {
     /// Only set when this orbit is anchored
     pub gpu_payload: OrbitGpuPayload,
 
+    /// The iteration map this orbit was computed with.
+    formula: Formula,
+    /// The `c` fed to f(z, c): == c_ref for Mandelbrot, == the Julia constant
+    /// for Julia. Resolved once at construction (like c_ref, it is only used at
+    /// the shift the orbit was born at).
+    c: FixedComplex,
     /// Private variables below mutate in-place during compute_to()
     curr_z: FixedComplex,
 }
@@ -60,13 +71,17 @@ pub struct ReferenceOrbit {
 impl ReferenceOrbit {
     pub fn new(
         id_fac: OrbitIdFactory, c_ref: FixedComplex,
+        formula: Formula,
+        param: &Parameterization,
         frame_stamp: FrameStamp,
         // ONLY used to set the capacity
         max_ref_orbit_iters: u32
     ) -> Self {
         let orbit_id = id_fac.lock().next_id();
-        let shift = *&c_ref.re.shift;
         let c_ref_32 = Complex32::new(c_ref.re().to_f32_lossy(), c_ref.im().to_f32_lossy());
+
+        // The one parameterization-aware step: anchor -> (z0, c).
+        let (z0, c) = param.seed(&c_ref);
 
         Self {
             orbit_id, c_ref,
@@ -74,7 +89,9 @@ impl ReferenceOrbit {
             escape_index: None,
             created_at: frame_stamp,
             gpu_payload: OrbitGpuPayload::new(c_ref_32),
-            curr_z: FixedComplex::zero(shift),
+            formula,
+            c,
+            curr_z: z0,
         }
     }
 
@@ -102,13 +119,12 @@ impl ReferenceOrbit {
             return;
         }
 
-        let bailout = FixedReal::from_f64(4.0,  self.c_ref.re.shift);
+        let bailout = FixedReal::from_f64(4.0, self.c.re.shift);
 
         for i in curr_iter..max_iter {
             self.orbit.push(self.curr_z.clone());
-            self.curr_z = self.curr_z.square();
-            self.curr_z += &self.c_ref;
-            
+            self.curr_z = self.formula.ref_step(&self.curr_z, &self.c);
+
             if self.curr_z.norm_sqr() >= bailout && self.escape_index.is_none() {
                 self.escape_index = Some(i);
                 break;

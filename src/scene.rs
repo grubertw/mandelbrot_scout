@@ -8,6 +8,7 @@ use crate::gpu_pipeline::structs::*;
 use crate::signals::*;
 use crate::numerics::*;
 use crate::scout_engine::{ScoutEngineConfig, ScoutEngine, ScoutConfig, ScoutSignal};
+use crate::scout_engine::formula::{Formula, Parameterization};
 use crate::scout_engine::bla;
 use crate::scout_engine::orbit::OrbitId;
 use crate::scout_engine::utils::complex_delta;
@@ -114,6 +115,7 @@ impl Scene {
             depth_bonus: settings.depth_bonus,
             distance_penalty: settings.distance_penalty,
             exploration_budget: settings.exploration_budget,
+            formula: Formula::default(),
         };
 
         let scout_engine = ScoutEngine::new(
@@ -160,6 +162,9 @@ impl Scene {
             trap_shape: 0,
             trap_palette_cycles: 1.0,
             trap_iter_skip_frac: 0.0,
+            formula_power: 2,
+            julia_c_re: 0.0,
+            julia_c_im: 0.0,
             color_scalar_mapping_mode: 0,
             color_scaler_mapping_strength: 1.0,
             palette_tex_width: settings.max_palette_colors,
@@ -960,6 +965,45 @@ impl Scene {
         self.recalc_fractal = true;
     }
 
+    /// Toggle Julia mode. When enabled, the current viewport center is captured
+    /// as the fixed Julia constant `c`; when disabled, revert to Mandelbrot.
+    /// The scout engine clears its pool + BLA and re-scouts for the new plane,
+    /// and the GPU uniform is updated so the NAIVE path renders it immediately.
+    ///
+    /// NOTE (milestone 2): the naive (no-reference-orbit) path is correct for
+    /// Julia at the scales where it runs. The perturbation path still seeds as
+    /// Mandelbrot, so deep-zoom Julia awaits the perturbation-parameterization
+    /// work; `scout_gate_open` keeps naive active while there is no good orbit.
+    pub fn set_julia_enabled(&mut self, enabled: bool) {
+        let param = if enabled {
+            Parameterization::Julia { c: self.center.clone() }
+        } else {
+            Parameterization::Mandelbrot
+        };
+        // Push the constant to the GPU (f32 world coords, valid at naive scales).
+        self.uniform.set_julia_c(
+            self.center.re().to_f32_lossy(),
+            self.center.im().to_f32_lossy(),
+        );
+        self.uniform.set_use_julia(enabled);
+        self.scout_engine.set_parameterization(param);
+        self.recalc_fractal = true;
+    }
+
+    /// Change the iteration formula. Clears the pool + BLA, re-scouts, and pushes
+    /// the power to the GPU uniform for the naive path.
+    ///
+    /// NOTE (milestone 2): naive-path Power-of-X is correct; the perturbation
+    /// path is still power-2 (deferred). Burning Ship carries no GPU power and
+    /// currently renders power-2 on the naive path (formula switch is CPU-wired).
+    pub fn set_formula(&mut self, formula: Formula) {
+        if let Formula::Power { power } = formula {
+            self.uniform.set_formula_power(power);
+        }
+        self.scout_engine.set_formula(formula);
+        self.recalc_fractal = true;
+    }
+
     pub fn set_use_stripes(&mut self, use_stripes: bool) {
         self.uniform.set_use_stripes(use_stripes);
         self.recalc_fractal = true;
@@ -1266,7 +1310,7 @@ impl Scene {
                 let half_extent = self.scale
                     .scale_by_f64(self.width.max(self.height) / 2.0, true);
                 let dc_max = bla::delta_c_max_bound(&center_offset, &half_extent);
-                let radii = bla::compute_radii(&info.table, bla::BLA_EPSILON, dc_max)
+                let radii = bla::compute_radii(&info.table, bla::BLA_EPSILON, info.power, dc_max)
                     .flatten();
                 debug!("Updating view-dependant BLA radii. len={}", radii.len());
                 self.queue.write_buffer(&self.pipeline.bla_radii_buf, 0,

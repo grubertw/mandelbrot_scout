@@ -22,6 +22,7 @@ use crate::export::{render_scene_to_jpeg, render_scene_to_png};
 use crate::numerics::{FixedComplex, FixedReal};
 use crate::scene::import::{load_metadata_from_png, ExtPalette};
 use crate::scout_engine::ScoutSignal;
+use crate::scout_engine::formula::Formula;
 use crate::settings::Settings;
 
 pub mod built_info {
@@ -111,6 +112,15 @@ pub enum ExportImgFormat {
     Jpeg,
 }
 
+/// Flat, Copy view-model for the Formula radio. The real `Formula` carries data
+/// (`Power { power }`), which a radio can't compare directly, so the GUI tracks
+/// the kind here and pairs it with `mandelbrot_power` to build a `Formula`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormulaKind {
+    Power,
+    BurningShip,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PngCompression {
     None,
@@ -136,6 +146,7 @@ pub struct Controls {
     editing_location: bool,
     editing_resolution: bool,
     editing_color: bool,
+    editing_func: bool,
     editing_scout: bool,
     editing_export: bool,
 
@@ -159,6 +170,11 @@ pub struct Controls {
     render_jitter_strength: f32,
     render_sample_avg_bias: f32,
     calc_shader: CalcShader,
+
+    // Fractal function config
+    julia_enabled: bool,
+    formula_kind: FormulaKind,
+    mandelbrot_power: u32,
 
     // Color config
     palettes: Vec<PaletteSelection>,
@@ -278,6 +294,13 @@ pub enum Message {
     RenderSampleAvgBiasChanged(f32),
     CalcShaderChanged(CalcShader),
 
+    // Fractal function (Func tab)
+    EditingFuncChanged(bool),
+    JuliaEnabledChanged(bool),
+    FormulaKindChanged(FormulaKind),
+    MandelbrotPowerChanged(u32),
+    MandelbrotPowerReleased,
+
     SelectedPaletteChanged(PaletteSelection),
     ImportPalette,
     CyclesChanged(f32),
@@ -388,6 +411,7 @@ impl Controls {
             editing_location: false,
             editing_resolution: false,
             editing_color: false,
+            editing_func: false,
             editing_scout: false,
             editing_export: false,
             iter_step: 10,
@@ -401,6 +425,9 @@ impl Controls {
             render_jitter_strength: 0.0,
             render_sample_avg_bias: 0.9,
             calc_shader: CalcShader::F32,
+            julia_enabled: false,
+            formula_kind: FormulaKind::Power,
+            mandelbrot_power: 2,
             palettes,
             selected_palette: Some(palette_selection),
             cycles: 1.0, cycles_max: 10.0,
@@ -888,6 +915,29 @@ impl Controls {
                 self.use_bla = use_bla;
                 self.scene.borrow_mut().set_bla_enabled(use_bla);
             }
+            Message::EditingFuncChanged(editing_func) => {
+                self.editing_func = editing_func;
+            }
+            Message::JuliaEnabledChanged(julia_enabled) => {
+                self.julia_enabled = julia_enabled;
+                self.scene.borrow_mut().set_julia_enabled(julia_enabled);
+            }
+            Message::FormulaKindChanged(kind) => {
+                self.formula_kind = kind;
+                let formula = self.current_formula();
+                self.scene.borrow_mut().set_formula(formula);
+            }
+            Message::MandelbrotPowerChanged(power) => {
+                // Update state only while dragging; apply on release (a formula
+                // change clears the orbit pool + re-scouts, too costly per tick).
+                self.mandelbrot_power = power;
+            }
+            Message::MandelbrotPowerReleased => {
+                if self.formula_kind == FormulaKind::Power {
+                    let formula = self.current_formula();
+                    self.scene.borrow_mut().set_formula(formula);
+                }
+            }
             Message::GpuSamplesToEvalChanged(spawn_per_eval) => {
                 self.num_gpu_samples_to_eval = spawn_per_eval;
                 let scene_b = self.scene.borrow();
@@ -990,6 +1040,14 @@ impl Controls {
         }
     }
 
+    /// Build the concrete `Formula` from the radio kind + power slider state.
+    fn current_formula(&self) -> Formula {
+        match self.formula_kind {
+            FormulaKind::Power => Formula::Power { power: self.mandelbrot_power },
+            FormulaKind::BurningShip => Formula::BurningShip,
+        }
+    }
+
     pub fn view(&self) -> Element<'_, Message, Theme, Renderer> {
         let dbg_row = row![
             text(&self.debug_msg).color(Color::WHITE)
@@ -1020,6 +1078,10 @@ impl Controls {
             button("Color")
                 .on_press(Message::EditingColorChanged(!self.editing_color))
                 .style(if self.editing_color {button::primary} else {button::text}),
+            space().width(Length::Fixed(20.0)),
+            button("Func")
+                .on_press(Message::EditingFuncChanged(!self.editing_func))
+                .style(if self.editing_func {button::primary} else {button::text}),
             space().width(Length::Fixed(20.0)),
             button("Scout")
                 .on_press(Message::EditingScoutConfigChanged(!self.editing_scout))
@@ -1067,6 +1129,13 @@ impl Controls {
         if self.editing_color {
             primary_panel = primary_panel.push(
                 container(self.render_color_controls())
+                    .style(outer_container_style)
+                    .padding(10)
+            );
+        }
+        if self.editing_func {
+            primary_panel = primary_panel.push(
+                container(self.render_func_controls())
                     .style(outer_container_style)
                     .padding(10)
             );
@@ -1685,6 +1754,53 @@ impl Controls {
         ]
             .align_y(Alignment::Center)
             .wrap().vertical_spacing(10)
+    }
+
+    fn render_func_controls(&self) -> Column<'_, Message, Theme, Renderer> {
+        let mut controls = column![
+            row![
+                checkbox(self.julia_enabled)
+                    .on_toggle(Message::JuliaEnabledChanged),
+                space().width(Length::Fixed(10.0)),
+                text("Julia Set (fix c = current center)")
+                    .align_y(Alignment::Center),
+            ]
+            .align_y(Alignment::Center),
+            row![
+                text("Formula:")
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(15.0)),
+                radio("Mandelbrot", FormulaKind::Power,
+                    Some(self.formula_kind), Message::FormulaKindChanged),
+                space().width(Length::Fixed(15.0)),
+                radio("Burning Ship", FormulaKind::BurningShip,
+                    Some(self.formula_kind), Message::FormulaKindChanged),
+            ]
+            .align_y(Alignment::Center),
+        ];
+
+        // Power-family exposes a power slider; Burning Ship has no parameters.
+        if self.formula_kind == FormulaKind::Power {
+            controls = controls.push(
+                row![
+                    text("Power")
+                        .width(Length::Fixed(45.0))
+                        .align_y(Alignment::Center),
+                    space().width(Length::Fixed(10.0)),
+                    slider(2..=7, self.mandelbrot_power, Message::MandelbrotPowerChanged)
+                        .on_release(Message::MandelbrotPowerReleased)
+                        .step(1u32)
+                        .width(Length::Fixed(120.0)),
+                    space().width(Length::Fixed(10.0)),
+                    text(format!("{}", self.mandelbrot_power))
+                        .width(Length::Fixed(30.0))
+                        .align_y(Alignment::Center),
+                ]
+                .align_y(Alignment::Center)
+            );
+        }
+
+        controls.spacing(10)
     }
 
     fn render_export_config(&self) -> Column<'_, Message, Theme, Renderer> {

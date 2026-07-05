@@ -1,5 +1,6 @@
 pub mod orbit;
 pub mod bla;
+pub mod formula;
 mod worker;
 mod tasks;
 mod newton;
@@ -7,6 +8,7 @@ pub(crate) mod utils;
 
 use crate::scout_engine::orbit::*;
 use crate::scout_engine::worker::*;
+use crate::scout_engine::formula::{Formula, Parameterization};
 
 use crate::signals::*;
 
@@ -33,7 +35,12 @@ type ScoutContext               = Arc<ScoutEngineContext>;
 #[derive(Copy, Clone, Debug)]
 pub enum ScoutSignal {
     ResetEngine,
-    ExploreSignal(ScoutEngineConfig)
+    /// Manual, UNGATED scout (GoScout button). Bypasses the auto_start/scale gate
+    /// so users can force perturbation and compare reference-orbit quality.
+    ExploreSignal(ScoutEngineConfig),
+    /// Gated re-scout after a fractal-definition change (Julia/formula). Honors
+    /// the same auto_start + starting_scale gate a camera snapshot faces.
+    ReScout,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -75,6 +82,10 @@ pub struct ScoutEngineConfig {
     /// but if perturbance is behaving poorly, more cycles may be needed to find a better
     /// orbit (or set of orbits).
     pub exploration_budget: i32,
+    /// The iteration map f(z, c) applied to reference orbits (and mirrored on
+    /// the GPU). `Copy`, so it rides along in this `Copy` config. The Julia/etc.
+    /// parameterization is heavier and lives in `ScoutEngineContext` instead.
+    pub formula: Formula,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +99,11 @@ pub struct ScoutEngineContext {
     /// the most recent camera snapshot, essential for knowning when the user
     /// last changed the viewport. Only scout_worker should update this.
     pub last_camera_snapshot: Arc<Mutex<CameraSnapshot>>,
+    /// How each pixel's anchor maps to the (z0, c) the recurrence starts from.
+    /// Owned here (not in the `Copy` config) because the Julia constant is a
+    /// heavy `FixedComplex` that must be rescaled per view, at the same cadence
+    /// as `last_camera_snapshot`. Defaults to `Mandelbrot`.
+    pub parameterization: Arc<Mutex<Parameterization>>,
     /// BLA table for the current rank-1 (anchored) orbit, built asynchronously
     /// by scout_worker after each pool re-rank. None until the first build lands;
     /// swapped wholesale when the rank-1 orbit (or its length) changes. The inner
@@ -120,6 +136,7 @@ impl ScoutEngineContext {
             living_orbits: Arc::new(Mutex::new(Vec::new())),
             orbit_id_factory: Arc::new(Mutex::new(IdFactory::new())),
             last_camera_snapshot: Arc::new(Mutex::new(snapshot)),
+            parameterization: Arc::new(Mutex::new(Parameterization::Mandelbrot)),
             rank1_bla: Arc::new(Mutex::new(None)),
             grid_samples: Arc::new(Mutex::new(Vec::new())),
             context_changed: Arc::new(AtomicBool::new(false)),
@@ -143,6 +160,24 @@ impl ScoutEngineContext {
         self.living_orbits.lock().len() != 0
     }
 
+    /// Snapshot the current parameterization, rescaled to `shift` so any
+    /// embedded fixed-point constant (Julia `c`) lives at the same precision as
+    /// the orbits spawned this cycle. Cheap clone for Mandelbrot.
+    pub fn parameterization_at(&self, shift: u32) -> Parameterization {
+        let mut param = self.parameterization.lock().clone();
+        param.rescale_to(shift);
+        param
+    }
+
+    /// Swap the parameterization (e.g. GUI toggling Mandelbrot <-> Julia, or
+    /// changing the Julia constant) and reset the pool. Every existing orbit's
+    /// anchor lives in a different plane after the swap, so `reset()` drops them
+    /// (and the rank-1 BLA) and signals a context change.
+    pub fn set_parameterization(&self, param: Parameterization) {
+        *self.parameterization.lock() = param;
+        self.reset();
+    }
+
     pub fn reset(&self) {
         let mut living_orbits_g = self.living_orbits.lock();
         self.write_diagnostics(
@@ -151,6 +186,9 @@ impl ScoutEngineContext {
         );
 
         living_orbits_g.clear();
+        // The rank-1 BLA table was built from an orbit we just dropped; clear it
+        // so a stale table can never be matched by orbit_id after a reset.
+        *self.rank1_bla.lock() = None;
         self.context_changed();
     }
 }
@@ -213,6 +251,24 @@ impl ScoutEngine {
     pub fn submit_scout_signal(&mut self, signal: ScoutSignal) {
         info!("Scout signal received: {:?}", signal);
         self.explore_tx.try_send(signal).ok();
+    }
+
+    /// Switch Mandelbrot <-> Julia (or change the Julia constant). Clears the
+    /// pool + BLA synchronously, then requests a GATED re-scout: new orbits are
+    /// only computed if the auto_start/scale gate is open (so toggling Julia
+    /// while zoomed out leaves the GPU on the naive path).
+    pub fn set_parameterization(&mut self, param: Parameterization) {
+        self.context.set_parameterization(param);
+        self.submit_scout_signal(ScoutSignal::ReScout);
+    }
+
+    /// Change the iteration formula (power, burning-ship). Orbits computed with
+    /// the old formula are invalid, so clear the pool + BLA and request a gated
+    /// re-scout (same gate as a camera snapshot).
+    pub fn set_formula(&mut self, formula: Formula) {
+        self.context.config.lock().formula = formula;
+        self.context.reset();
+        self.submit_scout_signal(ScoutSignal::ReScout);
     }
 
     pub fn read_diagnostics(&self) -> Arc<Mutex<ScoutDiagnostics>> {

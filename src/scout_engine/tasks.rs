@@ -1,5 +1,6 @@
 use crate::scout_engine::{ScoutEngineConfig};
 use crate::scout_engine::orbit::*;
+use crate::scout_engine::formula::Parameterization;
 
 use crate::signals::{FrameStamp};
 
@@ -13,6 +14,7 @@ pub async fn start_reference_orbit(
     c_ref: FixedComplex,
     id_factory: OrbitIdFactory,
     cfg: ScoutEngineConfig,
+    param: Parameterization,
     frame_st: FrameStamp
 ) -> LiveOrbit {
     // Note that we will compute past max_user_iters, according to the multiplier
@@ -20,6 +22,7 @@ pub async fn start_reference_orbit(
 
     let mut orbit = ReferenceOrbit::new(
         id_factory, c_ref.clone(),
+        cfg.formula, &param,
         frame_st, max_iters
     );
     trace!("Starting orbit calculation of seed {} to {} iterations for OrbitId={}.",

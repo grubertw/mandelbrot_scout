@@ -5,6 +5,7 @@ const USE_DE: u32           = 1u << 3;
 const USE_STRIPES: u32      = 1u << 4;
 const ENABLE_GLOW: u32      = 1u << 5;
 const USE_TRAPS: u32        = 1u << 13; // overrides USE_STRIPES; shares stripe_trap_arg slots
+const USE_JULIA: u32        = 1u << 15; // naive path: seed z0 = pixel, c = julia const
 const ENABLE_KEY_LIGHT: u32 = 1u << 6;
 const ENABLE_FILL_LIGHT: u32= 1u << 7;
 const ENABLE_SPEC: u32      = 1u << 8;
@@ -33,6 +34,90 @@ fn c32_mul(a: vec2f, b: vec2f) -> vec2f {
     let ri = a.x * b.y;
     let ir = a.y * b.x;
     return vec2f(r2 - i2, ri + ir);
+}
+
+// -------------------------------
+// Formula: z^power + c  (power-2 = classic Mandelbrot/Julia)
+// Single source of truth for the iteration map on this (f32) shader.
+// De-baked so alternate formulae change ONLY these helpers. Mirrors the CPU
+// Formula::ref_step in src/scout_engine/formula.rs.
+//   - f_step:        used by the NAIVE path (honors uni.formula_power + Julia).
+//   - f_perturb_step: used by the PERTURBATION path (still power-2 only).
+//   - f_deriv_step:  DE derivative, shared by both paths. For the perturbation
+//                    path's only valid regime (power 2, Julia off) it is exactly
+//                    2*z*deriv + 1, i.e. byte-identical to before.
+// -------------------------------
+
+// z^p by repeated multiply (p small). p==2 is the hot case, kept branch-cheap.
+fn cpow(z: vec2f, p: u32) -> vec2f {
+    if (p == 0u) { return vec2f(1.0, 0.0); }
+    if (p == 2u) { return c32_mul(z, z); }
+    var acc = z;
+    for (var k = 1u; k < p; k = k + 1u) { acc = c32_mul(acc, z); }
+    return acc;
+}
+
+// Absolute step: z_{n+1} = z^power + c
+fn f_step(z: vec2f, c: vec2f) -> vec2f {
+    return cpow(z, uni.formula_power) + c;
+}
+
+// Perturbation advance: dz_{n+1} = f(Z+dz) - f(Z) + dc
+//   = (Z+dz)^p - Z^p + dc = sum_{k=1}^{p} C(p,k) Z^{p-k} dz^k + dc
+// Computed from Z and dz SEPARATELY (never forming Z+dz) so the small dz keeps
+// its precision — the whole point of perturbation. Z is the reference value.
+fn f_perturb_step(Z: vec2f, dz: vec2f, dc: vec2f) -> vec2f {
+    let p = uni.formula_power;
+    // Power-2 fast path: byte-identical to the proven power-2 recurrence.
+    if (p == 2u) {
+        return c32_mul(Z + Z, dz) + c32_mul(dz, dz) + dc;
+    }
+    // General power: accumulate the binomial terms with multiplications only.
+    var zpows: array<vec2f, 8>;                 // zpows[i] = Z^i (p <= 7)
+    zpows[0] = vec2f(1.0, 0.0);
+    for (var i = 1u; i <= p; i = i + 1u) { zpows[i] = c32_mul(zpows[i - 1u], Z); }
+
+    var result = dc;
+    var dzk = vec2f(1.0, 0.0);                   // dz^0
+    var binom = 1.0;                             // C(p,0)
+    for (var k = 1u; k <= p; k = k + 1u) {
+        dzk = c32_mul(dzk, dz);                  // dz^k
+        binom = binom * f32(p - k + 1u) / f32(k);// C(p,k) from C(p,k-1)
+        result = result + binom * c32_mul(zpows[p - k], dzk);
+    }
+    return result;
+}
+
+// Derivative recurrence for DE. f'(z) = power * z^(power-1). The "+1" is the
+// d(c)/d(param) term, present only for Mandelbrot (param = c); for Julia the
+// per-pixel variable is z0, so it is dropped and the accumulator seeds at 1.
+fn f_deriv_step(deriv: vec2f, z: vec2f) -> vec2f {
+    let dfdz = f32(uni.formula_power) * cpow(z, uni.formula_power - 1u);
+    var out = c32_mul(dfdz, deriv);
+    if ((uni.render_flags & USE_JULIA) == 0) {
+        out += vec2f(1.0, 0.0);
+    }
+    return out;
+}
+
+// Continuous (smooth) iteration offset for z^p escape: 1 - log_p(log|z|).
+// mag2 = |z|^2, so 0.5*log(mag2) = log|z|. Dividing by log(power) (the escape
+// rate) instead of a hardcoded log(2) fixes the gradient for higher powers;
+// for power 2 this equals the old 1 - log2(log|z|).
+//
+// KNOWN LIMITATION at high power (p >= ~5): this fixes the interpolation WITHIN
+// an iteration band, but not the distribution ACROSS bands. z^p escapes almost
+// instantly (|z| ~ |z|^p), so nearly every exterior pixel lands in the first 1-3
+// integer iteration bands. The usable `fi` range collapses to a sliver of
+// [0, max_iter], so no palette-cycles setting spreads it (tested to 1000), and
+// p >= 6 tends toward all-black. The real fix is distribution-aware coloring
+// (histogram equalization) — deferred: it needs its own GPU pass / WGSL file.
+// Data-driven max-normalization does NOT help: interior (max_iter) pixels kept
+// in-frame peg the max at max_iter. Sudden bailout overshoot at high p can also
+// leave `escape_mag_z` where log(log(.)) misbehaves — histogram binning (or a
+// clamp here) should guard against NaN/Inf `fi`.
+fn smooth_offset(mag2: f32) -> f32 {
+    return 1.0 - log(log(mag2) * 0.5) / log(f32(uni.formula_power));
 }
 
 // -------------------------------
@@ -67,6 +152,9 @@ struct Uniforms {
     trap_shape:          u32,
     trap_palette_cycles: f32,
     trap_iter_skip_frac: f32,
+    formula_power:       u32,
+    julia_c_re:          f32,
+    julia_c_im:          f32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
@@ -132,15 +220,24 @@ fn trap_dist(z: vec2f) -> f32 {
     }
 }
 
-fn mandelbrot(c: vec2f) -> vec4f {
+fn mandelbrot(pix: vec2f) -> vec4f {
+    // Parameterization: Mandelbrot iterates the parameter (z0 = 0, c = pixel);
+    // Julia iterates the initial value (z0 = pixel, c = fixed constant).
     var z = vec2f(0.0, 0.0);
+    var c = pix;
+    if ((uni.render_flags & USE_JULIA) != 0) {
+        z = pix;
+        c = vec2f(uni.julia_c_re, uni.julia_c_im);
+    }
 
     var i: u32 = 0u;
     let max_i: u32 = uni.max_iter;
     var mag_z: f32 = 0.0;
-    // Extra tracking for DE/surface normals
+    // Extra tracking for DE/surface normals. The DE derivative is d z / d(param):
+    // for Mandelbrot the param is c (seeds 0); for Julia it is z0 (seeds 1).
     var escape_mag_z: f32 = 0.0;
     var dz = vec2f(0.0, 0.0);
+    if ((uni.render_flags & USE_JULIA) != 0) { dz = vec2f(1.0, 0.0); }
     var extra: u32 = 0u; // Iterate a few past bailout for better DE values.
     // For stripe-averaging
     var stripe_sum: f32 = 0.0;
@@ -156,11 +253,11 @@ fn mandelbrot(c: vec2f) -> vec4f {
     for (i = 0u; i < max_i; i = i + 1u) {
         if ((uni.render_flags & USE_DE) != 0) {
             // Derivitive tracking for DE
-            dz = 2.0 * c32_mul(dz, z) + vec2f(1.0, 0.0);
+            dz = f_deriv_step(dz, z);
         }
 
         // update z
-        z = c32_mul(z, z) + c;
+        z = f_step(z, c);
 
         if ((uni.render_flags & USE_TRAPS) != 0 && i >= trap_skip) {
             let td = trap_dist(z);
@@ -202,7 +299,7 @@ fn mandelbrot(c: vec2f) -> vec4f {
     // Replace with smooth iters if enabled
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
         let safe_mag_z = max(escape_mag_z, 1e-30);
-        fi = clamp(fi + 1.0 - log2(log(safe_mag_z) * 0.5), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(safe_mag_z), 0.0, f32(max_i));
         if (i == max_i) {
             fi = f32(max_i);
         }
@@ -333,7 +430,13 @@ fn load_ref_orbit(orbit_idx: u32, it: u32) -> vec2f {
 // Mandelbrot Perturbance
 // -------------------------------
 fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
+    // Parameterization: Mandelbrot perturbs c (dz0 = 0, dc = pixel offset);
+    // Julia perturbs z0 (dz0 = pixel offset, dc = 0 since c is shared image-wide).
+    // Either way the pixel's geometric offset arrives as `delta_c`.
+    let julia = (uni.render_flags & USE_JULIA) != 0;
     var dz = vec2f(0.0, 0.0);
+    var dc = delta_c;
+    if (julia) { dz = delta_c; dc = vec2f(0.0, 0.0); }
     var i: u32 = 0u;
     var ref_i: u32 = 0u;
     let max_i = uni.max_iter;
@@ -344,6 +447,7 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
     // is taken after Z + dz, but of the 'previous iteration'
     // similar to how it is in the absolute recurrance.
     var dzdc = vec2f(0.0, 0.0);
+    if (julia) { dzdc = vec2f(1.0, 0.0); }  // d z0/d z0 = 1 (Julia param is z0)
     var z = vec2f(0.0, 0.0);
     var escape_mag_z: f32 = 0.0;
     var extra: u32 = 0u; // Iterate a few past bailout for better DE values.
@@ -363,15 +467,12 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
         var Z = load_ref_orbit(0u, ref_i);
         ref_i += 1u;
 
-        // λ_n = 2 * Z_n
-        let lambda = Z + Z;
-
-        // dz_{n+1} = λ_n * dz_n + dz_n^2 + Δc
-        dz = c32_mul(lambda, dz) + c32_mul(dz, dz) + delta_c;
+        // dz_{n+1} = (Z_n+dz)^p - Z_n^p + dc
+        dz = f_perturb_step(Z, dz, dc);
 
         if ((uni.render_flags & USE_DE) != 0) {
             // Derivitive tracking of 'reconstructed z'm for DE
-            dzdc = 2.0 * c32_mul(dzdc, z) + vec2f(1.0, 0.0);
+            dzdc = f_deriv_step(dzdc, z);
         }
 
         // Reconstructed z for escape testing
@@ -417,7 +518,9 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
         //max_glitch_ratio = max(max_glitch_ratio, ratio);
         if ( ((uni.render_flags & GLITCH_FIX) != 0) &&
              (mag_z < mag_dz * uni.perturb_err_thresh || ref_i + 1u == max_ref_i)) {
-            dz = z;
+            // dz becomes z - Z[0]. Mandelbrot Z[0]=0 so dz = z (unchanged);
+            // Julia Z[0]=z0_ref, keeping z = Z[0] + dz exact after the reset.
+            if (julia) { dz = z - load_ref_orbit(0u, 0u); } else { dz = z; }
             ref_i = 0u;
             flags |= PERTURB_ERR_BIT;
         }
@@ -431,7 +534,7 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
     // For smooth iterations
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
         let safe_mag_z = max(escape_mag_z, 1e-30);
-        fi = clamp(fi + 1.0 - log2(log(safe_mag_z) * 0.5), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(safe_mag_z), 0.0, f32(max_i));
         if (i == max_i) {
             fi = f32(max_i);
         }

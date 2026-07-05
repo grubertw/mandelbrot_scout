@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use crate::scout_engine::{ScoutContext, CameraSnapshotReceiver, OrbitObservationsReceiver, ExploreSignalReceiver, ScoutSignal, ScoutEngineConfig};
 use crate::scout_engine::orbit::*;
+use crate::scout_engine::formula::Parameterization;
 use crate::scout_engine::tasks::*;
 use crate::scout_engine::utils::*;
 use crate::scout_engine::bla::{self, QualifiedOrbitBLAInfo};
@@ -16,7 +17,7 @@ use futures::StreamExt;
 use futures::select;
 use futures::future::{join_all, RemoteHandle};
 use futures::executor::{ThreadPool};
-use crate::numerics::{ComplexFExp, FixedComplex};
+use crate::numerics::{ComplexFExp, FixedComplex, FixedReal};
 
 // ScoutEngine's internal work loop, a long-lived future that uses select to poll the
 // the camera snaphot & gpu feedback channels.
@@ -80,21 +81,17 @@ async fn handle_camera_snapshot(
         *last_snap_g = (*snapshot).clone();
     }
 
+    let cfg = { context.config.lock().clone() };
     let scale = snapshot.scale();
-    let (starting_scale, auto_start) = {
-        let config_g = context.config.lock();
-        (config_g.starting_scale, config_g.auto_start)
-    };
 
-    if !auto_start {
-        trace!("Autostart disabled. Camera Snapshot ignored!");
-        return;
-    }
-
-    if scale.to_f64_lossy() > starting_scale {
-        trace!("Scale {} larger than starting scale {}. Camera Snapshot ignored!",
-            scale.to_f64_lossy(), starting_scale);
-        if context.active() {
+    if !scout_gate_open(&cfg, scale) {
+        // Gate closed. If Auto Start is on but we've zoomed out past the
+        // starting scale while active, tear the pool down (perturbation isn't
+        // needed out here, and the orbits would be stale on the way back in).
+        // With Auto Start off we simply idle — manual GoScout still works.
+        trace!("Scout gate closed for scale {} (starting_scale {}, auto_start {}).",
+            scale.to_f64_lossy(), cfg.starting_scale, cfg.auto_start);
+        if cfg.auto_start && context.active() {
             trace!("Context was active; resetting");
             context.reset();
         }
@@ -104,6 +101,16 @@ async fn handle_camera_snapshot(
     tp.spawn_ok(
         evaluate_orbits(tp.clone(), context.clone())
     );
+}
+
+/// The auto_start + starting_scale gate: whether the engine should be actively
+/// scouting at the given camera scale. Shared by the camera-snapshot path and
+/// the fractal-definition-change (ReScout) path so both honor "Auto Start" and
+/// the starting-scale threshold identically. Manual GoScout (ExploreSignal)
+/// deliberately bypasses this so users can force perturbation on/off and compare
+/// image quality with/without a good reference orbit.
+fn scout_gate_open(cfg: &ScoutEngineConfig, scale: &FixedReal) -> bool {
+    cfg.auto_start && scale.to_f64_lossy() <= cfg.starting_scale
 }
 
 async fn handle_explore_signal(
@@ -124,6 +131,23 @@ async fn handle_explore_signal(
         }
         ScoutSignal::ResetEngine => {
             context.reset();
+        }
+        ScoutSignal::ReScout => {
+            // A fractal-definition change (Julia toggle, formula/power) already
+            // reset the pool synchronously. Re-evaluate ONLY if the same gate a
+            // camera snapshot would face is open — so switching Julia while
+            // zoomed out (or with Auto Start off) leaves the pool empty and the
+            // GPU on the naive path, rather than force-starting perturbation.
+            let (cfg, scale) = {
+                let cfg = context.config.lock().clone();
+                let scale = context.last_camera_snapshot.lock().scale().clone();
+                (cfg, scale)
+            };
+            if scout_gate_open(&cfg, &scale) {
+                tp.spawn_ok(
+                    evaluate_orbits(tp.clone(), context.clone())
+                );
+            }
         }
     }
 }
@@ -187,8 +211,12 @@ async fn evaluate_orbits(
         .collect();
     trace!("{} GPU seeds will be used to calculate reference orbits", gpu_seeds.len());
 
+    // Snapshot the parameterization rescaled to this cycle's shift, so a Julia
+    // constant is aligned with the seeds spawned below (no-op for Mandelbrot).
+    let param = context.parameterization_at(shift);
+
     let mut gpu_orbit_scores = spawn_orbits_from_seeds(
-        &gpu_seeds, tp.clone(), context.orbit_id_factory.clone(), cfg, &current_camera
+        &gpu_seeds, tp.clone(), context.orbit_id_factory.clone(), cfg, &param, &current_camera
     ).await;
 
     let total_orbits_spawned = gpu_orbit_scores.len(); // + f64_orbit_scores.len();
@@ -255,11 +283,21 @@ async fn evaluate_orbits(
             // (Re)build the BLA table when the anchored orbit changes — or when
             // the same orbit grows (future: extending on a raised iteration
             // count). The staleness check avoids upgrading the weak ref.
-            let needs_bla = match context.rank1_bla.lock().as_ref() {
-                Some(info) => info.orbit_id != best_orbit_id
-                           || info.built_len != best_orbit_len,
-                None => true,
-            };
+            //
+            // BLA is only implemented for power-2 Mandelbrot so far. The leaf
+            // A = f'(Z) and validity-radius formula are power-2-specific, and the
+            // merge/radii assume a Z[0]=0 (Mandelbrot) reference — Julia's
+            // viewport-centered reference breaks that. Power-of-X and Julia
+            // perturbation still render correctly, just without BLA speedup; a
+            // formula/parameterization switch already cleared any old table via
+            // reset().
+            let needs_bla = cfg.formula.bla_supported()
+                && param.is_mandelbrot()
+                && match context.rank1_bla.lock().as_ref() {
+                    Some(info) => info.orbit_id != best_orbit_id
+                               || info.built_len != best_orbit_len,
+                    None => true,
+                };
             if needs_bla {
                 bla_build_inputs = Some((
                     best_orbit_id, best_orbit_len,
@@ -279,11 +317,14 @@ async fn evaluate_orbits(
             .collect();
         let ctx = context.clone();
         let pool = tp.clone();
+        // Power for the leaf A = p*Z^(p-1). BLA only builds for Mandelbrot Power
+        // formulae (gated above), so this is the real power.
+        let power = cfg.formula.power();
         tp.spawn_ok(async move {
             // Build only the view-independent table; the renderer computes radii.
-            let table = bla::build_bla(Arc::new(orbit_fexp), pool).await;
+            let table = bla::build_bla(Arc::new(orbit_fexp), power, pool).await;
             let bla_info = Some(QualifiedOrbitBLAInfo {
-                orbit_id: oid, built_len: olen,
+                orbit_id: oid, built_len: olen, power,
                 orbit_ref: weak, table: Arc::new(table),
             });
             trace!("BLA table built for rank-1 orbit {:?}", bla_info);
@@ -323,6 +364,7 @@ async fn spawn_orbits_from_seeds(
     tp: ThreadPool,
     id_factory: OrbitIdFactory,
     cfg: ScoutEngineConfig,
+    param: &Parameterization,
     current_camera: &CameraSnapshot,
 ) -> Vec<OrbitScore> {
 
@@ -331,7 +373,7 @@ async fn spawn_orbits_from_seeds(
         .filter_map(|seed| {
             let res = tp.spawn_with_handle(
                 start_reference_orbit(seed.clone(), id_factory.clone(),
-                                      cfg,
+                                      cfg, param.clone(),
                                       current_camera.frame_stamp().clone())
             );
             if let Ok(h) = res { Some(h) } else {
