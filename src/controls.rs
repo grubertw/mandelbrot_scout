@@ -160,6 +160,7 @@ pub struct Controls {
     center_x: String,
     center_y: String,
     scale: String,
+    rotation_deg: f32,
 
     scale_factor: f64,
 
@@ -283,6 +284,7 @@ pub enum Message {
     ScaleChanged(String),
     PollFromScene,
     ApplyCenterScale,
+    RotationChanged(f32),
     RestoreFromPng,
 
     ScaleFactorChanged(f64),
@@ -418,6 +420,7 @@ impl Controls {
             iter_range_min: 0, iter_range_max: settings.max_user_iter * 2,
             max_iterations: settings.max_user_iter,
             center_x, center_y, scale,
+            rotation_deg: 0.0,
             scale_factor: settings.scale_factor,
             render_res_factor: settings.render_res_factor,
             render_res_factor_during_pan: settings.render_res_factor_during_pan,
@@ -574,6 +577,10 @@ impl Controls {
                 self.center_x = center.re().to_ui_string(10);
                 self.center_y = center.im().to_ui_string(10);
                 self.scale = scene_b.scale().to_ui_string(5);
+            }
+            Message::RotationChanged(deg) => {
+                self.rotation_deg = deg;
+                self.scene.borrow_mut().set_rotation(deg.to_radians());
             }
             Message::ApplyCenterScale => {
                 let mut scene_b = self.scene.borrow_mut();
@@ -1197,53 +1204,71 @@ impl Controls {
             .align_y(Alignment::Center)
     }
 
-    fn render_edit_location_row(&self) -> Row<'_, Message, Theme, Renderer> {
-        row![
-            button("Poll")
-                .on_press(Message::PollFromScene)
-                .width(Length::Fixed(50.0)),
+    fn render_edit_location_row(&self) -> Column<'_, Message, Theme, Renderer> {
+        column![
+            row![
+                button("Poll")
+                    .on_press(Message::PollFromScene)
+                    .width(Length::Fixed(50.0)),
 
-            text("real: ")
-                .width(Length::Fixed(50.0))
-                .align_y(Alignment::Center)
-                .align_x(Alignment::End),
-            text_input("Placeholder...", &self.center_x)
-                .on_input(Message::CenterXChanged)
-                .width(Length::Fixed(150.0)),
+                text("real: ")
+                    .width(Length::Fixed(50.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::End),
+                text_input("Placeholder...", &self.center_x)
+                    .on_input(Message::CenterXChanged)
+                    .width(Length::Fixed(150.0)),
 
-            text("imag: ")
-                .width(Length::Fixed(60.0))
-                .align_y(Alignment::Center)
-                .align_x(Alignment::End),
-            text_input("Placeholder...", &self.center_y)
-                .on_input(Message::CenterYChanged)
-                .width(Length::Fixed(150.0)),
+                text("imag: ")
+                    .width(Length::Fixed(60.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::End),
+                text_input("Placeholder...", &self.center_y)
+                    .on_input(Message::CenterYChanged)
+                    .width(Length::Fixed(150.0)),
 
-            text("scale: ")
-                .width(Length::Fixed(60.0))
-                .align_y(Alignment::Center)
-                .align_x(Alignment::End),
-            text_input("Placeholder...", &self.scale)
-                .on_input(Message::ScaleChanged)
-                .width(Length::Fixed(110.0)),
+                text("scale: ")
+                    .width(Length::Fixed(60.0))
+                    .align_y(Alignment::Center)
+                    .align_x(Alignment::End),
+                text_input("Placeholder...", &self.scale)
+                    .on_input(Message::ScaleChanged)
+                    .width(Length::Fixed(110.0)),
 
-            space().width(Length::Fixed(10.0)),
+                space().width(Length::Fixed(10.0)),
 
-            button("Apply")
-                .on_press(Message::ApplyCenterScale)
-                .width(Length::Fixed(65.0)),
+                button("Apply")
+                    .on_press(Message::ApplyCenterScale)
+                    .width(Length::Fixed(65.0)),
 
-            space().width(Length::Fixed(10.0)),
+                space().width(Length::Fixed(10.0)),
+            ]
+            .align_y(Alignment::Center),
+            row![
+                text("rot°:")
+                    .width(Length::Fixed(35.0))
+                    .align_y(Alignment::Center),
+                slider(0.0..=360.0, self.rotation_deg, Message::RotationChanged)
+                    .step(1.0)
+                    .width(Length::Fixed(110.0)),
+                text(format!("{:>3.0}", self.rotation_deg))
+                    .width(Length::Fixed(30.0))
+                    .align_y(Alignment::Center),
 
-            button(
-                text("Restore From PNG")
-                .wrapping(Wrapping::Word)
-                .align_x(Alignment::Center)
-                .size(9))
-            .on_press(Message::RestoreFromPng)
-            .width(Length::Fixed(90.0))
+                space().width(Length::Fixed(10.0)),
+
+                button(
+                    text("Restore From PNG")
+                    .wrapping(Wrapping::Word)
+                    .align_x(Alignment::Center)
+                    .size(9))
+                .on_press(Message::RestoreFromPng)
+                .width(Length::Fixed(90.0))
+            ].align_y(Alignment::Center),
         ]
-            .align_y(Alignment::Center)
+        .spacing(5)
+        .padding(5)
+
     }
 
     fn render_edit_render_resolution(&self) -> Column<'_, Message, Theme, Renderer> {

@@ -286,6 +286,8 @@ struct Uniforms {
     formula_power:       u32,
     julia_c_re:          f32,
     julia_c_im:          f32,
+    rot_cos:            f32,
+    rot_sin:            f32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
@@ -353,14 +355,21 @@ fn get_jitter(pix: vec2i, sample_idx: u32) -> vec2f {
 
 // Pixel offset into scene space: (normalized pixel coord) * view_size * scale.
 // cu * view_width is O(screen_px) — well within f32 — so fexp_scale is exact.
+// Rotate a world-space offset (f32, pre-scale) by the viewport rotation.
+fn rotate_off(o: vec2f) -> vec2f {
+    return vec2f(o.x * uni.rot_cos - o.y * uni.rot_sin,
+                 o.x * uni.rot_sin + o.y * uni.rot_cos);
+}
+
 fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> ComplexFExp {
     let jittered = vec2f(pix) + jitter * uni.jitter_strength;
     let cu = jittered.x / f32(uni.render_width)  - 0.5;
     let cv = jittered.y / f32(uni.render_height) - 0.5;
 
     let scale = FExp(uni.scale, uni.scale_exp);
-    let off_x = fexp_scale(cu * uni.view_width,  scale);
-    let off_y = fexp_scale(cv * uni.view_height, scale);
+    let ov = rotate_off(vec2f(cu * uni.view_width, cv * uni.view_height));
+    let off_x = fexp_scale(ov.x, scale);
+    let off_y = fexp_scale(ov.y, scale);
 
     return ComplexFExp(
         fexp_add(FExp(uni.center_x, uni.center_x_exp), off_x),
@@ -376,8 +385,9 @@ fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32, jitter: vec2f) 
     let cv = jittered.y / f32(uni.render_height) - 0.5;
 
     let scale  = FExp(uni.scale, uni.scale_exp);
-    let off_x  = fexp_scale(cu * uni.view_width,  scale);
-    let off_y  = fexp_scale(cv * uni.view_height, scale);
+    let ov = rotate_off(vec2f(cu * uni.view_width, cv * uni.view_height));
+    let off_x  = fexp_scale(ov.x, scale);
+    let off_y  = fexp_scale(ov.y, scale);
     let orbit  = orbit_location[orbit_idx];
 
     return ComplexFExp(

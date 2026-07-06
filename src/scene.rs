@@ -72,6 +72,9 @@ pub struct Scene {
     // User toggle (Scout tab checkbox). When off, refresh_bla leaves the shader on
     // the plain perturbation path regardless of whether a table is resident.
     bla_enabled: bool,
+    // Selects the Burning Ship (f32) compute pipeline over the Mandelbrot ones.
+    // Set from set_formula; the actual formula lives in the scout config + uniform.
+    burning_ship: bool,
     uniform: SceneUniform,
     pipeline: PipelineBundle,
     selected_palette: String,
@@ -165,6 +168,8 @@ impl Scene {
             formula_power: 2,
             julia_c_re: 0.0,
             julia_c_im: 0.0,
+            rot_cos: 1.0,
+            rot_sin: 0.0,
             color_scalar_mapping_mode: 0,
             color_scaler_mapping_strength: 1.0,
             palette_tex_width: settings.max_palette_colors,
@@ -213,6 +218,7 @@ impl Scene {
             loaded_orbits: Vec::new(),
             loaded_bla_table_id: None,
             bla_enabled: true,
+            burning_ship: false,
             uniform, pipeline,
             selected_palette: "default".to_string(),
             palette_changed: true, color_palettes,
@@ -283,7 +289,13 @@ impl Scene {
                 // Update/refresh orbit locations before use.
                 self.upload_orbit_locations();
                 let use_fexp = (self.uniform.render_flags & (1 << 11)) != 0;
-                let compute_used = if use_fexp {
+                let compute_used = if self.burning_ship {
+                    // Burning Ship is f32-only and reuses the f32 bind groups.
+                    cpass.set_pipeline(&self.pipeline.calc_burningship_pipeline);
+                    cpass.set_bind_group(0, &self.pipeline.calc_bg, &[]);
+                    cpass.set_bind_group(1, &self.pipeline.debug_bg, &[]);
+                    "Compute with Burning Ship (f32) GPU shader".to_string()
+                } else if use_fexp {
                     cpass.set_pipeline(&self.pipeline.calc_mandel_fexp_pipeline);
                     cpass.set_bind_group(0, &self.pipeline.calc_fexp_bg, &[]);
                     cpass.set_bind_group(1, &self.pipeline.fexp_debug_bg, &[]);
@@ -826,9 +838,15 @@ impl Scene {
         let px = cursor_x - self.width * 0.5;
         let py = cursor_y - self.height * 0.5;
 
+        // Rotate the world offset (px, -py) by the viewport rotation, matching
+        // the shader's rotate_off, so zoom-toward-cursor tracks the rotated view.
+        let (c, s) = (self.uniform.rot_cos as f64, self.uniform.rot_sin as f64);
+        let re = px * c + py * s;   // (px)c - (-py)s
+        let im = px * s - py * c;   // (px)s + (-py)c
+
         FixedComplex {
-            re: self.scale.scale_by_f64(px, true),
-            im: self.scale.scale_by_f64(-py, true),
+            re: self.scale.scale_by_f64(re, true),
+            im: self.scale.scale_by_f64(im, true),
         }
     }
 
@@ -915,9 +933,16 @@ impl Scene {
         dx_pixels: f64,
         dy_pixels: f64,
     ) -> FixedComplex {
+        // Rotate the drag delta so panning follows the rotated view. pan_pixels
+        // applies the y-flip itself (center.re -= / center.im +=), so this is the
+        // inverse rotation of the zoom path (which flips via center + offset on a
+        // -py). Derived from grab-drag against the zoom-verified screen->world map.
+        let (c, s) = (self.uniform.rot_cos as f64, self.uniform.rot_sin as f64);
+        let re =  dx_pixels * c + dy_pixels * s;
+        let im = -dx_pixels * s + dy_pixels * c;
         FixedComplex {
-            re: self.scale.scale_by_f64(dx_pixels, true),
-            im: self.scale.scale_by_f64(dy_pixels, true),
+            re: self.scale.scale_by_f64(re, true),
+            im: self.scale.scale_by_f64(im, true),
         }
     }
 
@@ -965,6 +990,14 @@ impl Scene {
         self.recalc_fractal = true;
     }
 
+    /// Rotate the viewport by `radians`. Only re-renders — reference orbits are
+    /// rotation-independent (c_ref is a point, center_offset a complex delta), so
+    /// no scout reset is needed; the grid samples simply land at rotated points.
+    pub fn set_rotation(&mut self, radians: f32) {
+        self.uniform.set_rotation(radians);
+        self.recalc_fractal = true;
+    }
+
     /// Toggle Julia mode. When enabled, the current viewport center is captured
     /// as the fixed Julia constant `c`; when disabled, revert to Mandelbrot.
     /// The scout engine clears its pool + BLA and re-scouts for the new plane,
@@ -1000,6 +1033,8 @@ impl Scene {
         if let Formula::Power { power } = formula {
             self.uniform.set_formula_power(power);
         }
+        // Route the GPU to the Burning Ship pipeline (f32-only) when selected.
+        self.burning_ship = matches!(formula, Formula::BurningShip);
         self.scout_engine.set_formula(formula);
         self.recalc_fractal = true;
     }

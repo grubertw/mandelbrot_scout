@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::numerics::ComplexFExp;
 
 fn default_formula_power() -> u32 { 2 }
+fn default_rot_cos() -> f32 { 1.0 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Serialize, Deserialize)]
@@ -49,6 +50,13 @@ pub struct SceneUniform {
     pub julia_c_re: f32,        // fixed Julia constant (world coords, f32 ok at
     #[serde(default)]
     pub julia_c_im: f32,        // naive/shallow scales); active via USE_JULIA bit
+    // Viewport rotation, precomputed cos/sin (identity = no rotation). Applied to
+    // the per-pixel world offset in the calc shaders (and mirrored in the CPU
+    // navigation math) so zoom/pan stay consistent with the rotated view.
+    #[serde(default = "default_rot_cos")]
+    pub rot_cos: f32,
+    #[serde(default)]
+    pub rot_sin: f32,
     pub color_scalar_mapping_mode: u32,
     pub color_scaler_mapping_strength: f32,
     pub palette_tex_width: u32,
@@ -147,6 +155,12 @@ impl SceneUniform {
     pub fn set_julia_c(&mut self, c_re: f32, c_im: f32) {
         self.julia_c_re = c_re;
         self.julia_c_im = c_im;
+    }
+
+    /// Set the viewport rotation (radians), precomputing cos/sin for the shader.
+    pub fn set_rotation(&mut self, radians: f32) {
+        self.rot_cos = radians.cos();
+        self.rot_sin = radians.sin();
     }
 }
 

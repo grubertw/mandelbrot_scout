@@ -155,6 +155,8 @@ struct Uniforms {
     formula_power:       u32,
     julia_c_re:          f32,
     julia_c_im:          f32,
+    rot_cos:            f32,
+    rot_sin:            f32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
@@ -163,6 +165,12 @@ struct Uniforms {
 // Mandelbrot computation results are written to these textures
 @group(0) @binding(2)
 var calc_out_tex: texture_storage_2d<rgba32float, write>;
+
+// Rotate a world-space offset by the viewport rotation (identity when rot_cos=1).
+fn rotate_off(o: vec2f) -> vec2f {
+    return vec2f(o.x * uni.rot_cos - o.y * uni.rot_sin,
+                 o.x * uni.rot_sin + o.y * uni.rot_cos);
+}
 
 fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> vec2f {
     let rw = f32(uni.render_width);
@@ -184,7 +192,7 @@ fn build_c_from_scene(pix: vec2i, jitter: vec2f) -> vec2f {
     let scale = ldexp(uni.scale, uni.scale_exp);
 
     // Map into world space using VIEW size
-    let offset = vec2f(cu * vw, cv * vh) * scale;
+    let offset = rotate_off(vec2f(cu * vw, cv * vh)) * scale;
 
     // Reconstruct center from FExp mantissa + exponent.
     let cx = ldexp(uni.center_x, uni.center_x_exp);
@@ -401,7 +409,7 @@ fn build_delta_c_from_orbit_location(pix: vec2i, orbit_idx: u32, jitter: vec2f) 
     // Reconstruct actual scale from FExp mantissa + exponent.
     let scale = ldexp(uni.scale, uni.scale_exp);
 
-    let offset = vec2f(cu * vw, cv * vh) * scale;
+    let offset = rotate_off(vec2f(cu * vw, cv * vh)) * scale;
     let orbit = orbit_location[orbit_idx];
 
     // Reconstruct actual f32 offsets from FExp mantissa + exponent.

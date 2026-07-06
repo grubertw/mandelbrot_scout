@@ -29,3 +29,11 @@ fn mandelbrot_f32_is_valid() {
         include_str!("../src/gpu_pipeline/mandelbrot_f32.wgsl"),
     );
 }
+
+#[test]
+fn mandelbrot_burningship_is_valid() {
+    validate(
+        "mandelbrot_burningship.wgsl",
+        include_str!("../src/gpu_pipeline/mandelbrot_burningship.wgsl"),
+    );
+}

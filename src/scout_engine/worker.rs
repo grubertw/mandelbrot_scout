@@ -215,6 +215,9 @@ async fn evaluate_orbits(
     // constant is aligned with the seeds spawned below (no-op for Mandelbrot).
     let param = context.parameterization_at(shift);
 
+    debug!("evaluate_orbits computing reference orbits with formula={:?}, parameterization={:?}",
+        cfg.formula, param);
+
     let mut gpu_orbit_scores = spawn_orbits_from_seeds(
         &gpu_seeds, tp.clone(), context.orbit_id_factory.clone(), cfg, &param, &current_camera
     ).await;

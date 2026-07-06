@@ -241,6 +241,28 @@ mod tests {
         }
     }
 
+    // Mirror of the WGSL `diffabs` in mandelbrot_burningship.wgsl (ported from
+    // Fraktaler-3). Pins the four sign-case branches the Burning Ship
+    // perturbation relies on: diffabs(c, d) must equal |c + d| - |c| exactly.
+    fn diffabs(c: f64, d: f64) -> f64 {
+        let cd = c + d;
+        let c2d = 2.0 * c + d;
+        if c >= 0.0 { if cd >= 0.0 { d } else { -c2d } }
+        else { if cd > 0.0 { c2d } else { -d } }
+    }
+
+    #[test]
+    fn diffabs_matches_abs_difference() {
+        for &c in &[-2.0, -0.5, -1e-6, 0.0, 1e-6, 0.5, 2.0_f64] {
+            for &d in &[-3.0, -1.0, -1e-6, 0.0, 1e-6, 1.0, 3.0_f64] {
+                let got = diffabs(c, d);
+                let expect = (c + d).abs() - c.abs();
+                assert!((got - expect).abs() < 1e-12,
+                    "diffabs({c},{d}) = {got}, expected |c+d|-|c| = {expect}");
+            }
+        }
+    }
+
     #[test]
     fn perturb_binomial_power2_is_classic_form() {
         use num_complex::Complex64;
