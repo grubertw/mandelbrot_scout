@@ -172,6 +172,7 @@ impl Scene {
             julia_c_im: 0.0,
             rot_cos: 1.0,
             rot_sin: 0.0,
+            stateful_kind: 0,
             color_scalar_mapping_mode: 0,
             color_scaler_mapping_strength: 1.0,
             palette_tex_width: settings.max_palette_colors,
@@ -1044,7 +1045,11 @@ impl Scene {
         }
         // Route the GPU to the right f32 pipeline for the selected formula.
         self.burning_ship = matches!(formula, Formula::BurningShip);
-        self.stateful = matches!(formula, Formula::Manowar);
+        self.stateful = matches!(formula, Formula::Manowar | Formula::Phoenix);
+        self.uniform.set_stateful_kind(match formula {
+            Formula::Phoenix => 1,
+            _ => 0, // Manowar (and the default for non-stateful)
+        });
         self.scout_engine.set_formula(formula);
         self.recalc_fractal = true;
     }

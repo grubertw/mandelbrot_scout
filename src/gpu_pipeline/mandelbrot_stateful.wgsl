@@ -71,8 +71,12 @@ struct Uniforms {
     julia_c_im:          f32,
     rot_cos:             f32,
     rot_sin:             f32,
+    stateful_kind:       u32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
+
+const KIND_MANOWAR: u32 = 0u;
+const KIND_PHOENIX: u32 = 1u;
 
 @group(0) @binding(1) var noise_tex: texture_2d<f32>;
 
@@ -322,6 +326,156 @@ fn manowar_perturb(delta_c: vec2f) -> vec4f {
     return vec4f(fi, 0.0, chan_z, f32(flags));
 }
 
+// -------------------------------
+// Phoenix (naive): z_{n+1} = z^2 + Im(c)*z_{n-1} + Re(c), seed z_0=c, z_{-1}=0.
+// p = Im(c) is a real scalar coefficient; the additive Re(c) is real only.
+// -------------------------------
+fn phoenix(c: vec2f) -> vec4f {
+    let p = c.y;   // Im(c)  coefficient
+    let k = c.x;   // Re(c)  additive
+    var z = c;                     // z_0 = c
+    var z_prev = vec2f(0.0, 0.0);  // z_{-1} = 0
+    var i: u32 = 0u;
+    let max_i = uni.max_iter;
+    var mag_z: f32 = 0.0;
+    var escape_mag_z: f32 = 0.0;
+    var extra: u32 = 0u;
+    var stripe_sum: f32 = 0.0;
+    var stripe_count: f32 = 0.0;
+    var trap_min: f32 = 1e30;
+    var trap_sum: f32 = 0.0;
+    var trap_count: f32 = 0.0;
+    let trap_skip: u32 = u32(f32(max_i) * uni.trap_iter_skip_frac);
+    let trap_sharpness: f32 = uni.stripe_trap_arg3;
+    var flags: u32 = 0u;
+
+    for (i = 0u; i < max_i; i = i + 1u) {
+        let z_new = c32_mul(z, z) + p * z_prev + vec2f(k, 0.0);
+        z_prev = z;
+        z = z_new;
+
+        if ((uni.render_flags & USE_TRAPS) != 0 && i >= trap_skip) {
+            let td = trap_dist(z);
+            if (trap_sharpness > 0.0) { trap_sum += exp(-td * trap_sharpness); trap_count += 1.0; }
+            else { trap_min = min(trap_min, td); }
+        } else if ((uni.render_flags & USE_STRIPES) != 0) {
+            let angle = atan2(z.y, z.x);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_trap_arg1);
+            stripe = pow(stripe, uni.stripe_trap_arg3);
+            stripe_sum += stripe;
+            stripe_count += 1.0;
+        }
+
+        mag_z = z.x * z.x + z.y * z.y;
+        if (mag_z > BAILOUT) {
+            flags |= ESCAPED_BIT;
+            if (extra >= 2) { break; }
+            extra += 1;
+        }
+        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
+    }
+
+    if (i == max_i) { flags |= MAX_ITER_BIT; }
+
+    var fi = f32(i - extra);
+    if ((uni.render_flags & SMOOTH_COLORING) != 0) {
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        if (i == max_i) { fi = f32(max_i); }
+    }
+
+    var chan_z: f32 = 0.0;
+    if ((uni.render_flags & USE_TRAPS) != 0) {
+        if (trap_sharpness > 0.0) { chan_z = trap_sum / max(trap_count, 1.0); }
+        else { chan_z = trap_min; }
+    } else if ((uni.render_flags & USE_STRIPES) != 0) {
+        chan_z = stripe_sum / stripe_count;
+    }
+    return vec4f(fi, 0.0, chan_z, f32(flags));
+}
+
+// -------------------------------
+// Phoenix perturbation (Option A: no rebasing). P = Im(c_ref) = orbit[0].y
+// (since z_0 = c_ref is stored at index 0). With dp = Im(dc), dk = Re(dc):
+//   dz_{n+1} = 2Z*dz + dz^2 + P*dz_prev + dp*(Z_prev + dz_prev) + (dk, 0)
+// The dp*(Z_prev+..) term needs Z_{n-1} from the reference (index back one).
+// Seeds: dz_0 = delta_c, dz_{-1} = 0.
+// -------------------------------
+fn phoenix_perturb(delta_c: vec2f) -> vec4f {
+    let P = load_ref_orbit(0u, 0u).y;  // Im(c_ref)
+    let dp = delta_c.y;                // Im(dc)
+    let dk = delta_c.x;                // Re(dc)
+    var dz = delta_c;                  // dz_0
+    var dz_prev = vec2f(0.0, 0.0);     // dz_{-1} = 0
+    var i: u32 = 0u;
+    var ref_i: u32 = 0u;
+    let max_i = uni.max_iter;
+    let max_ref_i = orbit_location[0u].max_ref_iters;
+    var mag_z: f32 = 0.0;
+    var escape_mag_z: f32 = 0.0;
+    var extra: u32 = 0u;
+    var stripe_sum: f32 = 0.0;
+    var stripe_count: f32 = 0.0;
+    var trap_min: f32 = 1e30;
+    var trap_sum: f32 = 0.0;
+    var trap_count: f32 = 0.0;
+    let trap_skip: u32 = u32(f32(max_i) * uni.trap_iter_skip_frac);
+    let trap_sharpness: f32 = uni.stripe_trap_arg3;
+    var flags: u32 = PERTURB_BIT;
+
+    for (i = 0u; i < max_i; i = i + 1u) {
+        if (ref_i >= max_ref_i) { break; }
+        let Z = load_ref_orbit(0u, ref_i);
+        var Z_prev = vec2f(0.0, 0.0);   // Z_{-1} = 0 at n=0
+        if (ref_i > 0u) { Z_prev = load_ref_orbit(0u, ref_i - 1u); }
+        let z = Z + dz;
+
+        if ((uni.render_flags & USE_TRAPS) != 0 && i >= trap_skip) {
+            let td = trap_dist(z);
+            if (trap_sharpness > 0.0) { trap_sum += exp(-td * trap_sharpness); trap_count += 1.0; }
+            else { trap_min = min(trap_min, td); }
+        } else if ((uni.render_flags & USE_STRIPES) != 0) {
+            let angle = atan2(z.y, z.x);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_trap_arg1);
+            stripe = pow(stripe, uni.stripe_trap_arg3);
+            stripe_sum += stripe;
+            stripe_count += 1.0;
+        }
+
+        mag_z = z.x * z.x + z.y * z.y;
+        if (mag_z > BAILOUT) {
+            flags |= ESCAPED_BIT;
+            if (extra >= 2) { break; }
+            extra += 1;
+        }
+        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
+
+        let dz_new = c32_mul(Z + Z, dz) + c32_mul(dz, dz)
+                   + P * dz_prev
+                   + dp * (Z_prev + dz_prev)
+                   + vec2f(dk, 0.0);
+        dz_prev = dz;
+        dz = dz_new;
+        ref_i += 1u;
+    }
+
+    if (i == max_i) { flags |= MAX_ITER_BIT; }
+
+    var fi = f32(i - extra);
+    if ((uni.render_flags & SMOOTH_COLORING) != 0) {
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        if (i == max_i) { fi = f32(max_i); }
+    }
+
+    var chan_z: f32 = 0.0;
+    if ((uni.render_flags & USE_TRAPS) != 0) {
+        if (trap_sharpness > 0.0) { chan_z = trap_sum / max(trap_count, 1.0); }
+        else { chan_z = trap_min; }
+    } else if ((uni.render_flags & USE_STRIPES) != 0) {
+        chan_z = stripe_sum / stripe_count;
+    }
+    return vec4f(fi, 0.0, chan_z, f32(flags));
+}
+
 const OVERSAMPLE_GUARD = 50;
 
 @compute @workgroup_size(16, 16)
@@ -345,11 +499,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         var results = vec4f(0.0, 0.0, 0.0, 0.0);
         if (uni.ref_orb_count > 0) {
             let delta_c = build_delta_c_from_orbit_location(pix, 0u, jitter);
-            results = manowar_perturb(delta_c);
+            if (uni.stateful_kind == KIND_PHOENIX) { results = phoenix_perturb(delta_c); }
+            else { results = manowar_perturb(delta_c); }
             c_for_log = delta_c;
         } else {
             let c = build_c_from_scene(pix, jitter);
-            results = manowar(c);
+            if (uni.stateful_kind == KIND_PHOENIX) { results = phoenix(c); }
+            else { results = manowar(c); }
             c_for_log = c;
         }
 

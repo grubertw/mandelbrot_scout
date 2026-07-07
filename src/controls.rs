@@ -120,6 +120,7 @@ pub enum FormulaKind {
     Power,
     BurningShip,
     Manowar,
+    Phoenix,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1054,6 +1055,7 @@ impl Controls {
             FormulaKind::Power => Formula::Power { power: self.mandelbrot_power },
             FormulaKind::BurningShip => Formula::BurningShip,
             FormulaKind::Manowar => Formula::Manowar,
+            FormulaKind::Phoenix => Formula::Phoenix,
         }
     }
 
@@ -1804,6 +1806,9 @@ impl Controls {
                     Some(self.formula_kind), Message::FormulaKindChanged),
                 space().width(Length::Fixed(15.0)),
                 radio("Manowar", FormulaKind::Manowar,
+                    Some(self.formula_kind), Message::FormulaKindChanged),
+                space().width(Length::Fixed(15.0)),
+                radio("Phoenix", FormulaKind::Phoenix,
                     Some(self.formula_kind), Message::FormulaKindChanged),
             ]
             .align_y(Alignment::Center),

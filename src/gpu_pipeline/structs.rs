@@ -57,6 +57,10 @@ pub struct SceneUniform {
     pub rot_cos: f32,
     #[serde(default)]
     pub rot_sin: f32,
+    // Which stateful-holomorphic formula the stateful shader runs (0=Manowar,
+    // 1=Phoenix). Only read by mandelbrot_stateful.wgsl.
+    #[serde(default)]
+    pub stateful_kind: u32,
     pub color_scalar_mapping_mode: u32,
     pub color_scaler_mapping_strength: f32,
     pub palette_tex_width: u32,
@@ -161,6 +165,11 @@ impl SceneUniform {
     pub fn set_rotation(&mut self, radians: f32) {
         self.rot_cos = radians.cos();
         self.rot_sin = radians.sin();
+    }
+
+    /// Which stateful formula the stateful shader runs (0=Manowar, 1=Phoenix).
+    pub fn set_stateful_kind(&mut self, kind: u32) {
+        self.stateful_kind = kind;
     }
 }
 

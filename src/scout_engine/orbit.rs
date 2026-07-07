@@ -89,7 +89,9 @@ impl ReferenceOrbit {
         // Formula-specific initial value + extra state. Manowar seeds z0 = c and
         // carries z_{-1} = z0 (FZ's default init); simple formulas ignore z_prev.
         let (curr_z, curr_z_prev) = match formula {
+            // Manowar seeds z_{-1} = z_0 = c; Phoenix seeds z_0 = c, z_{-1} = 0.
             Formula::Manowar => (c.clone(), c.clone()),
+            Formula::Phoenix => (c.clone(), FixedComplex::zero(c_ref.re.shift)),
             _ => (z0, FixedComplex::zero(c_ref.re.shift)),
         };
 

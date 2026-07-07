@@ -37,6 +37,7 @@ struct Uniforms {
     julia_c_im:          f32,
     rot_cos:            f32,
     rot_sin:            f32,
+    stateful_kind:      u32,
     color_scalar_mapping_mode:      u32,
     color_scaler_mapping_strength:  f32,
     palette_tex_width:  u32,

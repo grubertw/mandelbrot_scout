@@ -78,6 +78,10 @@ pub enum Formula {
     /// the previous z, so it iterates with extra state (see the stateful GPU
     /// shader). Naive + perturbation (no rebasing) are wired.
     Manowar,
+    /// z_{n+1} = z^2 + Im(c)*z_{n-1} + Re(c)  (FZ parameter-plane Phoenix).
+    /// Second-order; the previous-z coefficient p = Im(c) and the additive
+    /// k = Re(c) are the real/imag of the pixel. Seed z_0 = c, z_{-1} = 0.
+    Phoenix,
 }
 
 impl Default for Formula {
@@ -94,21 +98,32 @@ impl Formula {
     /// (`ReferenceOrbit::compute_to`) carries it.
     #[inline]
     pub fn ref_step(&self, z: &FixedComplex, z_prev: &FixedComplex, c: &FixedComplex) -> FixedComplex {
-        let mut acc = match *self {
-            Formula::Power { power } => ipow(z, power),
+        match *self {
+            Formula::Power { power } => { let mut a = ipow(z, power); a += c; a }
             Formula::BurningShip => {
-                // fold into the first quadrant, then square
-                FixedComplex::new(z.re().abs(), z.im().abs()).square()
+                // fold into the first quadrant, then square, then + c
+                let mut a = FixedComplex::new(z.re().abs(), z.im().abs()).square();
+                a += c;
+                a
             }
             Formula::Manowar => {
-                // z^2 + z_{n-1}  (the + c is applied below)
-                let mut s = z.square();
-                s += z_prev;
-                s
+                // z^2 + z_{n-1} + c
+                let mut a = z.square();
+                a += z_prev;
+                a += c;
+                a
             }
-        };
-        acc += c;
-        acc
+            Formula::Phoenix => {
+                // z^2 + Im(c)*z_{n-1} + Re(c). p = Im(c) is a REAL scalar and the
+                // additive is Re(c) only — not the full complex c.
+                let p = c.im();
+                let mut a = z.square();
+                a.re += &(z_prev.re().clone() * p.clone());
+                a.im += &(z_prev.im().clone() * p.clone());
+                a.re += c.re();
+                a
+            }
+        }
     }
 
     /// Whether a complex-scalar derivative exists (gates the concept of a scalar
@@ -122,7 +137,7 @@ impl Formula {
     /// false until their perturbation path exists.
     pub fn supports_perturbation(&self) -> bool {
         matches!(self,
-            Formula::Power { .. } | Formula::BurningShip | Formula::Manowar)
+            Formula::Power { .. } | Formula::BurningShip | Formula::Manowar | Formula::Phoenix)
     }
 
     /// Whether the GPU BLA path is implemented for this formula. BLA needs the
@@ -209,6 +224,21 @@ mod tests {
         };
         let got = Formula::Manowar.ref_step(&z, &z_prev, &c);
         approx(&got, expected.re().to_f64_lossy(), expected.im().to_f64_lossy());
+    }
+
+    #[test]
+    fn phoenix_ref_uses_re_and_im_of_c() {
+        // z^2 + Im(c)*z_prev + Re(c). Additive is Re(c) only; coeff is Im(c).
+        let z = fc(0.2, -0.3);
+        let z_prev = fc(-0.1, 0.4);
+        let c = fc(0.05, -0.6); // k = 0.05, p = -0.6
+        let (a, b) = (0.2_f64, -0.3_f64);
+        let (zp_re, zp_im) = (-0.1_f64, 0.4_f64);
+        let (k, p) = (0.05_f64, -0.6_f64);
+        let re = (a * a - b * b) + p * zp_re + k;
+        let im = 2.0 * a * b + p * zp_im;
+        let got = Formula::Phoenix.ref_step(&z, &z_prev, &c);
+        approx(&got, re, im);
     }
 
     #[test]
