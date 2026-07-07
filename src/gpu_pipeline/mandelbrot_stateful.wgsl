@@ -77,6 +77,7 @@ struct Uniforms {
 
 const KIND_MANOWAR: u32 = 0u;
 const KIND_PHOENIX: u32 = 1u;
+const KIND_SPIDER: u32  = 2u;
 
 @group(0) @binding(1) var noise_tex: texture_2d<f32>;
 
@@ -476,6 +477,143 @@ fn phoenix_perturb(delta_c: vec2f) -> vec4f {
     return vec4f(fi, 0.0, chan_z, f32(flags));
 }
 
+// -------------------------------
+// Spider (naive): z_{n+1} = z^2 + c_n; c_{n+1} = c_n/2 + z_{n+1}. c evolves.
+// Seed z_0 = c_0 = pixel.
+// -------------------------------
+fn spider(pix_c: vec2f) -> vec4f {
+    var z = pix_c;   // z_0 = pixel
+    var c = pix_c;   // c_0 = pixel (evolving)
+    var i: u32 = 0u;
+    let max_i = uni.max_iter;
+    var mag_z: f32 = 0.0;
+    var escape_mag_z: f32 = 0.0;
+    var extra: u32 = 0u;
+    var stripe_sum: f32 = 0.0;
+    var stripe_count: f32 = 0.0;
+    var trap_min: f32 = 1e30;
+    var trap_sum: f32 = 0.0;
+    var trap_count: f32 = 0.0;
+    let trap_skip: u32 = u32(f32(max_i) * uni.trap_iter_skip_frac);
+    let trap_sharpness: f32 = uni.stripe_trap_arg3;
+    var flags: u32 = 0u;
+
+    for (i = 0u; i < max_i; i = i + 1u) {
+        z = c32_mul(z, z) + c;   // z = z^2 + c
+        c = c * 0.5 + z;         // c = c/2 + z (new z)
+
+        if ((uni.render_flags & USE_TRAPS) != 0 && i >= trap_skip) {
+            let td = trap_dist(z);
+            if (trap_sharpness > 0.0) { trap_sum += exp(-td * trap_sharpness); trap_count += 1.0; }
+            else { trap_min = min(trap_min, td); }
+        } else if ((uni.render_flags & USE_STRIPES) != 0) {
+            let angle = atan2(z.y, z.x);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_trap_arg1);
+            stripe = pow(stripe, uni.stripe_trap_arg3);
+            stripe_sum += stripe;
+            stripe_count += 1.0;
+        }
+
+        mag_z = z.x * z.x + z.y * z.y;
+        if (mag_z > BAILOUT) {
+            flags |= ESCAPED_BIT;
+            if (extra >= 2) { break; }
+            extra += 1;
+        }
+        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
+    }
+
+    if (i == max_i) { flags |= MAX_ITER_BIT; }
+
+    var fi = f32(i - extra);
+    if ((uni.render_flags & SMOOTH_COLORING) != 0) {
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        if (i == max_i) { fi = f32(max_i); }
+    }
+
+    var chan_z: f32 = 0.0;
+    if ((uni.render_flags & USE_TRAPS) != 0) {
+        if (trap_sharpness > 0.0) { chan_z = trap_sum / max(trap_count, 1.0); }
+        else { chan_z = trap_min; }
+    } else if ((uni.render_flags & USE_STRIPES) != 0) {
+        chan_z = stripe_sum / stripe_count;
+    }
+    return vec4f(fi, 0.0, chan_z, f32(flags));
+}
+
+// -------------------------------
+// Spider perturbation (Option A: no rebasing). Coupled evolving dc:
+//   dz_{n+1} = 2Z*dz + dz^2 + dc_n,   dc_{n+1} = dc_n/2 + dz_{n+1}
+// The reference C_n cancels — no Z_prev needed. Seeds dz_0 = dc_0 = delta_c.
+// -------------------------------
+fn spider_perturb(delta_c: vec2f) -> vec4f {
+    var dz = delta_c;   // dz_0
+    var dc = delta_c;   // dc_0 (evolving)
+    var i: u32 = 0u;
+    var ref_i: u32 = 0u;
+    let max_i = uni.max_iter;
+    let max_ref_i = orbit_location[0u].max_ref_iters;
+    var mag_z: f32 = 0.0;
+    var escape_mag_z: f32 = 0.0;
+    var extra: u32 = 0u;
+    var stripe_sum: f32 = 0.0;
+    var stripe_count: f32 = 0.0;
+    var trap_min: f32 = 1e30;
+    var trap_sum: f32 = 0.0;
+    var trap_count: f32 = 0.0;
+    let trap_skip: u32 = u32(f32(max_i) * uni.trap_iter_skip_frac);
+    let trap_sharpness: f32 = uni.stripe_trap_arg3;
+    var flags: u32 = PERTURB_BIT;
+
+    for (i = 0u; i < max_i; i = i + 1u) {
+        if (ref_i >= max_ref_i) { break; }
+        let Z = load_ref_orbit(0u, ref_i);
+        let z = Z + dz;
+
+        if ((uni.render_flags & USE_TRAPS) != 0 && i >= trap_skip) {
+            let td = trap_dist(z);
+            if (trap_sharpness > 0.0) { trap_sum += exp(-td * trap_sharpness); trap_count += 1.0; }
+            else { trap_min = min(trap_min, td); }
+        } else if ((uni.render_flags & USE_STRIPES) != 0) {
+            let angle = atan2(z.y, z.x);
+            var stripe = 0.5 + 0.5 * sin(angle * uni.stripe_trap_arg1);
+            stripe = pow(stripe, uni.stripe_trap_arg3);
+            stripe_sum += stripe;
+            stripe_count += 1.0;
+        }
+
+        mag_z = z.x * z.x + z.y * z.y;
+        if (mag_z > BAILOUT) {
+            flags |= ESCAPED_BIT;
+            if (extra >= 2) { break; }
+            extra += 1;
+        }
+        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
+
+        let dz_new = c32_mul(Z + Z, dz) + c32_mul(dz, dz) + dc;
+        dc = dc * 0.5 + dz_new;   // dc' = dc/2 + dz'
+        dz = dz_new;
+        ref_i += 1u;
+    }
+
+    if (i == max_i) { flags |= MAX_ITER_BIT; }
+
+    var fi = f32(i - extra);
+    if ((uni.render_flags & SMOOTH_COLORING) != 0) {
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        if (i == max_i) { fi = f32(max_i); }
+    }
+
+    var chan_z: f32 = 0.0;
+    if ((uni.render_flags & USE_TRAPS) != 0) {
+        if (trap_sharpness > 0.0) { chan_z = trap_sum / max(trap_count, 1.0); }
+        else { chan_z = trap_min; }
+    } else if ((uni.render_flags & USE_STRIPES) != 0) {
+        chan_z = stripe_sum / stripe_count;
+    }
+    return vec4f(fi, 0.0, chan_z, f32(flags));
+}
+
 const OVERSAMPLE_GUARD = 50;
 
 @compute @workgroup_size(16, 16)
@@ -500,11 +638,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         if (uni.ref_orb_count > 0) {
             let delta_c = build_delta_c_from_orbit_location(pix, 0u, jitter);
             if (uni.stateful_kind == KIND_PHOENIX) { results = phoenix_perturb(delta_c); }
+            else if (uni.stateful_kind == KIND_SPIDER) { results = spider_perturb(delta_c); }
             else { results = manowar_perturb(delta_c); }
             c_for_log = delta_c;
         } else {
             let c = build_c_from_scene(pix, jitter);
             if (uni.stateful_kind == KIND_PHOENIX) { results = phoenix(c); }
+            else if (uni.stateful_kind == KIND_SPIDER) { results = spider(c); }
             else { results = manowar(c); }
             c_for_log = c;
         }

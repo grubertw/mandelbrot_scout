@@ -89,8 +89,9 @@ impl ReferenceOrbit {
         // Formula-specific initial value + extra state. Manowar seeds z0 = c and
         // carries z_{-1} = z0 (FZ's default init); simple formulas ignore z_prev.
         let (curr_z, curr_z_prev) = match formula {
-            // Manowar seeds z_{-1} = z_0 = c; Phoenix seeds z_0 = c, z_{-1} = 0.
-            Formula::Manowar => (c.clone(), c.clone()),
+            // Manowar: z_{-1} = z_0 = c. Spider: z_0 = c_0 = c (extra = evolving c).
+            Formula::Manowar | Formula::Spider => (c.clone(), c.clone()),
+            // Phoenix: z_0 = c, z_{-1} = 0.
             Formula::Phoenix => (c.clone(), FixedComplex::zero(c_ref.re.shift)),
             _ => (z0, FixedComplex::zero(c_ref.re.shift)),
         };
@@ -136,9 +137,10 @@ impl ReferenceOrbit {
 
         for i in curr_iter..max_iter {
             self.orbit.push(self.curr_z.clone());
-            let z_next = self.formula.ref_step(&self.curr_z, &self.curr_z_prev, &self.c);
-            // z_prev <- old z (Z_n), z <- z_next (Z_{n+1}).
-            self.curr_z_prev = std::mem::replace(&mut self.curr_z, z_next);
+            let (z_next, extra_next) =
+                self.formula.ref_step(&self.curr_z, &self.curr_z_prev, &self.c);
+            self.curr_z = z_next;
+            self.curr_z_prev = extra_next;
 
             if self.curr_z.norm_sqr() >= bailout && self.escape_index.is_none() {
                 self.escape_index = Some(i);

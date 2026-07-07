@@ -1045,9 +1045,11 @@ impl Scene {
         }
         // Route the GPU to the right f32 pipeline for the selected formula.
         self.burning_ship = matches!(formula, Formula::BurningShip);
-        self.stateful = matches!(formula, Formula::Manowar | Formula::Phoenix);
+        self.stateful = matches!(formula,
+            Formula::Manowar | Formula::Phoenix | Formula::Spider);
         self.uniform.set_stateful_kind(match formula {
             Formula::Phoenix => 1,
+            Formula::Spider => 2,
             _ => 0, // Manowar (and the default for non-stateful)
         });
         self.scout_engine.set_formula(formula);

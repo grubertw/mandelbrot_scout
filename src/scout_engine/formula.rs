@@ -82,6 +82,9 @@ pub enum Formula {
     /// Second-order; the previous-z coefficient p = Im(c) and the additive
     /// k = Re(c) are the real/imag of the pixel. Seed z_0 = c, z_{-1} = 0.
     Phoenix,
+    /// z_{n+1} = z^2 + c_n;  c_{n+1} = c_n/2 + z_{n+1}  (Spider). Coupled: `c`
+    /// evolves each step (carried in the extra state slot). Seed z_0 = c_0 = pixel.
+    Spider,
 }
 
 impl Default for Formula {
@@ -91,37 +94,50 @@ impl Default for Formula {
 }
 
 impl Formula {
-    /// One full-precision reference step: z <- f(z, c). The ONLY place the CPU
-    /// formula lives. Called from `ReferenceOrbit::compute_to`.
-    /// `z_prev` is the previous reference value `Z_{n-1}`, used only by
-    /// second-order formulas (Manowar); ignored otherwise. The caller
-    /// (`ReferenceOrbit::compute_to`) carries it.
+    /// One full-precision reference step, returning `(z_next, extra_next)`. The
+    /// `extra` slot carries per-formula state: the previous z `Z_{n-1}` for the
+    /// second-order formulas (Manowar/Phoenix), or the evolving `c` for Spider;
+    /// simple formulas pass it through unused. `ReferenceOrbit::compute_to` feeds
+    /// `extra` back in each step.
     #[inline]
-    pub fn ref_step(&self, z: &FixedComplex, z_prev: &FixedComplex, c: &FixedComplex) -> FixedComplex {
+    pub fn ref_step(&self, z: &FixedComplex, extra: &FixedComplex, c: &FixedComplex)
+        -> (FixedComplex, FixedComplex) {
         match *self {
-            Formula::Power { power } => { let mut a = ipow(z, power); a += c; a }
+            Formula::Power { power } => { let mut a = ipow(z, power); a += c; (a, extra.clone()) }
             Formula::BurningShip => {
                 // fold into the first quadrant, then square, then + c
                 let mut a = FixedComplex::new(z.re().abs(), z.im().abs()).square();
                 a += c;
-                a
+                (a, extra.clone())
             }
             Formula::Manowar => {
-                // z^2 + z_{n-1} + c
+                // z^2 + z_{n-1} + c;  next z_{n-1} = z
                 let mut a = z.square();
-                a += z_prev;
+                a += extra;
                 a += c;
-                a
+                (a, z.clone())
             }
             Formula::Phoenix => {
                 // z^2 + Im(c)*z_{n-1} + Re(c). p = Im(c) is a REAL scalar and the
-                // additive is Re(c) only — not the full complex c.
+                // additive is Re(c) only — not the full complex c. Next z_{n-1} = z.
                 let p = c.im();
                 let mut a = z.square();
-                a.re += &(z_prev.re().clone() * p.clone());
-                a.im += &(z_prev.im().clone() * p.clone());
+                a.re += &(extra.re().clone() * p.clone());
+                a.im += &(extra.im().clone() * p.clone());
                 a.re += c.re();
-                a
+                (a, z.clone())
+            }
+            Formula::Spider => {
+                // z_next = z^2 + c_n;  c_next = c_n/2 + z_next.  extra = c_n.
+                let mut z_next = z.square();
+                z_next += extra;
+                let two = FixedReal::from_f64(2.0, z.re().shift);
+                let mut c_next = FixedComplex::new(
+                    extra.re().clone() / two.clone(),
+                    extra.im().clone() / two,
+                );
+                c_next += &z_next;
+                (z_next, c_next)
             }
         }
     }
@@ -137,7 +153,8 @@ impl Formula {
     /// false until their perturbation path exists.
     pub fn supports_perturbation(&self) -> bool {
         matches!(self,
-            Formula::Power { .. } | Formula::BurningShip | Formula::Manowar | Formula::Phoenix)
+            Formula::Power { .. } | Formula::BurningShip
+                | Formula::Manowar | Formula::Phoenix | Formula::Spider)
     }
 
     /// Whether the GPU BLA path is implemented for this formula. BLA needs the
@@ -206,7 +223,7 @@ mod tests {
             s += &c;
             s
         };
-        let got = Formula::Power { power: 2 }.ref_step(&z, &fc(0.0, 0.0), &c);
+        let got = Formula::Power { power: 2 }.ref_step(&z, &fc(0.0, 0.0), &c).0;
         approx(&got, expected.re().to_f64_lossy(), expected.im().to_f64_lossy());
     }
 
@@ -222,7 +239,7 @@ mod tests {
             s += &c;
             s
         };
-        let got = Formula::Manowar.ref_step(&z, &z_prev, &c);
+        let got = Formula::Manowar.ref_step(&z, &z_prev, &c).0;
         approx(&got, expected.re().to_f64_lossy(), expected.im().to_f64_lossy());
     }
 
@@ -237,8 +254,25 @@ mod tests {
         let (k, p) = (0.05_f64, -0.6_f64);
         let re = (a * a - b * b) + p * zp_re + k;
         let im = 2.0 * a * b + p * zp_im;
-        let got = Formula::Phoenix.ref_step(&z, &z_prev, &c);
+        let got = Formula::Phoenix.ref_step(&z, &z_prev, &c).0;
         approx(&got, re, im);
+    }
+
+    #[test]
+    fn spider_evolves_z_and_c() {
+        // z_next = z^2 + c_n;  c_next = c_n/2 + z_next.  extra slot = c_n.
+        let z = fc(0.2, -0.3);
+        let c_n = fc(0.5, 0.1);
+        let (a, b) = (0.2_f64, -0.3_f64);
+        let (cr, ci) = (0.5_f64, 0.1_f64);
+        let zn_re = a * a - b * b + cr;
+        let zn_im = 2.0 * a * b + ci;
+        let cn_re = cr / 2.0 + zn_re;
+        let cn_im = ci / 2.0 + zn_im;
+        // `c` param is unused by Spider (c evolves in the extra slot).
+        let (z_next, c_next) = Formula::Spider.ref_step(&z, &c_n, &fc(0.0, 0.0));
+        approx(&z_next, zn_re, zn_im);
+        approx(&c_next, cn_re, cn_im);
     }
 
     #[test]
@@ -249,7 +283,7 @@ mod tests {
         let b = -0.4_f64;
         let re = a * a * a - 3.0 * a * b * b;
         let im = 3.0 * a * a * b - b * b * b;
-        let got = Formula::Power { power: 3 }.ref_step(&fc(a, b), &fc(0.0, 0.0), &fc(0.0, 0.0));
+        let got = Formula::Power { power: 3 }.ref_step(&fc(a, b), &fc(0.0, 0.0), &fc(0.0, 0.0)).0;
         approx(&got, re, im);
     }
 
@@ -260,7 +294,7 @@ mod tests {
         let b = 0.4_f64;
         let re = a * a - b * b;
         let im = 2.0 * a * b;
-        let got = Formula::BurningShip.ref_step(&fc(-0.3, -0.4), &fc(0.0, 0.0), &fc(0.0, 0.0));
+        let got = Formula::BurningShip.ref_step(&fc(-0.3, -0.4), &fc(0.0, 0.0), &fc(0.0, 0.0)).0;
         approx(&got, re, im);
     }
 
