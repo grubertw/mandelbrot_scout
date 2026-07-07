@@ -74,6 +74,10 @@ pub enum Formula {
     Power { power: u32 },
     /// z_{n+1} = (|Re z| + i|Im z|)^2 + c.  Non-holomorphic (no scalar deriv).
     BurningShip,
+    /// z_{n+1} = z^2 + z_{n-1} + c (c-plane). Holomorphic, SECOND-ORDER — needs
+    /// the previous z, so it iterates with extra state (see the stateful GPU
+    /// shader). Naive + perturbation (no rebasing) are wired.
+    Manowar,
 }
 
 impl Default for Formula {
@@ -85,13 +89,22 @@ impl Default for Formula {
 impl Formula {
     /// One full-precision reference step: z <- f(z, c). The ONLY place the CPU
     /// formula lives. Called from `ReferenceOrbit::compute_to`.
+    /// `z_prev` is the previous reference value `Z_{n-1}`, used only by
+    /// second-order formulas (Manowar); ignored otherwise. The caller
+    /// (`ReferenceOrbit::compute_to`) carries it.
     #[inline]
-    pub fn ref_step(&self, z: &FixedComplex, c: &FixedComplex) -> FixedComplex {
+    pub fn ref_step(&self, z: &FixedComplex, z_prev: &FixedComplex, c: &FixedComplex) -> FixedComplex {
         let mut acc = match *self {
             Formula::Power { power } => ipow(z, power),
             Formula::BurningShip => {
                 // fold into the first quadrant, then square
                 FixedComplex::new(z.re().abs(), z.im().abs()).square()
+            }
+            Formula::Manowar => {
+                // z^2 + z_{n-1}  (the + c is applied below)
+                let mut s = z.square();
+                s += z_prev;
+                s
             }
         };
         acc += c;
@@ -99,10 +112,17 @@ impl Formula {
     }
 
     /// Whether a complex-scalar derivative exists (gates the concept of a scalar
-    /// BLA + analytic DE). `BurningShip` returns false — it needs the mat2
-    /// Jacobian path.
+    /// BLA + analytic DE). Only `BurningShip` is non-holomorphic (needs mat2).
     pub fn is_holomorphic(&self) -> bool {
-        matches!(self, Formula::Power { .. })
+        !matches!(self, Formula::BurningShip)
+    }
+
+    /// Whether reference-orbit perturbation is wired for this formula. Kept as an
+    /// explicit allowlist so future naive-only additions (Phoenix, Spider) are
+    /// false until their perturbation path exists.
+    pub fn supports_perturbation(&self) -> bool {
+        matches!(self,
+            Formula::Power { .. } | Formula::BurningShip | Formula::Manowar)
     }
 
     /// Whether the GPU BLA path is implemented for this formula. BLA needs the
@@ -118,7 +138,7 @@ impl Formula {
     pub fn power(&self) -> u32 {
         match self {
             Formula::Power { power } => *power,
-            Formula::BurningShip => 2,
+            _ => 2,
         }
     }
 }
@@ -171,7 +191,23 @@ mod tests {
             s += &c;
             s
         };
-        let got = Formula::Power { power: 2 }.ref_step(&z, &c);
+        let got = Formula::Power { power: 2 }.ref_step(&z, &fc(0.0, 0.0), &c);
+        approx(&got, expected.re().to_f64_lossy(), expected.im().to_f64_lossy());
+    }
+
+    #[test]
+    fn manowar_ref_is_second_order() {
+        // z^2 + z_{n-1} + c
+        let z = fc(0.2, -0.3);
+        let z_prev = fc(-0.1, 0.4);
+        let c = fc(0.05, 0.06);
+        let expected = {
+            let mut s = z.square();
+            s += &z_prev;
+            s += &c;
+            s
+        };
+        let got = Formula::Manowar.ref_step(&z, &z_prev, &c);
         approx(&got, expected.re().to_f64_lossy(), expected.im().to_f64_lossy());
     }
 
@@ -183,7 +219,7 @@ mod tests {
         let b = -0.4_f64;
         let re = a * a * a - 3.0 * a * b * b;
         let im = 3.0 * a * a * b - b * b * b;
-        let got = Formula::Power { power: 3 }.ref_step(&fc(a, b), &fc(0.0, 0.0));
+        let got = Formula::Power { power: 3 }.ref_step(&fc(a, b), &fc(0.0, 0.0), &fc(0.0, 0.0));
         approx(&got, re, im);
     }
 
@@ -194,7 +230,7 @@ mod tests {
         let b = 0.4_f64;
         let re = a * a - b * b;
         let im = 2.0 * a * b;
-        let got = Formula::BurningShip.ref_step(&fc(-0.3, -0.4), &fc(0.0, 0.0));
+        let got = Formula::BurningShip.ref_step(&fc(-0.3, -0.4), &fc(0.0, 0.0), &fc(0.0, 0.0));
         approx(&got, re, im);
     }
 

@@ -155,6 +155,13 @@ async fn handle_explore_signal(
 async fn evaluate_orbits(
     tp: ThreadPool, context: ScoutContext,
 ) {
+    // Naive-only formulas (e.g. Manowar) have no reference-orbit perturbation
+    // path yet, and their stateless ref_step would be wrong — don't build any.
+    if !context.config.lock().formula.supports_perturbation() {
+        trace!("Formula has no perturbation path; skipping orbit evaluation.");
+        return;
+    }
+
     let current_camera = {
         context.last_camera_snapshot.lock().clone()
     };

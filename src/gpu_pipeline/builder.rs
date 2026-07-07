@@ -48,6 +48,8 @@ pub struct PipelineBundle {
     pub calc_mandel_pipeline: wgpu::ComputePipeline,
     // Burning Ship (f32) — same bind groups as calc_mandel_pipeline (calc_bg/debug_bg).
     pub calc_burningship_pipeline: wgpu::ComputePipeline,
+    // Stateful holomorphic formulas (Manowar, ...) — same bind groups.
+    pub calc_stateful_pipeline: wgpu::ComputePipeline,
     pub calc_mandel_fexp_pipeline: wgpu::ComputePipeline,
     pub color_pipeline: wgpu::ComputePipeline,
     pub display_pipeline: wgpu::RenderPipeline,
@@ -84,7 +86,7 @@ impl PipelineBundle {
             noise_texture,
             debug_buffer, debug_readback,
             calc_bg, debug_bg,
-            calc_mandel_pipeline, calc_burningship_pipeline
+            calc_mandel_pipeline, calc_burningship_pipeline, calc_stateful_pipeline
         ) = build_shader_calc_pipeline(device, &uniform_buff, &mandel_out_tex, &settings);
 
         let (
@@ -129,7 +131,8 @@ impl PipelineBundle {
             render_readback_buf,
             clear_bg, calc_bg, calc_fexp_bg, debug_bg, fexp_debug_bg, color_bg, display_bg, reduce_bg,
             clear_pipeline,
-            calc_mandel_pipeline, calc_burningship_pipeline, calc_mandel_fexp_pipeline,
+            calc_mandel_pipeline, calc_burningship_pipeline, calc_stateful_pipeline,
+            calc_mandel_fexp_pipeline,
             color_pipeline, display_pipeline, reduce_pipeline,
         }
     }
@@ -337,12 +340,14 @@ fn build_shader_calc_pipeline(
     wgpu::Texture,
     wgpu::Buffer, wgpu::Buffer,
     wgpu::BindGroup, wgpu::BindGroup,
-    wgpu::ComputePipeline, wgpu::ComputePipeline,
+    wgpu::ComputePipeline, wgpu::ComputePipeline, wgpu::ComputePipeline,
 ) {
     let calc_mandel_f32_shader = device.create_shader_module(wgpu::include_wgsl!("mandelbrot_f32.wgsl"));
     // Burning Ship shares the f32 bind-group layout exactly (see the shader
     // header), so it reuses calc_bgl / debug_bgl and the same calc_bg / debug_bg.
     let calc_burningship_shader = device.create_shader_module(wgpu::include_wgsl!("mandelbrot_burningship.wgsl"));
+    // Stateful holomorphic formulas (Manowar, ...) — same layout again.
+    let calc_stateful_shader = device.create_shader_module(wgpu::include_wgsl!("mandelbrot_stateful.wgsl"));
 
     let orbit_location_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("orbit_location_buf"),
@@ -558,12 +563,22 @@ fn build_shader_calc_pipeline(
             cache: None,
         });
 
+    let calc_stateful_pipeline =
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("calc_stateful_pipeline"),
+            layout: Some(&calc_pipeline_layout),
+            module: &calc_stateful_shader,
+            entry_point: Option::from("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
     (
         orbit_location_buf, rank_one_orbit_buf, rank_two_orbit_buf,
         noise_texture,
         debug_buffer, debug_readback,
         calc_bg, debug_bg,
-        calc_mandel_pipeline, calc_burningship_pipeline,
+        calc_mandel_pipeline, calc_burningship_pipeline, calc_stateful_pipeline,
     )
 }
 

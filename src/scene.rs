@@ -75,6 +75,8 @@ pub struct Scene {
     // Selects the Burning Ship (f32) compute pipeline over the Mandelbrot ones.
     // Set from set_formula; the actual formula lives in the scout config + uniform.
     burning_ship: bool,
+    // Selects the stateful-holomorphic (Manowar, ...) f32 pipeline.
+    stateful: bool,
     uniform: SceneUniform,
     pipeline: PipelineBundle,
     selected_palette: String,
@@ -219,6 +221,7 @@ impl Scene {
             loaded_bla_table_id: None,
             bla_enabled: true,
             burning_ship: false,
+            stateful: false,
             uniform, pipeline,
             selected_palette: "default".to_string(),
             palette_changed: true, color_palettes,
@@ -295,6 +298,12 @@ impl Scene {
                     cpass.set_bind_group(0, &self.pipeline.calc_bg, &[]);
                     cpass.set_bind_group(1, &self.pipeline.debug_bg, &[]);
                     "Compute with Burning Ship (f32) GPU shader".to_string()
+                } else if self.stateful {
+                    // Stateful holomorphic (Manowar, ...), f32, naive-only for now.
+                    cpass.set_pipeline(&self.pipeline.calc_stateful_pipeline);
+                    cpass.set_bind_group(0, &self.pipeline.calc_bg, &[]);
+                    cpass.set_bind_group(1, &self.pipeline.debug_bg, &[]);
+                    "Compute with Stateful (f32) GPU shader".to_string()
                 } else if use_fexp {
                     cpass.set_pipeline(&self.pipeline.calc_mandel_fexp_pipeline);
                     cpass.set_bind_group(0, &self.pipeline.calc_fexp_bg, &[]);
@@ -1033,8 +1042,9 @@ impl Scene {
         if let Formula::Power { power } = formula {
             self.uniform.set_formula_power(power);
         }
-        // Route the GPU to the Burning Ship pipeline (f32-only) when selected.
+        // Route the GPU to the right f32 pipeline for the selected formula.
         self.burning_ship = matches!(formula, Formula::BurningShip);
+        self.stateful = matches!(formula, Formula::Manowar);
         self.scout_engine.set_formula(formula);
         self.recalc_fractal = true;
     }

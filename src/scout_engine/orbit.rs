@@ -66,6 +66,9 @@ pub struct ReferenceOrbit {
     c: FixedComplex,
     /// Private variables below mutate in-place during compute_to()
     curr_z: FixedComplex,
+    /// Previous reference value Z_{n-1}, for second-order formulas (Manowar).
+    /// Zero (unused) for simple formulas.
+    curr_z_prev: FixedComplex,
 }
 
 impl ReferenceOrbit {
@@ -83,6 +86,13 @@ impl ReferenceOrbit {
         // The one parameterization-aware step: anchor -> (z0, c).
         let (z0, c) = param.seed(&c_ref);
 
+        // Formula-specific initial value + extra state. Manowar seeds z0 = c and
+        // carries z_{-1} = z0 (FZ's default init); simple formulas ignore z_prev.
+        let (curr_z, curr_z_prev) = match formula {
+            Formula::Manowar => (c.clone(), c.clone()),
+            _ => (z0, FixedComplex::zero(c_ref.re.shift)),
+        };
+
         Self {
             orbit_id, c_ref,
             orbit: Vec::with_capacity(max_ref_orbit_iters as usize),
@@ -91,7 +101,8 @@ impl ReferenceOrbit {
             gpu_payload: OrbitGpuPayload::new(c_ref_32),
             formula,
             c,
-            curr_z: z0,
+            curr_z,
+            curr_z_prev,
         }
     }
 
@@ -123,7 +134,9 @@ impl ReferenceOrbit {
 
         for i in curr_iter..max_iter {
             self.orbit.push(self.curr_z.clone());
-            self.curr_z = self.formula.ref_step(&self.curr_z, &self.c);
+            let z_next = self.formula.ref_step(&self.curr_z, &self.curr_z_prev, &self.c);
+            // z_prev <- old z (Z_n), z <- z_next (Z_{n+1}).
+            self.curr_z_prev = std::mem::replace(&mut self.curr_z, z_next);
 
             if self.curr_z.norm_sqr() >= bailout && self.escape_index.is_none() {
                 self.escape_index = Some(i);

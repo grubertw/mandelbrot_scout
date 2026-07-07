@@ -37,3 +37,11 @@ fn mandelbrot_burningship_is_valid() {
         include_str!("../src/gpu_pipeline/mandelbrot_burningship.wgsl"),
     );
 }
+
+#[test]
+fn mandelbrot_stateful_is_valid() {
+    validate(
+        "mandelbrot_stateful.wgsl",
+        include_str!("../src/gpu_pipeline/mandelbrot_stateful.wgsl"),
+    );
+}

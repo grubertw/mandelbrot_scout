@@ -119,6 +119,7 @@ pub enum ExportImgFormat {
 pub enum FormulaKind {
     Power,
     BurningShip,
+    Manowar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1052,6 +1053,7 @@ impl Controls {
         match self.formula_kind {
             FormulaKind::Power => Formula::Power { power: self.mandelbrot_power },
             FormulaKind::BurningShip => Formula::BurningShip,
+            FormulaKind::Manowar => Formula::Manowar,
         }
     }
 
@@ -1799,6 +1801,9 @@ impl Controls {
                     Some(self.formula_kind), Message::FormulaKindChanged),
                 space().width(Length::Fixed(15.0)),
                 radio("Burning Ship", FormulaKind::BurningShip,
+                    Some(self.formula_kind), Message::FormulaKindChanged),
+                space().width(Length::Fixed(15.0)),
+                radio("Manowar", FormulaKind::Manowar,
                     Some(self.formula_kind), Message::FormulaKindChanged),
             ]
             .align_y(Alignment::Center),
