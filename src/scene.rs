@@ -83,7 +83,11 @@ pub struct Scene {
     palette_changed: bool,
     color_palettes: HashMap<String, Rgba8Palette>,
     recalc_fractal: bool,
-    recalc_color: bool
+    recalc_color: bool,
+    // Rebuild the histogram/CDF (adaptive coloring) independently of the fractal
+    // so histogram-only tweaks don't force a full recompute. Also set whenever
+    // the fractal recomputes so the CDF tracks the new escape-time distribution.
+    recalc_histogram: bool,
 }
 
 impl Scene {
@@ -195,6 +199,14 @@ impl Scene {
             ao_darkness: settings.ao_darkness,
             rim_intensity: settings.rim_intensity,
             rim_power: settings.rim_power,
+            hist_eq_amount: settings.hist_eq_amount,
+            hist_black_pct: settings.hist_black_pct,
+            hist_white_pct: settings.hist_white_pct,
+            hist_temporal_alpha: settings.hist_temporal_alpha,
+            hist_bin_count: settings.hist_bin_count,
+            hist_blur_radius: settings.hist_blur_radius,
+            hist_log_binning: 0,
+            hist_include_interior: 0,
         };
 
         // Configure and initialize all WGPU resources for render passes.
@@ -227,6 +239,7 @@ impl Scene {
             selected_palette: "default".to_string(),
             palette_changed: true, color_palettes,
             recalc_fractal: true, recalc_color: true,
+            recalc_histogram: true,
         }
     }
 
@@ -332,7 +345,71 @@ impl Scene {
                 rpass.dispatch_workgroups(gx, gy, 1);
             }
         }
-        if self.recalc_color || self.recalc_fractal {
+
+        // --- Histogram (adaptive coloring) passes ---
+        // Rebuild the CDF from the current on-screen escape-time distribution.
+        // Skipped when histogram is disabled or frozen (the color pass then reads
+        // the retained CDF from the last build). Runs when the fractal recomputes
+        // or when a histogram-only control (enable/temporal) is toggled.
+        let use_histogram = (self.uniform.render_flags & (1 << 16)) != 0;
+        let hist_frozen   = (self.uniform.render_flags & (1 << 17)) != 0;
+        let run_histogram = use_histogram && !hist_frozen
+            && (self.recalc_fractal || self.recalc_histogram);
+        if run_histogram {
+            let hist_groups = ((HIST_BINS as u32) + 63) / 64;
+            {
+                trace!("Compute pass histogram clear. bins={} groups={}", HIST_BINS, hist_groups);
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("histogram clear pass"),
+                    timestamp_writes: None
+                });
+                cpass.set_pipeline(&self.pipeline.hist_clear_pipeline);
+                cpass.set_bind_group(0, &self.pipeline.hist_bg, &[]);
+                cpass.dispatch_workgroups(hist_groups, 1, 1);
+            }
+            {
+                trace!("Compute pass histogram minmax. gx={} gy={}", gx, gy);
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("histogram minmax pass"),
+                    timestamp_writes: None
+                });
+                cpass.set_pipeline(&self.pipeline.hist_minmax_pipeline);
+                cpass.set_bind_group(0, &self.pipeline.hist_bg, &[]);
+                cpass.dispatch_workgroups(gx, gy, 1);
+            }
+            {
+                trace!("Compute pass histogram build. gx={} gy={}", gx, gy);
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("histogram build pass"),
+                    timestamp_writes: None
+                });
+                cpass.set_pipeline(&self.pipeline.hist_build_pipeline);
+                cpass.set_bind_group(0, &self.pipeline.hist_bg, &[]);
+                cpass.dispatch_workgroups(gx, gy, 1);
+            }
+            {
+                trace!("Compute pass histogram scan (CDF + temporal EMA alpha={}).",
+                    self.uniform.hist_temporal_alpha);
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("histogram scan pass"),
+                    timestamp_writes: None
+                });
+                cpass.set_pipeline(&self.pipeline.hist_scan_pipeline);
+                cpass.set_bind_group(0, &self.pipeline.hist_bg, &[]);
+                cpass.dispatch_workgroups(1, 1, 1);
+            }
+            // Retain this frame's CDF for next frame's temporal EMA.
+            let cdf_bytes = HIST_BINS * size_of::<f32>() as u64;
+            encoder.copy_buffer_to_buffer(
+                &self.pipeline.hist_cdf_buf, 0,
+                &self.pipeline.hist_cdf_prev_buf, 0,
+                cdf_bytes,
+            );
+            trace!("Histogram: copied CDF -> CDF_prev ({} bytes) for next-frame EMA.", cdf_bytes);
+        }
+        self.recalc_histogram = false;
+
+        if self.recalc_color || self.recalc_fractal || run_histogram {
             self.recalc_color = false;
             trace!("Begin color pass");
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1150,6 +1227,71 @@ impl Scene {
 
     pub fn set_color_scalar_mapping_strength(&mut self, strength: f32) {
         self.uniform.color_scaler_mapping_strength = strength;
+        self.recalc_color = true;
+    }
+
+    // --- Histogram (adaptive) coloring ---
+
+    pub fn set_use_histogram(&mut self, on: bool) {
+        self.uniform.set_use_histogram(on);
+        self.recalc_histogram = true;
+        self.recalc_color = true;
+    }
+
+    pub fn set_hist_frozen(&mut self, frozen: bool) {
+        self.uniform.set_hist_frozen(frozen);
+        // Unfreezing rebuilds immediately; freezing just stops future updates.
+        if !frozen {
+            self.recalc_histogram = true;
+        }
+        self.recalc_color = true;
+    }
+
+    pub fn set_hist_eq_amount(&mut self, amount: f32) {
+        self.uniform.hist_eq_amount = amount;
+        self.recalc_color = true;
+    }
+
+    pub fn set_hist_black_pct(&mut self, pct: f32) {
+        self.uniform.hist_black_pct = pct;
+        self.recalc_color = true;
+    }
+
+    pub fn set_hist_white_pct(&mut self, pct: f32) {
+        self.uniform.hist_white_pct = pct;
+        self.recalc_color = true;
+    }
+
+    pub fn set_hist_temporal_alpha(&mut self, alpha: f32) {
+        self.uniform.hist_temporal_alpha = alpha;
+        // Alpha is consumed by the scan pass, so the histogram must re-run.
+        self.recalc_histogram = true;
+        self.recalc_color = true;
+    }
+
+    // --- Tier 3: histogram construction (each rebuilds the histogram) ---
+
+    pub fn set_hist_bin_count(&mut self, bins: u32) {
+        self.uniform.hist_bin_count = bins.clamp(1, HIST_BINS as u32);
+        self.recalc_histogram = true;
+        self.recalc_color = true;
+    }
+
+    pub fn set_hist_blur_radius(&mut self, radius: u32) {
+        self.uniform.hist_blur_radius = radius;
+        self.recalc_histogram = true;
+        self.recalc_color = true;
+    }
+
+    pub fn set_hist_log_binning(&mut self, on: bool) {
+        self.uniform.hist_log_binning = on as u32;
+        self.recalc_histogram = true;
+        self.recalc_color = true;
+    }
+
+    pub fn set_hist_include_interior(&mut self, on: bool) {
+        self.uniform.hist_include_interior = on as u32;
+        self.recalc_histogram = true;
         self.recalc_color = true;
     }
 

@@ -11,6 +11,11 @@ use crate::numerics::FExp;
 /// offsets. L = ilog2(2*max_ref_orbit)+1 is well under 32, so 64 is safe.
 const BLA_DIMS_CAP: usize = 64;
 
+/// Allocation/max histogram bin count for adaptive (equalization) coloring. The
+/// active count is runtime (SceneUniform.hist_bin_count) and may be smaller.
+/// Must match HIST_BINS in histogram.wgsl and color.wgsl.
+pub const HIST_BINS: u64 = 1024;
+
 #[derive(Debug)]
 pub struct PipelineBundle {
     pub uniform_buff: wgpu::Buffer,
@@ -36,6 +41,11 @@ pub struct PipelineBundle {
     pub palette_texture: wgpu::Texture,
     pub render_texture: wgpu::Texture,
     pub render_readback_buf: wgpu::Buffer,
+    // Histogram (adaptive coloring). Only the CDF buffers need to be owned here:
+    // cdf is copied into cdf_prev each frame for the temporal EMA. The range/bins
+    // buffers are kept alive by the histogram bind group, so they aren't stored.
+    pub hist_cdf_buf: wgpu::Buffer,
+    pub hist_cdf_prev_buf: wgpu::Buffer,
     pub clear_bg: wgpu::BindGroup,
     pub calc_bg: wgpu::BindGroup,
     pub calc_fexp_bg: wgpu::BindGroup,
@@ -44,7 +54,12 @@ pub struct PipelineBundle {
     pub color_bg: wgpu::BindGroup,
     pub display_bg: wgpu::BindGroup,
     pub reduce_bg: wgpu::BindGroup,
+    pub hist_bg: wgpu::BindGroup,
     pub clear_pipeline: wgpu::ComputePipeline,
+    pub hist_clear_pipeline: wgpu::ComputePipeline,
+    pub hist_minmax_pipeline: wgpu::ComputePipeline,
+    pub hist_build_pipeline: wgpu::ComputePipeline,
+    pub hist_scan_pipeline: wgpu::ComputePipeline,
     pub calc_mandel_pipeline: wgpu::ComputePipeline,
     // Burning Ship (f32) — same bind groups as calc_mandel_pipeline (calc_bg/debug_bg).
     pub calc_burningship_pipeline: wgpu::ComputePipeline,
@@ -100,11 +115,18 @@ impl PipelineBundle {
         );
 
         let (
+            hist_range_buf, _hist_bins_buf, hist_cdf_buf, hist_cdf_prev_buf,
+            hist_bg,
+            hist_clear_pipeline, hist_minmax_pipeline, hist_build_pipeline, hist_scan_pipeline,
+        ) = build_histogram_pipeline(device, &uniform_buff, &mandel_out_tex);
+
+        let (
             palette_texture,
             color_bg,
             color_pipeline
         ) = build_color_pipeline(device,
-                 &uniform_buff, &mandel_out_tex, &render_texture, &settings);
+                 &uniform_buff, &mandel_out_tex, &render_texture,
+                 &hist_cdf_buf, &hist_range_buf, &settings);
 
         let (
             display_bg, display_pipeline
@@ -129,8 +151,11 @@ impl PipelineBundle {
             noise_texture,
             palette_texture, render_texture,
             render_readback_buf,
+            hist_cdf_buf, hist_cdf_prev_buf,
             clear_bg, calc_bg, calc_fexp_bg, debug_bg, fexp_debug_bg, color_bg, display_bg, reduce_bg,
+            hist_bg,
             clear_pipeline,
+            hist_clear_pipeline, hist_minmax_pipeline, hist_build_pipeline, hist_scan_pipeline,
             calc_mandel_pipeline, calc_burningship_pipeline, calc_stateful_pipeline,
             calc_mandel_fexp_pipeline,
             color_pipeline, display_pipeline, reduce_pipeline,
@@ -833,6 +858,8 @@ fn build_color_pipeline(
     uniform_buff: &wgpu::Buffer,
     mandel_calc_tex: &wgpu::Texture,
     render_texture: &wgpu::Texture,
+    hist_cdf_buf: &wgpu::Buffer,
+    hist_range_buf: &wgpu::Buffer,
     settings: &Settings
 ) -> (
     wgpu::Texture,
@@ -905,6 +932,28 @@ fn build_color_pipeline(
                 },
                 count: None,
             },
+            // histogram CDF (read-only)
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // histogram observed [fi_lo, fi_hi] range (read-only)
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
 
@@ -933,6 +982,14 @@ fn build_color_pipeline(
                 resource: wgpu::BindingResource::TextureView(
                     &render_texture.create_view(&Default::default())
                 ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: hist_cdf_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: hist_range_buf.as_entire_binding(),
             },
         ],
     });
@@ -1205,4 +1262,185 @@ fn build_reduce_pipeline(
         });
     
     (grid_feedback_readback, orbit_feedback_readback, reduce_bg, reduce_pipeline)
+}
+
+//
+// Pipeline 6 histogram (adaptive coloring). One WGSL module with four compute
+// entry points (clear / minmax / build / scan) sharing a single bind group.
+// Runs between reduce and color; the color pass reads hist_cdf + hist_range.
+//
+fn build_histogram_pipeline(
+    device: &wgpu::Device,
+    uniform_buff: &wgpu::Buffer,
+    mandel_out_tex: &wgpu::Texture,
+) -> (
+    wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer,
+    wgpu::BindGroup,
+    wgpu::ComputePipeline, wgpu::ComputePipeline, wgpu::ComputePipeline, wgpu::ComputePipeline,
+) {
+    let hist_shader = device.create_shader_module(wgpu::include_wgsl!("histogram.wgsl"));
+
+    // [fi_lo, fi_hi] as ordered-u32 bit patterns.
+    let hist_range_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("hist_range_buf"),
+        size: 2 * size_of::<u32>() as u64,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    let hist_bins_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("hist_bins_buf"),
+        size: HIST_BINS * size_of::<u32>() as u64,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    // cdf is the scan output (copied into cdf_prev each frame for the EMA).
+    let hist_cdf_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("hist_cdf_buf"),
+        size: HIST_BINS * size_of::<f32>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let hist_cdf_prev_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("hist_cdf_prev_buf"),
+        size: HIST_BINS * size_of::<f32>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let hist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("histogram_bgl"),
+        entries: &[
+            // Scene uniforms
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // mandel calc output texture (per-pixel fi + flags)
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // hist_range (read-write)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // hist_bins (read-write)
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // hist_cdf_prev (read-only)
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // hist_cdf (read-write)
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let hist_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("histogram_bg"),
+        layout: &hist_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buff.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(
+                    &mandel_out_tex.create_view(&Default::default())
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: hist_range_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: hist_bins_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: hist_cdf_prev_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: hist_cdf_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let hist_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("histogram_pipeline_layout"),
+        bind_group_layouts: &[&hist_bgl],
+        push_constant_ranges: &[],
+    });
+
+    // Four pipelines from the same module, one per entry point.
+    let make = |label: &str, entry: &str| {
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&hist_pipeline_layout),
+            module: &hist_shader,
+            entry_point: Option::from(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    };
+
+    let hist_clear_pipeline  = make("hist_clear_pipeline",  "clear");
+    let hist_minmax_pipeline = make("hist_minmax_pipeline", "minmax");
+    let hist_build_pipeline  = make("hist_build_pipeline",  "build");
+    let hist_scan_pipeline   = make("hist_scan_pipeline",   "scan");
+
+    (
+        hist_range_buf, hist_bins_buf, hist_cdf_buf, hist_cdf_prev_buf,
+        hist_bg,
+        hist_clear_pipeline, hist_minmax_pipeline, hist_build_pipeline, hist_scan_pipeline,
+    )
 }

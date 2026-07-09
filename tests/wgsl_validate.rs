@@ -45,3 +45,19 @@ fn mandelbrot_stateful_is_valid() {
         include_str!("../src/gpu_pipeline/mandelbrot_stateful.wgsl"),
     );
 }
+
+#[test]
+fn histogram_is_valid() {
+    validate(
+        "histogram.wgsl",
+        include_str!("../src/gpu_pipeline/histogram.wgsl"),
+    );
+}
+
+#[test]
+fn color_is_valid() {
+    validate(
+        "color.wgsl",
+        include_str!("../src/gpu_pipeline/color.wgsl"),
+    );
+}

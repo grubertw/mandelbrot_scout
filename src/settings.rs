@@ -91,7 +91,15 @@ pub struct Settings {
     pub rim_intensity: f32,
     pub rim_power: f32,
     pub rim_power_range: (f32, f32),
-    
+
+    // Histogram (adaptive) coloring
+    pub hist_eq_amount: f32,
+    pub hist_black_pct: f32,
+    pub hist_white_pct: f32,
+    pub hist_temporal_alpha: f32,
+    pub hist_bin_count: u32,
+    pub hist_blur_radius: u32,
+
     pub palettes: Map<String, RgbPalette>,
 }
 
@@ -231,5 +239,11 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("rim_intensity", 0.3)?
         .set_default("rim_power", 1.0)?
         .set_default("rim_power_range", vec![0.01, 4.0])?
+        .set_default("hist_eq_amount", 0.8)?
+        .set_default("hist_black_pct", 0.0)?
+        .set_default("hist_white_pct", 1.0)?
+        .set_default("hist_temporal_alpha", 1.0)?
+        .set_default("hist_bin_count", 512)?
+        .set_default("hist_blur_radius", 0)?
         .set_default("palettes", palettes_map)
 }

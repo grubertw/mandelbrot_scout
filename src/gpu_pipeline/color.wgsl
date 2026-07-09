@@ -60,6 +60,16 @@ struct Uniforms {
     ao_darkness:                f32,
     rim_intensity:              f32,
     rim_power:                  f32,
+    // --- Histogram (adaptive) coloring ---
+    hist_eq_amount:             f32,
+    hist_black_pct:             f32,
+    hist_white_pct:             f32,
+    hist_temporal_alpha:        f32,
+    // --- Tier 3 ---
+    hist_bin_count:             u32,
+    hist_blur_radius:           u32,
+    hist_log_binning:           u32,
+    hist_include_interior:      u32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
@@ -71,6 +81,7 @@ const USE_DE: u32           = 1u << 3;
 const USE_STRIPES: u32      = 1u << 4;
 const USE_TRAPS: u32          = 1u << 13;
 const USE_TRAP_INTERIOR: u32  = 1u << 14;
+const USE_HISTOGRAM: u32      = 1u << 16;
 const ENABLE_GLOW: u32        = 1u << 5;
 const ENABLE_KEY_LIGHT: u32 = 1u << 6;
 const ENABLE_FILL_LIGHT: u32= 1u << 7;
@@ -88,6 +99,39 @@ var palette_tex: texture_2d<f32>;
 
 @group(0) @binding(3)
 var render_tex : texture_storage_2d<rgba8unorm, write>;
+
+// Histogram-equalization inputs (built by histogram.wgsl). Read-only here.
+// HIST_BINS is the allocation/max; the active count is uni.hist_bin_count.
+const HIST_BINS: u32 = 1024u;
+@group(0) @binding(4) var<storage, read> hist_cdf: array<f32, HIST_BINS>;
+@group(0) @binding(5) var<storage, read> hist_range: array<u32, 2>;
+
+// Position of fi within [lo, hi], in [0,1]. MUST match bin_frac() in histogram.wgsl.
+fn hist_bin_frac(fi: f32, lo: f32, hi: f32) -> f32 {
+    if (uni.hist_log_binning != 0u) {
+        let a   = log(1.0 + fi);
+        let alo = log(1.0 + lo);
+        let ahi = log(1.0 + hi);
+        return clamp((a - alo) / max(ahi - alo, 1e-20), 0.0, 1.0);
+    }
+    return clamp((fi - lo) / max(hi - lo, 1e-20), 0.0, 1.0);
+}
+
+// Map a raw fractional iteration count to its equalized rank in [0,1] via the
+// on-screen escape-time CDF, interpolating between adjacent bins. Falls back to
+// the plain linear normalization if the range is degenerate (no spread).
+fn hist_equalize(fi: f32) -> f32 {
+    let lo = bitcast<f32>(hist_range[0]);
+    let hi = bitcast<f32>(hist_range[1]);
+    if (hi <= lo) {
+        return fi / f32(uni.max_iter);
+    }
+    let n = clamp(uni.hist_bin_count, 1u, HIST_BINS);
+    let pos = hist_bin_frac(fi, lo, hi) * f32(n - 1u);
+    let i0 = u32(floor(pos));
+    let i1 = min(i0 + 1u, n - 1u);
+    return mix(hist_cdf[i0], hist_cdf[i1], fract(pos));
+}
 
 fn map_color_scalar(t: f32) -> f32 {
     let k = uni.color_scaler_mapping_strength;
@@ -233,6 +277,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 
     var t = fi / f_max_iters;
+
+    // Adaptive (histogram) coloring: blend the linear normalization toward the
+    // equalized CDF rank, with percentile black/white clipping in CDF space.
+    if ((uni.render_flags & USE_HISTOGRAM) != 0) {
+        let cdf = hist_equalize(fi);
+        let denom = max(uni.hist_white_pct - uni.hist_black_pct, 1e-4);
+        let clipped = clamp((cdf - uni.hist_black_pct) / denom, 0.0, 1.0);
+        t = mix(t, clipped, uni.hist_eq_amount);
+    }
 
     if ((uni.render_flags & USE_STRIPES) != 0) {
         t = mix(t, t + (stripe_avg - 0.5), uni.stripe_trap_arg2);

@@ -178,6 +178,26 @@ rim_intensity = 0.3
 rim_power = 1.0
 rim_power_range = [0.01, 4.0]
 
+# Histogram (adaptive) coloring.
+# Equalizes the per-pixel iteration counts against the actual on-screen
+# escape-time distribution, so palette colors spread evenly instead of being
+# crammed into the fast-escaping band. Especially helpful for the exotic
+# formulas (Power-of-X, Julia, Manowar, Phoenix, Spider).
+# Master blend: 0 = raw linear escape-time, 1 = full CDF equalization.
+hist_eq_amount = 0.8
+# Percentile black/white clipping in CDF space (levels-style auto-contrast).
+hist_black_pct = 0.0
+hist_white_pct = 1.0
+# Temporal EMA of the CDF across frames (1.0 = instant/no smoothing, lower =
+# steadier colors while panning/zooming at the cost of some lag).
+hist_temporal_alpha = 1.0
+# Number of active histogram bins (<= 1024 allocation). More = finer CDF
+# resolution but spikier; pair a high count with a little blur for smoothness.
+hist_bin_count = 512
+# Box-blur radius (in bins) applied to the histogram before the CDF. Smooths
+# spiky distributions (many pixels sharing iteration counts). 0 = off.
+hist_blur_radius = 0
+
 #
 # Color palettes
 # array = u8 RGB tuples/tripples

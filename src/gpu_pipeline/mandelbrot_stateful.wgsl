@@ -29,9 +29,12 @@ fn c32_mul(a: vec2f, b: vec2f) -> vec2f {
     return vec2f(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
-// Smooth iteration offset (escape rate ~2 for these formulas).
-fn smooth_offset(mag2: f32) -> f32 {
-    return 1.0 - log(log(mag2) * 0.5) / log(2.0);
+// Smooth iteration offset (escape rate ~2 for these formulas). `mag` is the FIRST
+// magnitude past `bailout` (same |z|^2 convention as the callers), so
+// log(mag)/log(bailout) >= 1 and log(log(...)) is finite — no NaN near |z|=1.
+// See mandelbrot_f32.wgsl for the full rationale.
+fn smooth_offset(mag: f32, bailout: f32) -> f32 {
+    return 1.0 - log(log(mag) / log(bailout)) / log(2.0);
 }
 
 // -------------------------------
@@ -224,19 +227,25 @@ fn manowar(c: vec2f) -> vec4f {
         }
 
         mag_z = z.x * z.x + z.y * z.y;
-        if (mag_z > BAILOUT) {
-            flags |= ESCAPED_BIT;
-            if (extra >= 2) { break; }
+        if ((flags & ESCAPED_BIT) == 0) {
+            if (mag_z > BAILOUT) {
+                escape_mag_z = mag_z;   // first magnitude past bailout (finite)
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Count/break on the flag (NOT mag_z) so an overflowed |z| (inf/NaN at
+            // high power) can't skip the break and stall the loop to max_iter. See
+            // mandelbrot_f32.wgsl for the full rationale.
             extra += 1;
+            if (extra >= 2) { break; }
         }
-        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
     }
 
     if (i == max_i) { flags |= MAX_ITER_BIT; }
 
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, BAILOUT + 1e-3), BAILOUT), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 
@@ -296,12 +305,18 @@ fn manowar_perturb(delta_c: vec2f) -> vec4f {
         }
 
         mag_z = z.x * z.x + z.y * z.y;
-        if (mag_z > BAILOUT) {
-            flags |= ESCAPED_BIT;
-            if (extra >= 2) { break; }
+        if ((flags & ESCAPED_BIT) == 0) {
+            if (mag_z > BAILOUT) {
+                escape_mag_z = mag_z;   // first magnitude past bailout (finite)
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Count/break on the flag (NOT mag_z) so an overflowed |z| (inf/NaN at
+            // high power) can't skip the break and stall the loop to max_iter. See
+            // mandelbrot_f32.wgsl for the full rationale.
             extra += 1;
+            if (extra >= 2) { break; }
         }
-        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
 
         let dz_new = c32_mul(Z + Z, dz) + c32_mul(dz, dz) + dz_prev + delta_c;
         dz_prev = dz;
@@ -313,7 +328,7 @@ fn manowar_perturb(delta_c: vec2f) -> vec4f {
 
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, BAILOUT + 1e-3), BAILOUT), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 
@@ -368,19 +383,25 @@ fn phoenix(c: vec2f) -> vec4f {
         }
 
         mag_z = z.x * z.x + z.y * z.y;
-        if (mag_z > BAILOUT) {
-            flags |= ESCAPED_BIT;
-            if (extra >= 2) { break; }
+        if ((flags & ESCAPED_BIT) == 0) {
+            if (mag_z > BAILOUT) {
+                escape_mag_z = mag_z;   // first magnitude past bailout (finite)
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Count/break on the flag (NOT mag_z) so an overflowed |z| (inf/NaN at
+            // high power) can't skip the break and stall the loop to max_iter. See
+            // mandelbrot_f32.wgsl for the full rationale.
             extra += 1;
+            if (extra >= 2) { break; }
         }
-        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
     }
 
     if (i == max_i) { flags |= MAX_ITER_BIT; }
 
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, BAILOUT + 1e-3), BAILOUT), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 
@@ -443,12 +464,18 @@ fn phoenix_perturb(delta_c: vec2f) -> vec4f {
         }
 
         mag_z = z.x * z.x + z.y * z.y;
-        if (mag_z > BAILOUT) {
-            flags |= ESCAPED_BIT;
-            if (extra >= 2) { break; }
+        if ((flags & ESCAPED_BIT) == 0) {
+            if (mag_z > BAILOUT) {
+                escape_mag_z = mag_z;   // first magnitude past bailout (finite)
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Count/break on the flag (NOT mag_z) so an overflowed |z| (inf/NaN at
+            // high power) can't skip the break and stall the loop to max_iter. See
+            // mandelbrot_f32.wgsl for the full rationale.
             extra += 1;
+            if (extra >= 2) { break; }
         }
-        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
 
         let dz_new = c32_mul(Z + Z, dz) + c32_mul(dz, dz)
                    + P * dz_prev
@@ -463,7 +490,7 @@ fn phoenix_perturb(delta_c: vec2f) -> vec4f {
 
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, BAILOUT + 1e-3), BAILOUT), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 
@@ -515,19 +542,25 @@ fn spider(pix_c: vec2f) -> vec4f {
         }
 
         mag_z = z.x * z.x + z.y * z.y;
-        if (mag_z > BAILOUT) {
-            flags |= ESCAPED_BIT;
-            if (extra >= 2) { break; }
+        if ((flags & ESCAPED_BIT) == 0) {
+            if (mag_z > BAILOUT) {
+                escape_mag_z = mag_z;   // first magnitude past bailout (finite)
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Count/break on the flag (NOT mag_z) so an overflowed |z| (inf/NaN at
+            // high power) can't skip the break and stall the loop to max_iter. See
+            // mandelbrot_f32.wgsl for the full rationale.
             extra += 1;
+            if (extra >= 2) { break; }
         }
-        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
     }
 
     if (i == max_i) { flags |= MAX_ITER_BIT; }
 
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, BAILOUT + 1e-3), BAILOUT), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 
@@ -583,12 +616,18 @@ fn spider_perturb(delta_c: vec2f) -> vec4f {
         }
 
         mag_z = z.x * z.x + z.y * z.y;
-        if (mag_z > BAILOUT) {
-            flags |= ESCAPED_BIT;
-            if (extra >= 2) { break; }
+        if ((flags & ESCAPED_BIT) == 0) {
+            if (mag_z > BAILOUT) {
+                escape_mag_z = mag_z;   // first magnitude past bailout (finite)
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Count/break on the flag (NOT mag_z) so an overflowed |z| (inf/NaN at
+            // high power) can't skip the break and stall the loop to max_iter. See
+            // mandelbrot_f32.wgsl for the full rationale.
             extra += 1;
+            if (extra >= 2) { break; }
         }
-        if ((flags & ESCAPED_BIT) == 0) { escape_mag_z = mag_z; }
 
         let dz_new = c32_mul(Z + Z, dz) + c32_mul(dz, dz) + dc;
         dc = dc * 0.5 + dz_new;   // dc' = dc/2 + dz'
@@ -600,7 +639,7 @@ fn spider_perturb(delta_c: vec2f) -> vec4f {
 
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        fi = clamp(fi + smooth_offset(max(escape_mag_z, 1e-30)), 0.0, f32(max_i));
+        fi = clamp(fi + smooth_offset(max(escape_mag_z, BAILOUT + 1e-3), BAILOUT), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 

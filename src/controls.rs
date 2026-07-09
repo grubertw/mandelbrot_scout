@@ -210,6 +210,17 @@ pub struct Controls {
     trap_spiral_arms_range: (f32, f32),
     use_trap_interior: bool,
     debug_coloring: bool,
+    // Histogram (adaptive) coloring
+    use_histogram: bool,
+    hist_frozen: bool,
+    hist_eq_amount: f32,
+    hist_black_pct: f32,
+    hist_white_pct: f32,
+    hist_temporal_alpha: f32,
+    hist_bin_count: u32,
+    hist_blur_radius: u32,
+    hist_log_binning: bool,
+    hist_include_interior: bool,
     // DE controls
     enable_glow: bool,
     distance_multiplier: f32,
@@ -327,6 +338,16 @@ pub enum Message {
     TrapSpiralTightnessChanged(f32),
     TrapSpiralArmsChanged(f32),
     UseTrapInteriorChanged(bool),
+    UseHistogramChanged(bool),
+    HistFrozenChanged(bool),
+    HistEqAmountChanged(f32),
+    HistBlackPctChanged(f32),
+    HistWhitePctChanged(f32),
+    HistTemporalAlphaChanged(f32),
+    HistBinCountChanged(u32),
+    HistBlurRadiusChanged(u32),
+    HistLogBinningChanged(bool),
+    HistIncludeInteriorChanged(bool),
     EnableGlowChanged(bool),
     DebugColoringChanged(bool),
     DistanceMultiplierChanged(f32),
@@ -460,6 +481,16 @@ impl Controls {
             trap_spiral_arms_range: settings.trap_spiral_arms_range,
             use_trap_interior: false,
             debug_coloring: false,
+            use_histogram: false,
+            hist_frozen: false,
+            hist_eq_amount: settings.hist_eq_amount,
+            hist_black_pct: settings.hist_black_pct,
+            hist_white_pct: settings.hist_white_pct,
+            hist_temporal_alpha: settings.hist_temporal_alpha,
+            hist_bin_count: settings.hist_bin_count,
+            hist_blur_radius: settings.hist_blur_radius,
+            hist_log_binning: false,
+            hist_include_interior: false,
             enable_glow: false,
             distance_multiplier: settings.distance_multiplier,
             distance_multiplier_range: settings.distance_multiplier_range,
@@ -805,6 +836,46 @@ impl Controls {
             Message::UseTrapInteriorChanged(use_trap_interior) => {
                 self.use_trap_interior = use_trap_interior;
                 self.scene.borrow_mut().set_use_trap_interior(use_trap_interior);
+            }
+            Message::UseHistogramChanged(use_histogram) => {
+                self.use_histogram = use_histogram;
+                self.scene.borrow_mut().set_use_histogram(use_histogram);
+            }
+            Message::HistFrozenChanged(frozen) => {
+                self.hist_frozen = frozen;
+                self.scene.borrow_mut().set_hist_frozen(frozen);
+            }
+            Message::HistEqAmountChanged(amount) => {
+                self.hist_eq_amount = amount;
+                self.scene.borrow_mut().set_hist_eq_amount(amount);
+            }
+            Message::HistBlackPctChanged(pct) => {
+                self.hist_black_pct = pct;
+                self.scene.borrow_mut().set_hist_black_pct(pct);
+            }
+            Message::HistWhitePctChanged(pct) => {
+                self.hist_white_pct = pct;
+                self.scene.borrow_mut().set_hist_white_pct(pct);
+            }
+            Message::HistTemporalAlphaChanged(alpha) => {
+                self.hist_temporal_alpha = alpha;
+                self.scene.borrow_mut().set_hist_temporal_alpha(alpha);
+            }
+            Message::HistBinCountChanged(bins) => {
+                self.hist_bin_count = bins;
+                self.scene.borrow_mut().set_hist_bin_count(bins);
+            }
+            Message::HistBlurRadiusChanged(radius) => {
+                self.hist_blur_radius = radius;
+                self.scene.borrow_mut().set_hist_blur_radius(radius);
+            }
+            Message::HistLogBinningChanged(on) => {
+                self.hist_log_binning = on;
+                self.scene.borrow_mut().set_hist_log_binning(on);
+            }
+            Message::HistIncludeInteriorChanged(on) => {
+                self.hist_include_interior = on;
+                self.scene.borrow_mut().set_hist_include_interior(on);
             }
             Message::DebugColoringChanged(coloring) => {
                 self.debug_coloring = coloring;
@@ -1401,41 +1472,52 @@ impl Controls {
         };
 
         let mut color_controls = column![
-            container(row![
-                checkbox(self.use_de)
-                    .on_toggle(Message::UseDEChanged),
-                space().width(Length::Fixed(5.0)),
-                text("Distance Estimation")
-                    .align_y(Alignment::Center),
-                space().width(Length::Fixed(15.0)),
+            container(
+                column![
+                    row![
+                        checkbox(self.use_de)
+                            .on_toggle(Message::UseDEChanged),
+                        space().width(Length::Fixed(5.0)),
+                        text("Distance Estimation")
+                            .align_y(Alignment::Center),
+                        space().width(Length::Fixed(15.0)),
 
-                checkbox(self.smooth_coloring)
-                    .on_toggle(Message::SmoothColoringChanged),
-                space().width(Length::Fixed(5.0)),
-                text("Smooth Coloring")
-                    .align_y(Alignment::Center),
-                space().width(Length::Fixed(15.0)),
+                        checkbox(self.smooth_coloring)
+                            .on_toggle(Message::SmoothColoringChanged),
+                        space().width(Length::Fixed(5.0)),
+                        text("Smooth Coloring")
+                            .align_y(Alignment::Center),
+                        space().width(Length::Fixed(15.0)),
 
-                checkbox(self.use_stripes)
-                    .on_toggle(Message::UseStripesChanged),
-                space().width(Length::Fixed(5.0)),
-                text("Stripe Averaging")
-                    .align_y(Alignment::Center),
-                space().width(Length::Fixed(15.0)),
+                        checkbox(self.use_stripes)
+                            .on_toggle(Message::UseStripesChanged),
+                        space().width(Length::Fixed(5.0)),
+                        text("Stripe Averaging")
+                            .align_y(Alignment::Center),
+                        space().width(Length::Fixed(15.0)),
+                    ].padding(5),
+                    row![
+                        checkbox(self.use_traps)
+                            .on_toggle(Message::UseTrapsChanged),
+                        space().width(Length::Fixed(5.0)),
+                        text("Orbit Traps")
+                            .align_y(Alignment::Center),
+                        space().width(Length::Fixed(70.0)),
 
-                checkbox(self.use_traps)
-                    .on_toggle(Message::UseTrapsChanged),
-                space().width(Length::Fixed(5.0)),
-                text("Orbit Traps")
-                    .align_y(Alignment::Center),
-                space().width(Length::Fixed(15.0)),
+                        checkbox(self.use_histogram)
+                            .on_toggle(Message::UseHistogramChanged),
+                        space().width(Length::Fixed(5.0)),
+                        text("Histogram")
+                            .align_y(Alignment::Center),
+                        space().width(Length::Fixed(55.0)),
 
-                checkbox(self.debug_coloring)
-                    .on_toggle(Message::DebugColoringChanged),
-                    space().width(Length::Fixed(5.0)),
-                text("Debug Coloring")
-                .align_y(Alignment::Center),
-            ])
+                        checkbox(self.debug_coloring)
+                            .on_toggle(Message::DebugColoringChanged),
+                            space().width(Length::Fixed(5.0)),
+                        text("Debug Coloring")
+                        .align_y(Alignment::Center),
+                    ].padding(5)
+                ].padding(5))
                 .style(inner_container_style)
                 .padding(10),
             container(row![
@@ -1530,6 +1612,13 @@ impl Controls {
         ].spacing(5)
             .padding(5);
         
+        if self.use_histogram {
+            color_controls = color_controls.push(
+                container(self.render_histogram_controls())
+                    .style(inner_container_style)
+                    .padding(10),
+            );
+        }
         if self.use_de {
             color_controls = color_controls.push(
                 container(self.render_de_controls())
@@ -1986,6 +2075,103 @@ impl Controls {
             .spacing(5)
     }
     
+    fn render_histogram_controls(&self) -> Column<'_, Message, Theme, Renderer> {
+        column![
+            row![
+                checkbox(self.hist_frozen)
+                    .on_toggle(Message::HistFrozenChanged),
+                space().width(Length::Fixed(5.0)),
+                text("Freeze histogram")
+                    .align_y(Alignment::Center),
+            ].padding(5),
+            row![
+                text("Equalization")
+                    .width(Length::Fixed(110.0))
+                    .align_y(Alignment::Center),
+                slider(0.0..=1.0, self.hist_eq_amount, Message::HistEqAmountChanged)
+                    .step(0.005)
+                    .width(Length::Fixed(180.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<4.2}", self.hist_eq_amount))
+                    .width(Length::Fixed(40.0))
+                    .align_y(Alignment::Center),
+            ].padding(5),
+            row![
+                text("Black point")
+                    .width(Length::Fixed(110.0))
+                    .align_y(Alignment::Center),
+                slider(0.0..=0.9, self.hist_black_pct, Message::HistBlackPctChanged)
+                    .step(0.005)
+                    .width(Length::Fixed(180.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<4.2}", self.hist_black_pct))
+                    .width(Length::Fixed(40.0))
+                    .align_y(Alignment::Center),
+            ].padding(5),
+            row![
+                text("White point")
+                    .width(Length::Fixed(110.0))
+                    .align_y(Alignment::Center),
+                slider(0.1..=1.0, self.hist_white_pct, Message::HistWhitePctChanged)
+                    .step(0.005)
+                    .width(Length::Fixed(180.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<4.2}", self.hist_white_pct))
+                    .width(Length::Fixed(40.0))
+                    .align_y(Alignment::Center),
+            ].padding(5),
+            row![
+                text("Temporal blend")
+                    .width(Length::Fixed(110.0))
+                    .align_y(Alignment::Center),
+                slider(0.02..=1.0, self.hist_temporal_alpha, Message::HistTemporalAlphaChanged)
+                    .step(0.005)
+                    .width(Length::Fixed(180.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<4.2}", self.hist_temporal_alpha))
+                    .width(Length::Fixed(40.0))
+                    .align_y(Alignment::Center),
+            ].padding(5),
+            row![
+                text("Bin count")
+                    .width(Length::Fixed(110.0))
+                    .align_y(Alignment::Center),
+                slider(16_u32..=1024_u32, self.hist_bin_count, Message::HistBinCountChanged)
+                    .step(16_u32)
+                    .width(Length::Fixed(180.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{}", self.hist_bin_count))
+                    .width(Length::Fixed(40.0))
+                    .align_y(Alignment::Center),
+            ].padding(5),
+            row![
+                text("Bin blur")
+                    .width(Length::Fixed(110.0))
+                    .align_y(Alignment::Center),
+                slider(0_u32..=64_u32, self.hist_blur_radius, Message::HistBlurRadiusChanged)
+                    .step(1_u32)
+                    .width(Length::Fixed(180.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{}", self.hist_blur_radius))
+                    .width(Length::Fixed(40.0))
+                    .align_y(Alignment::Center),
+            ].padding(5),
+            row![
+                checkbox(self.hist_log_binning)
+                    .on_toggle(Message::HistLogBinningChanged),
+                space().width(Length::Fixed(5.0)),
+                text("Log binning")
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(20.0)),
+                checkbox(self.hist_include_interior)
+                    .on_toggle(Message::HistIncludeInteriorChanged),
+                space().width(Length::Fixed(5.0)),
+                text("Include interior")
+                    .align_y(Alignment::Center),
+            ].padding(5),
+        ].spacing(2)
+    }
+
     fn render_de_controls(&self) -> Column<'_, Message, Theme, Renderer> {
         let mut glow_row = row![
             checkbox(self.enable_glow)

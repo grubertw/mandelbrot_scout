@@ -243,12 +243,13 @@ fn f_deriv_step(deriv: vec2f, z: vec2f) -> vec2f {
     return out;
 }
 
-// Continuous (smooth) iteration offset for z^p escape: 1 - log_p(log|z|).
-// mag2 = |z|^2, so 0.5*log(mag2) = log|z|. Dividing by log(power) instead of a
-// hardcoded log(2) fixes the gradient for higher powers; for power 2 this equals
-// the old 1 - log2(log|z|).
-fn smooth_offset(mag2: f32) -> f32 {
-    return 1.0 - log(log(mag2) * 0.5) / log(f32(uni.formula_power));
+// Continuous (smooth) iteration offset for z^p escape. `mag` is the FIRST |z|^2
+// past `bailout` (same |z|^2 convention as the callers). Because mag > bailout > 1,
+// log(mag)/log(bailout) >= 1 so log(log(...)) is finite for ANY power — no NaN
+// near |z|=1. Dividing by log(power) gives the correct gradient at higher powers.
+// See mandelbrot_f32.wgsl for the full rationale.
+fn smooth_offset(mag: f32, bailout: f32) -> f32 {
+    return 1.0 - log(log(mag) / log(bailout)) / log(f32(uni.formula_power));
 }
 
 // -------------------------------
@@ -482,20 +483,26 @@ fn mandelbrot(pix: ComplexFExp) -> vec4f {
         }
 
         mag_z = cfexp_mag2(z);
-        if (mag_z > 128.0) {
-            flags |= ESCAPED_BIT;
-            if (extra >= 2u) { break; }
+        if ((flags & ESCAPED_BIT) == 0u) {
+            if (mag_z > 128.0) {
+                escape_mag_z = mag_z;   // first |z|^2 past bailout (finite)
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Count/break on the flag (NOT mag_z) so an overflowed |z| can't skip
+            // the break and stall the loop to max_iter. See mandelbrot_f32.wgsl.
             extra += 1u;
+            if (extra >= 2u) { break; }
         }
-        if ((flags & ESCAPED_BIT) == 0u) { escape_mag_z = mag_z; }
     }
 
     if (i == max_i) { flags |= MAX_ITER_BIT; }
 
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0u) {
-        let safe_mag = max(escape_mag_z, 1e-30);
-        fi = clamp(fi + smooth_offset(safe_mag), 0.0, f32(max_i));
+        // escape_mag_z is the first |z|^2 past bailout (128); floor above it.
+        let safe_mag = max(escape_mag_z, 128.0 + 1e-3);
+        fi = clamp(fi + smooth_offset(safe_mag, 128.0), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 
@@ -650,12 +657,20 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
         let mag_dz_fexp = cfexp_mag2_fexp(dz);
         mag_z = z_f32.x * z_f32.x + z_f32.y * z_f32.y;
 
-        if ((mag_z_fexp.m != 0.0) && (mag_z_fexp.e >= 8)) {
-            flags |= ESCAPED_BIT;
-            if (extra >= 2u) { break; }
+        let escaped_now = (mag_z_fexp.m != 0.0) && (mag_z_fexp.e >= 8);
+        if ((flags & ESCAPED_BIT) == 0u) {
+            if (escaped_now) {
+                // First crossing: capture the f32 |z|^2 for smooth coloring (guard
+                // the rare overflow to inf at high power). |z|^2 >= 128 at e=8.
+                if (mag_z < 1e30) { escape_mag_z = mag_z; }
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Count/break on the flag (NOT the magnitude) so the loop can't stall
+            // to max_iter. See mandelbrot_f32.wgsl for the full rationale.
             extra += 1u;
+            if (extra >= 2u) { break; }
         }
-        if ((flags & ESCAPED_BIT) == 0u && mag_z < 1e30) { escape_mag_z = mag_z; }
 
         // Zhuoran rebasing, performed BEFORE advancing. Two independent triggers:
         //   1. End-of-reference (ref_i+1 >= max_ref_i): always on. Restarts the
@@ -721,8 +736,11 @@ fn mandelbrot_perturb(delta_c: ComplexFExp,
 
     var fi = f32(i - extra);
     if ((uni.render_flags & SMOOTH_COLORING) != 0u) {
-        let safe_mag = max(escape_mag_z, 1e-30);
-        fi = clamp(fi + smooth_offset(safe_mag), 0.0, f32(max_i));
+        // Escape here is |z|^2 >= 128 (mag_z_fexp.e >= 8 with m in [0.5,1)), so the
+        // bailout is 128 — NOT 256. Flooring above 128 would clamp the barely-
+        // escaped pixels (|z|^2 in [128, 256]) to a constant and band the gradient.
+        let safe_mag = max(escape_mag_z, 128.0 + 1e-3);
+        fi = clamp(fi + smooth_offset(safe_mag, 128.0), 0.0, f32(max_i));
         if (i == max_i) { fi = f32(max_i); }
     }
 

@@ -100,24 +100,35 @@ fn f_deriv_step(deriv: vec2f, z: vec2f) -> vec2f {
     return out;
 }
 
-// Continuous (smooth) iteration offset for z^p escape: 1 - log_p(log|z|).
-// mag2 = |z|^2, so 0.5*log(mag2) = log|z|. Dividing by log(power) (the escape
-// rate) instead of a hardcoded log(2) fixes the gradient for higher powers;
-// for power 2 this equals the old 1 - log2(log|z|).
+// Continuous (smooth) iteration offset for z^p escape:
+//   1 - log_p( log|z| / log(bailout) )
+// Dividing by log(power) (the escape rate) rather than a hardcoded log(2) gives
+// the correct gradient for any power; for power 2 it matches the classic smooth
+// count. Normalizing by log(bailout) and using the FIRST magnitude past bailout
+// (see smooth_offset below) is what keeps it finite at high power.
 //
-// KNOWN LIMITATION at high power (p >= ~5): this fixes the interpolation WITHIN
-// an iteration band, but not the distribution ACROSS bands. z^p escapes almost
-// instantly (|z| ~ |z|^p), so nearly every exterior pixel lands in the first 1-3
-// integer iteration bands. The usable `fi` range collapses to a sliver of
-// [0, max_iter], so no palette-cycles setting spreads it (tested to 1000), and
-// p >= 6 tends toward all-black. The real fix is distribution-aware coloring
-// (histogram equalization) — deferred: it needs its own GPU pass / WGSL file.
-// Data-driven max-normalization does NOT help: interior (max_iter) pixels kept
-// in-frame peg the max at max_iter. Sudden bailout overshoot at high p can also
-// leave `escape_mag_z` where log(log(.)) misbehaves — histogram binning (or a
-// clamp here) should guard against NaN/Inf `fi`.
-fn smooth_offset(mag2: f32) -> f32 {
-    return 1.0 - log(log(mag2) * 0.5) / log(f32(uni.formula_power));
+// HIGH POWER (p >= ~5): this fixes the interpolation WITHIN an iteration band,
+// but on its own not the distribution ACROSS bands. z^p escapes almost instantly
+// (|z| ~ |z|^p), so nearly every exterior pixel lands in the first 1-3 integer
+// iteration bands and the usable `fi` range collapses to a sliver of
+// [0, max_iter] — no palette-cycles setting spreads it (tested to 1000).
+//
+// The distribution fix is histogram equalization (now implemented, see
+// histogram.wgsl): it equalizes over the observed *escaped* range, so the
+// crammed fast-escape region is expanded across the palette. IMPORTANT: the
+// histogram needs a CONTINUOUS field to spread. With SMOOTH_COLORING OFF, `fi`
+// here is the integer count, so the histogram sees only 1-3 discrete values =>
+// 1-3 flat colors with no gradient. High powers therefore want Smooth Coloring
+// AND Histogram together; neither alone is enough. (This is why plain data-
+// driven max-normalization also failed: it can't manufacture continuity.)
+// `mag` is the FIRST |z| past `bailout` (captured before the extra DE iterations
+// inflate it). Because mag > bailout > 1, log(mag)/log(bailout) >= 1, so the
+// log(log(...)) term is finite and non-negative for ANY power — no singularity
+// near |z|=1 and no NaN. Result lands in [0,1): the smooth fraction across the
+// escape band. (The old form fed the pre-escape |z| ~ 1 into log(log(.)), which
+// blew up at high power and painted whole frames black.)
+fn smooth_offset(mag: f32, bailout: f32) -> f32 {
+    return 1.0 - log(log(mag) / log(bailout)) / log(f32(uni.formula_power));
 }
 
 // -------------------------------
@@ -285,17 +296,23 @@ fn mandelbrot(pix: vec2f) -> vec4f {
 
         // Bailout
         mag_z = length(z);
-        if (mag_z > 32.0) {
-            flags |= ESCAPED_BIT;
-            // Make extra iterations past escape for better DE approximation.
+        if ((flags & ESCAPED_BIT) == 0) {
+            if (mag_z > 32.0) {
+                // First magnitude past bailout (finite) — used for smooth coloring
+                // before the extra DE iterations inflate |z|.
+                escape_mag_z = mag_z;
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Already escaped: run a couple extra iterations for DE, then stop.
+            // Count/break on the flag (NOT mag_z) — at high power the extra steps
+            // overflow |z| to inf/NaN, and `NaN > bailout` is false, so testing
+            // mag_z here would skip the break and stall the loop to max_iter,
+            // misflagging an escaped pixel as interior (black under smooth).
+            extra += 1;
             if (extra >= 2) {
                 break;
             }
-            extra += 1;
-        }
-
-        if ((flags & ESCAPED_BIT) == 0) {
-            escape_mag_z = mag_z;
         }
     }
 
@@ -306,8 +323,10 @@ fn mandelbrot(pix: vec2f) -> vec4f {
     var fi = f32(i - extra);
     // Replace with smooth iters if enabled
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        let safe_mag_z = max(escape_mag_z, 1e-30);
-        fi = clamp(fi + smooth_offset(safe_mag_z), 0.0, f32(max_i));
+        // Naive path: escape_mag_z is linear |z|, bailout 32. Floor just above
+        // bailout so log(mag)/log(bailout) stays >= ~1 (guards the i=0 escaper).
+        let safe_mag_z = max(escape_mag_z, 32.0 + 1e-3);
+        fi = clamp(fi + smooth_offset(safe_mag_z, 32.0), 0.0, f32(max_i));
         if (i == max_i) {
             fi = f32(max_i);
         }
@@ -503,19 +522,22 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
             stripe_count += 1.0;
         }
 
-        // Standard bailout
+        // Standard bailout (mag_z here is |z|^2, threshold 128 => |z| ~ 11.3)
         mag_z = z.x * z.x + z.y * z.y;
-        if (mag_z > 128.0) {
-             flags |= ESCAPED_BIT;
-            // Make extra iterations past escape for better DE approximation.
+        if ((flags & ESCAPED_BIT) == 0) {
+            if (mag_z > 128.0) {
+                // First magnitude past bailout (finite) for smooth coloring.
+                escape_mag_z = mag_z;
+                flags |= ESCAPED_BIT;
+            }
+        } else {
+            // Already escaped: extra iterations for DE, then stop. Count/break on
+            // the flag (NOT mag_z) so an overflowed |z| (inf/NaN at high power)
+            // can't skip the break and stall the loop to max_iter.
+            extra += 1;
             if (extra >= 2) {
                 break;
             }
-            extra += 1;
-        }
-
-        if ((flags & ESCAPED_BIT) == 0) {
-            escape_mag_z = mag_z;
         }
 
         let mag_dz = dz.x * dz.x + dz.y * dz.y;
@@ -541,8 +563,11 @@ fn mandelbrot_perturb(delta_c: vec2f) -> vec4f {
     var fi = f32(i - extra);
     // For smooth iterations
     if ((uni.render_flags & SMOOTH_COLORING) != 0) {
-        let safe_mag_z = max(escape_mag_z, 1e-30);
-        fi = clamp(fi + smooth_offset(safe_mag_z), 0.0, f32(max_i));
+        // Perturbation path: escape_mag_z is |z|^2, bailout 128 (same convention,
+        // so log(mag)/log(bailout) is identical to the linear form). Floor above
+        // bailout to keep the ratio >= ~1 for an i=0 escaper.
+        let safe_mag_z = max(escape_mag_z, 128.0 + 1e-3);
+        fi = clamp(fi + smooth_offset(safe_mag_z, 128.0), 0.0, f32(max_i));
         if (i == max_i) {
             fi = f32(max_i);
         }

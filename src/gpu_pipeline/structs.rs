@@ -5,6 +5,10 @@ use crate::numerics::ComplexFExp;
 
 fn default_formula_power() -> u32 { 2 }
 fn default_rot_cos() -> f32 { 1.0 }
+fn default_hist_eq_amount() -> f32 { 0.8 }
+fn default_hist_white_pct() -> f32 { 1.0 }
+fn default_hist_temporal_alpha() -> f32 { 1.0 }
+fn default_hist_bin_count() -> u32 { 512 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Serialize, Deserialize)]
@@ -83,6 +87,27 @@ pub struct SceneUniform {
     pub ao_darkness: f32,
     pub rim_intensity: f32,
     pub rim_power: f32,
+    // --- Histogram (adaptive) coloring ---
+    // Appended at the tail so the calc/reduce shaders (which declare only a
+    // prefix) and older PNG metadata are unaffected. Read by histogram.wgsl and
+    // color.wgsl. serde defaults keep pre-histogram PNGs loadable.
+    #[serde(default = "default_hist_eq_amount")]
+    pub hist_eq_amount: f32,      // Tier-1 master blend: 0 = linear, 1 = full CDF
+    #[serde(default)]
+    pub hist_black_pct: f32,      // percentile clip (low) in CDF space
+    #[serde(default = "default_hist_white_pct")]
+    pub hist_white_pct: f32,      // percentile clip (high) in CDF space
+    #[serde(default = "default_hist_temporal_alpha")]
+    pub hist_temporal_alpha: f32, // EMA blend of this frame's CDF (1 = instant)
+    // --- Tier 3 (histogram construction) ---
+    #[serde(default = "default_hist_bin_count")]
+    pub hist_bin_count: u32,        // active bins (<= HIST_BINS alloc)
+    #[serde(default)]
+    pub hist_blur_radius: u32,      // box-blur radius over bins (0 = off)
+    #[serde(default)]
+    pub hist_log_binning: u32,      // 0/1: bin in log space (heavy tails)
+    #[serde(default)]
+    pub hist_include_interior: u32, // 0/1: also bin max-iter (interior) pixels
 }
 
 impl SceneUniform {
@@ -148,6 +173,14 @@ impl SceneUniform {
 
     pub fn set_use_julia(&mut self, use_julia: bool) {
         if use_julia { self.render_flags |= 1 << 15; } else { self.render_flags &= !(1 << 15) }
+    }
+
+    pub fn set_use_histogram(&mut self, on: bool) {
+        if on { self.render_flags |= 1 << 16; } else { self.render_flags &= !(1 << 16) }
+    }
+
+    pub fn set_hist_frozen(&mut self, frozen: bool) {
+        if frozen { self.render_flags |= 1 << 17; } else { self.render_flags &= !(1 << 17) }
     }
 
     pub fn set_formula_power(&mut self, power: u32) {
