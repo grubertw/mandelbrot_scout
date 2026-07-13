@@ -71,6 +71,34 @@ impl From<ColorScalarMappingMode> for u32 {
     }
 }
 
+// How palette_lookup (color.wgsl) blends between adjacent palette texels. Kept in
+// sync with the switch arms in interp_palette(). See docs/palette_editor.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display)]
+pub enum PaletteInterpMode {
+    #[strum(to_string="Linear")]
+    Linear,
+    #[strum(to_string="Smoothstep")]
+    Smoothstep,
+    #[strum(to_string="Gamma Correct")]
+    GammaCorrect,
+    #[strum(to_string="Cosine")]
+    Cosine,
+    #[strum(to_string="OkLab")]
+    OkLab,
+}
+
+impl From<PaletteInterpMode> for u32 {
+    fn from(m: PaletteInterpMode) -> Self {
+        match m {
+            PaletteInterpMode::Linear => 0,
+            PaletteInterpMode::Smoothstep => 1,
+            PaletteInterpMode::GammaCorrect => 2,
+            PaletteInterpMode::Cosine => 3,
+            PaletteInterpMode::OkLab => 4,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display)]
 pub enum TrapShape {
     #[strum(to_string = "Circle")]
@@ -152,6 +180,9 @@ pub struct Controls {
     editing_func: bool,
     editing_scout: bool,
     editing_export: bool,
+    // Set when the user asks to open the Custom Palette Editor window; consumed by
+    // the Runner (which owns the event loop needed to create the window).
+    open_palette_editor: bool,
 
     // Iterations config
     iter_step: u32,
@@ -188,6 +219,7 @@ pub struct Controls {
     offset: f32,
     gamma: f32,
     color_scalar_mapping_mode: Option<ColorScalarMappingMode>,
+    palette_interp_mode: Option<PaletteInterpMode>,
     color_scaler_mapping_strength: f32,
     scalar_mapping_power_range: (f32, f32),
     scalar_mapping_log_range: (f32, f32),
@@ -319,11 +351,13 @@ pub enum Message {
 
     SelectedPaletteChanged(PaletteSelection),
     ImportPalette,
+    OpenPaletteEditor,
     CyclesChanged(f32),
     CyclesMaxChanged(String),
     OffsetChanged(f32),
     GammaChanged(f32),
     ColorScalarMappingModeChanged(ColorScalarMappingMode),
+    PaletteInterpModeChanged(PaletteInterpMode),
     ColorScalerMappingStrengthChanged(f32),
     SmoothColoringChanged(bool),
     UseDEChanged(bool),
@@ -440,6 +474,7 @@ impl Controls {
             editing_func: false,
             editing_scout: false,
             editing_export: false,
+            open_palette_editor: false,
             iter_step: 10,
             iter_range_min: 0, iter_range_max: settings.max_user_iter * 2,
             max_iterations: settings.max_user_iter,
@@ -460,6 +495,7 @@ impl Controls {
             cycles: 1.0, cycles_max: 10.0,
             offset: 0.0, gamma: 1.0,
             color_scalar_mapping_mode: Some(ColorScalarMappingMode::Linear),
+            palette_interp_mode: Some(PaletteInterpMode::Linear),
             color_scaler_mapping_strength: 1.0,
             scalar_mapping_power_range: settings.scalar_mapping_power_range,
             scalar_mapping_log_range: settings.scalar_mapping_log_range,
@@ -539,6 +575,29 @@ impl Controls {
             debug_msg: debug_msg.to_string(), info_text,
             scene: scene.clone()
         }
+    }
+
+    /// Consumed by the Runner each frame: true when the user asked to open the
+    /// Custom Palette Editor window (which only the event loop can create).
+    pub fn take_open_palette_editor(&mut self) -> bool {
+        std::mem::take(&mut self.open_palette_editor)
+    }
+
+    /// Rebuild the palette pick-list from the scene (call when the editor saved a
+    /// new palette in its separate window), keeping the pick-list's shown
+    /// selection in sync with the scene's selected key.
+    pub fn refresh_palettes(&mut self) {
+        let (list, selected_key) = {
+            let s = self.scene.borrow();
+            (s.get_palette_list(), s.selected_palette_key())
+        };
+        let mut palettes: Vec<PaletteSelection> = list
+            .iter()
+            .map(|(key, name)| PaletteSelection::new(key.clone(), name.clone()))
+            .collect();
+        palettes.sort_by(|a, b| a.key.cmp(&b.key));
+        self.selected_palette = palettes.iter().find(|p| p.key == selected_key).cloned();
+        self.palettes = palettes;
     }
 
     pub fn update(&mut self, message: Message) {
@@ -723,6 +782,10 @@ impl Controls {
                     }
                 }
             }
+            Message::OpenPaletteEditor => {
+                // The window is created by the Runner (it owns the event loop).
+                self.open_palette_editor = true;
+            }
             Message::CyclesChanged(cycles) => {
                 self.cycles = cycles;
                 self.scene.borrow_mut().set_palette_cycles(cycles);
@@ -743,6 +806,10 @@ impl Controls {
             Message::ColorScalarMappingModeChanged(mode) => {
                 self.color_scalar_mapping_mode = Some(mode);
                 self.scene.borrow_mut().set_color_scalar_mapping_mode(mode.into());
+            }
+            Message::PaletteInterpModeChanged(mode) => {
+                self.palette_interp_mode = Some(mode);
+                self.scene.borrow_mut().set_palette_interp_mode(mode.into());
             }
             Message::ColorScalerMappingStrengthChanged(strength) => {
                 self.color_scaler_mapping_strength = strength;
@@ -1464,6 +1531,7 @@ impl Controls {
 
     fn render_color_controls(&self) -> Column<'_, Message, Theme, Renderer> {
         let color_scalar_mappings: Vec<ColorScalarMappingMode> = ColorScalarMappingMode::iter().collect();
+        let palette_interp_modes: Vec<PaletteInterpMode> = PaletteInterpMode::iter().collect();
         let scalar_mapping_strength_range = match self.color_scalar_mapping_mode.unwrap() {
             ColorScalarMappingMode::Linear => self.scalar_mapping_power_range,
             ColorScalarMappingMode::Power => self.scalar_mapping_power_range,
@@ -1473,72 +1541,77 @@ impl Controls {
 
         let mut color_controls = column![
             container(
-                column![
-                    row![
-                        checkbox(self.use_de)
-                            .on_toggle(Message::UseDEChanged),
-                        space().width(Length::Fixed(5.0)),
-                        text("Distance Estimation")
-                            .align_y(Alignment::Center),
-                        space().width(Length::Fixed(15.0)),
-
-                        checkbox(self.smooth_coloring)
-                            .on_toggle(Message::SmoothColoringChanged),
-                        space().width(Length::Fixed(5.0)),
-                        text("Smooth Coloring")
-                            .align_y(Alignment::Center),
-                        space().width(Length::Fixed(15.0)),
-
-                        checkbox(self.use_stripes)
-                            .on_toggle(Message::UseStripesChanged),
-                        space().width(Length::Fixed(5.0)),
-                        text("Stripe Averaging")
-                            .align_y(Alignment::Center),
-                        space().width(Length::Fixed(15.0)),
-                    ].padding(5),
-                    row![
-                        checkbox(self.use_traps)
-                            .on_toggle(Message::UseTrapsChanged),
-                        space().width(Length::Fixed(5.0)),
-                        text("Orbit Traps")
-                            .align_y(Alignment::Center),
-                        space().width(Length::Fixed(70.0)),
-
-                        checkbox(self.use_histogram)
-                            .on_toggle(Message::UseHistogramChanged),
-                        space().width(Length::Fixed(5.0)),
-                        text("Histogram")
-                            .align_y(Alignment::Center),
-                        space().width(Length::Fixed(55.0)),
-
-                        checkbox(self.debug_coloring)
-                            .on_toggle(Message::DebugColoringChanged),
-                            space().width(Length::Fixed(5.0)),
-                        text("Debug Coloring")
+                row![
+                    checkbox(self.use_de)
+                        .on_toggle(Message::UseDEChanged),
+                    space().width(Length::Fixed(5.0)),
+                    text("DE")
                         .align_y(Alignment::Center),
-                    ].padding(5)
-                ].padding(5))
-                .style(inner_container_style)
-                .padding(10),
+                    space().width(Length::Fixed(15.0)),
+
+                    checkbox(self.smooth_coloring)
+                        .on_toggle(Message::SmoothColoringChanged),
+                    space().width(Length::Fixed(5.0)),
+                    text("Smooth")
+                        .align_y(Alignment::Center),
+                    space().width(Length::Fixed(15.0)),
+
+                    checkbox(self.use_stripes)
+                        .on_toggle(Message::UseStripesChanged),
+                    space().width(Length::Fixed(5.0)),
+                    text("Stripes")
+                        .align_y(Alignment::Center),
+                    space().width(Length::Fixed(15.0)),
+
+                    checkbox(self.use_traps)
+                        .on_toggle(Message::UseTrapsChanged),
+                    space().width(Length::Fixed(5.0)),
+                    text("Traps")
+                        .align_y(Alignment::Center),
+                    space().width(Length::Fixed(15.0)),
+
+                    checkbox(self.use_histogram)
+                        .on_toggle(Message::UseHistogramChanged),
+                    space().width(Length::Fixed(5.0)),
+                    text("Histogram")
+                        .align_y(Alignment::Center),
+                    space().width(Length::Fixed(15.0)),
+
+                    checkbox(self.debug_coloring)
+                        .on_toggle(Message::DebugColoringChanged),
+                        space().width(Length::Fixed(5.0)),
+                    text("Debug")
+                    .align_y(Alignment::Center),
+                ].padding(5)
+            )
+            .style(inner_container_style)
+            .padding(5),
             container(row![
                 column![
                     row![
                         text("Palette")
-                            .width(Length::Fixed(100.0))
+                            .width(Length::Fixed(130.0))
                             .align_y(Alignment::Center)
                             .align_x(Alignment::Center),
                         pick_list(self.palettes.clone(),
                             self.selected_palette.clone(),
                             Message::SelectedPaletteChanged)
                             .width(Length::Fixed(220.0)),
-                        space().width(Length::Fixed(10.0)),
-                        button(text("Import").size(11))
-                            .on_press(Message::ImportPalette)
                         ]
                     .padding(5),
                     row![
+                        text("Palette Interp")
+                            .width(Length::Fixed(130.0))
+                            .align_y(Alignment::Center)
+                            .align_x(Alignment::Center),
+                        pick_list(palette_interp_modes,
+                            self.palette_interp_mode,
+                            Message::PaletteInterpModeChanged)
+                            .width(Length::Fixed(220.0))
+                    ].padding(5),
+                    row![
                         text("Scalar Mapping")
-                            .width(Length::Fixed(100.0))
+                            .width(Length::Fixed(130.0))
                             .align_y(Alignment::Center)
                             .align_x(Alignment::Center),
                         pick_list(color_scalar_mappings,
@@ -1548,7 +1621,7 @@ impl Controls {
                     ].padding(5),
                     row![
                         text("Mapping Strength")
-                            .width(Length::Fixed(100.0))
+                            .width(Length::Fixed(130.0))
                             .align_y(Alignment::Center)
                             .align_x(Alignment::Center),
                         slider(scalar_mapping_strength_range.0..=scalar_mapping_strength_range.1,
@@ -1563,6 +1636,23 @@ impl Controls {
                 ]
                 .padding(5),
                 column![
+                    row![
+                        button(text("Import")
+                            .size(11)
+                            .width(Length::Fixed(45.0))
+                            .align_x(Alignment::Center)
+                        )
+                            .on_press(Message::ImportPalette),
+                        space().width(Length::Fixed(10.0)),
+                        button(
+                            text("Edit")
+                            .size(11)
+                            .width(Length::Fixed(45.0))
+                            .align_x(Alignment::Center)
+                        )
+                            .on_press(Message::OpenPaletteEditor)
+                    ]
+                    .padding(5),
                     row![
                         text("cycles: ")
                             .width(Length::Fixed(90.0))
@@ -1605,8 +1695,9 @@ impl Controls {
                             .width(Length::Fixed(40.0))
                             .align_y(Alignment::Center),
                     ].padding(5),
-                ].padding(5),
-            ].align_y(Alignment::Center))
+                ]
+                .padding(5),
+            ].align_y(Alignment::Start))
                 .style(inner_container_style)
                 .padding(10),
         ].spacing(5)

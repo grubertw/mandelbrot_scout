@@ -108,6 +108,19 @@ pub struct SceneUniform {
     pub hist_log_binning: u32,      // 0/1: bin in log space (heavy tails)
     #[serde(default)]
     pub hist_include_interior: u32, // 0/1: also bin max-iter (interior) pixels
+    // --- Palette interpolation (GPU-side, systemwide; see docs/palette_editor.md) ---
+    // Selects how palette_lookup blends between adjacent palette texels.
+    // 0=Linear 1=Smoothstep 2=GammaCorrect 3=Cosine 4=OkLab.
+    #[serde(default)]
+    pub palette_interp_mode: u32,
+    // Keep the struct a multiple of 16 bytes for the uniform buffer. Reserved for
+    // future palette tuning knobs. skip -> stays out of PNG metadata JSON.
+    #[serde(skip)]
+    pub _pad_palette0: u32,
+    #[serde(skip)]
+    pub _pad_palette1: u32,
+    #[serde(skip)]
+    pub _pad_palette2: u32,
 }
 
 impl SceneUniform {

@@ -14,7 +14,14 @@ mod signals;
 #[allow(dead_code)]
 mod scout_engine;
 
+#[allow(dead_code)]
+mod palette_editor;
+
+mod palette_generators;
+mod palette_window;
+
 use settings::Settings;
+use palette_window::PaletteWindow;
 use controls::Controls;
 use controls::Message;
 use scene::Scene;
@@ -165,6 +172,12 @@ enum Runner {
         resized: bool,
         // For tracking mouse/touch/trackpad interaction to abstract platform-specific behavior
         navigation_state: NavigationState,
+        // Kept so the Custom Palette Editor can spin up a second surface + iced
+        // renderer on demand (same adapter/device as the main window).
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        // The editor's second window, when open. Shares the scene (same thread).
+        palette_window: Option<PaletteWindow>,
     },
 }
 
@@ -269,23 +282,42 @@ impl ApplicationHandler for Runner {
                 scene: Rc::clone(&scene), controls, events: Vec::new(), cursor: mouse::Cursor::Unavailable,
                 cache: user_interface::Cache::new(), modifiers: ModifiersState::default(),
                 clipboard, viewport, resized: false,
-                navigation_state: NavigationState::new(Rc::clone(&scene))};
+                navigation_state: NavigationState::new(Rc::clone(&scene)),
+                instance, adapter, palette_window: None};
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop,
-            _window_id: WindowId, event: WindowEvent) {
+            window_id: WindowId, event: WindowEvent) {
         let Self::Ready {window, surface, format, renderer, scene,
             controls, events, viewport, cursor, cache, modifiers, clipboard, resized,
-            navigation_state} = self
+            navigation_state, instance, adapter, palette_window} = self
         else {
             return;
         };
-        //trace!("Runner.window_event - {:?} {:?}", _window_id, event);
+
+        // Route events for the editor's second window to it. It shares the scene,
+        // so a live edit there redraws the main (fractal) window.
+        if palette_window.as_ref().is_some_and(|pw| pw.window_id() == window_id) {
+            let outcome = palette_window.as_mut().unwrap().handle_event(event, scene);
+            if outcome.scene_changed {
+                window.request_redraw();
+            }
+            if outcome.close {
+                *palette_window = None;
+            }
+            return;
+        }
+
+        //trace!("Runner.window_event - {:?} {:?}", window_id, event);
         let mut nav_events: Vec<NavigationEvent> = Vec::new();
 
         match event {
             WindowEvent::RedrawRequested => {
+                // The editor (separate window) may have saved a new palette.
+                if scene.borrow_mut().take_palettes_dirty() {
+                    controls.refresh_palettes();
+                }
                 if *resized {
                     let size = window.inner_size();
                     scene.borrow_mut().set_window_size(
@@ -574,6 +606,14 @@ impl ApplicationHandler for Runner {
             // update our UI with any messages
             for message in messages {
                 controls.update(message);
+            }
+
+            // Open the Custom Palette Editor window if the user asked (only the
+            // event loop can create a window, so Controls just raises a flag).
+            if controls.take_open_palette_editor() && palette_window.is_none() {
+                *palette_window = Some(PaletteWindow::new(
+                    event_loop, instance, adapter, scene, *format,
+                ));
             }
 
             // and request a redraw

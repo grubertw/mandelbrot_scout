@@ -76,6 +76,8 @@ render_res_factor_during_pan = 0.85
 # Program will pre-pend with $HOME enviornment variable when forming the full
 # file path to export
 default_export_directory = "/Pictures/Fractals"
+# Export directory for MAP palettes created by the Palette Editor window
+default_export_palette_directory = "/Pictures/Fractals/Palettes"
 # Note, the file extension is added automatically (either png or jpeg)
 default_export_filename = "fractal"
 

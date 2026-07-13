@@ -40,6 +40,7 @@ pub struct Settings {
     pub render_res_factor_during_pan: f64,
     pub default_export_directory: String,
     pub default_export_filename: String,
+    pub default_export_palette_directory: String,
 
     // Controls WGPU texture allocation
     pub max_orbits_per_frame: u32,
@@ -192,6 +193,7 @@ fn add_default_settings(builder: ConfigBuilder<DefaultState>) -> Result<ConfigBu
         .set_default("render_res_factor_during_pan", 0.85)?
         .set_default("default_export_directory", "/Pictures")?
         .set_default("default_export_filename", "fractal")?
+        .set_default("default_export_palette_directory", "/Pictures/Fractals/Palettes")?
         .set_default("max_orbits_per_frame", 4)?
         .set_default("max_ref_orbit", 65535)?
         .set_default("render_tex_width", 8000)?

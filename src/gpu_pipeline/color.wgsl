@@ -70,6 +70,10 @@ struct Uniforms {
     hist_blur_radius:           u32,
     hist_log_binning:           u32,
     hist_include_interior:      u32,
+    palette_interp_mode:        u32,
+    _pad_palette0:              u32,
+    _pad_palette1:              u32,
+    _pad_palette2:              u32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 
@@ -155,6 +159,69 @@ fn map_color_scalar(t: f32) -> f32 {
     }
 }
 
+// sRGB (gamma ~2.2 approx) <-> linear light helpers for perceptual palette blends.
+fn srgb_to_linear(c: vec3f) -> vec3f { return pow(c, vec3f(2.2)); }
+fn linear_to_srgb(c: vec3f) -> vec3f {
+    // Clamp: Oklab blends can land slightly out of gamma; pow(neg, frac) = NaN.
+    return pow(clamp(c, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));
+}
+
+// Bjorn Ottosson's Oklab (expects linear sRGB in, linear sRGB out).
+fn linear_srgb_to_oklab(c: vec3f) -> vec3f {
+    let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+    let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+    let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+    let l_ = pow(l, 1.0 / 3.0);
+    let m_ = pow(m, 1.0 / 3.0);
+    let s_ = pow(s, 1.0 / 3.0);
+    return vec3f(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    );
+}
+fn oklab_to_linear_srgb(c: vec3f) -> vec3f {
+    let l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+    let m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+    let s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+    return vec3f(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    );
+}
+
+// Blend two palette texels (sRGB, 0..1) per uni.palette_interp_mode.
+fn interp_palette(c0: vec3f, c1: vec3f, frac: f32) -> vec3f {
+    switch (uni.palette_interp_mode) {
+        case 0u: { // Linear (sRGB)
+            return mix(c0, c1, frac);
+        }
+        case 1u: { // Smoothstep
+            let f = frac * frac * (3.0 - 2.0 * frac);
+            return mix(c0, c1, f);
+        }
+        case 2u: { // Gamma-correct (blend in linear light)
+            return linear_to_srgb(mix(srgb_to_linear(c0), srgb_to_linear(c1), frac));
+        }
+        case 3u: { // Cosine
+            let f = 0.5 - 0.5 * cos(frac * 3.14159265359);
+            return mix(c0, c1, f);
+        }
+        case 4u: { // OkLab (perceptual)
+            let a = linear_srgb_to_oklab(srgb_to_linear(c0));
+            let b = linear_srgb_to_oklab(srgb_to_linear(c1));
+            return linear_to_srgb(oklab_to_linear_srgb(mix(a, b, frac)));
+        }
+        default: {
+            return mix(c0, c1, frac);
+        }
+    }
+}
+
 fn palette_lookup(t_in: f32) -> vec3f {
     let tex_width = f32(uni.palette_tex_width);
     let palette_len = f32(uni.palette_len);
@@ -166,21 +233,11 @@ fn palette_lookup(t_in: f32) -> vec3f {
     let i1 = i32(min(f32(i0 + 1), tex_width - 1.0));
 
     let frac = fract(t);
-    //let frac = smoothstep(0.0, 1.0, fract(x));
-    //let frac_smooth = frac * frac * (3.0 - 2.0 * frac); // smootherstep-lite
 
-    // Fetch texels
     let c0 = textureLoad(palette_tex, vec2<i32>(i0, 0), 0).rgb;
     let c1 = textureLoad(palette_tex, vec2<i32>(i1, 0), 0).rgb;
 
-    // Linear interpolation
-    return mix(c0, c1, frac);
-
-    // Gamma correct interpolation
-    //let c0_lin = pow(c0, vec3f(2.2));
-    //let c1_lin = pow(c1, vec3f(2.2));
-    //let mixed = mix(c0_lin, c1_lin, frac);
-    //return pow(mixed, vec3f(1.0 / 2.2));
+    return interp_palette(c0, c1, frac);
 }
 
 fn calculate_surface_normals(pix: vec2i) -> vec3f {
@@ -312,7 +369,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         let ti0 = i32(floor(tt));
         let ti1 = i32(min(f32(ti0 + 1), tex_width - 1.0));
         let trap_color = pow(
-            mix(textureLoad(palette_tex, vec2i(ti0, 0), 0).rgb,
+            interp_palette(
+                textureLoad(palette_tex, vec2i(ti0, 0), 0).rgb,
                 textureLoad(palette_tex, vec2i(ti1, 0), 0).rgb,
                 fract(tt)),
             vec3f(1.0 / uni.palette_gamma));

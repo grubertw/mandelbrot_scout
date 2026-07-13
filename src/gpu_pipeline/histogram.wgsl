@@ -93,6 +93,10 @@ struct Uniforms {
     hist_blur_radius:           u32,
     hist_log_binning:           u32,   // 0/1
     hist_include_interior:      u32,   // 0/1
+    palette_interp_mode:        u32,
+    _pad_palette0:              u32,
+    _pad_palette1:              u32,
+    _pad_palette2:              u32,
 };
 @group(0) @binding(0) var<uniform> uni: Uniforms;
 

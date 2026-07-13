@@ -82,6 +82,11 @@ pub struct Scene {
     selected_palette: String,
     palette_changed: bool,
     color_palettes: HashMap<String, Rgba8Palette>,
+    // Resolved directory MAP palettes are saved to (HOME + settings path).
+    palette_export_dir: String,
+    // Set when a palette is added/saved at runtime so the main window can refresh
+    // its pick-list (the editor lives in a separate window / UI state).
+    palettes_dirty: bool,
     recalc_fractal: bool,
     recalc_color: bool,
     // Rebuild the histogram/CDF (adaptive coloring) independently of the fractal
@@ -207,6 +212,10 @@ impl Scene {
             hist_blur_radius: settings.hist_blur_radius,
             hist_log_binning: 0,
             hist_include_interior: 0,
+            palette_interp_mode: 0,
+            _pad_palette0: 0,
+            _pad_palette1: 0,
+            _pad_palette2: 0,
         };
 
         // Configure and initialize all WGPU resources for render passes.
@@ -238,6 +247,12 @@ impl Scene {
             uniform, pipeline,
             selected_palette: "default".to_string(),
             palette_changed: true, color_palettes,
+            palette_export_dir: format!(
+                "{}{}",
+                std::env::var("HOME").unwrap_or_default(),
+                settings.default_export_palette_directory
+            ),
+            palettes_dirty: false,
             recalc_fractal: true, recalc_color: true,
             recalc_histogram: true,
         }
@@ -1197,12 +1212,78 @@ impl Scene {
     pub fn add_palette(&mut self, key: &String, palette: Rgba8Palette) {
         self.color_palettes.insert(key.clone(), palette);
         self.set_selected_palette(key);
+        self.palettes_dirty = true;
+    }
+
+    /// Directory MAP palettes are saved to (HOME + configured path).
+    pub fn palette_export_dir(&self) -> &str {
+        &self.palette_export_dir
+    }
+
+    /// Key of the currently-selected palette.
+    pub fn selected_palette_key(&self) -> String {
+        self.selected_palette.clone()
+    }
+
+    /// True (once) if the palette set changed since the last check, so the main
+    /// window can rebuild its pick-list.
+    pub fn take_palettes_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.palettes_dirty)
+    }
+
+    /// Register a palette under `key` (with display `name` and flat `colors`),
+    /// make it the selected palette, and flag the pick-list for refresh. Used by
+    /// the editor's "Save MAP". Colors are capped to the GPU texture width.
+    pub fn save_palette(&mut self, key: String, name: String, mut colors: Vec<[u8; 4]>) {
+        let cap = self.max_palette_colors as usize;
+        if colors.len() > cap {
+            colors.truncate(cap);
+        }
+        self.color_palettes.insert(key.clone(), Rgba8Palette { name, palette: colors });
+        self.set_selected_palette(&key);
+        self.palettes_dirty = true;
     }
 
     pub fn set_selected_palette(&mut self, key: &String) {
         self.selected_palette = key.clone();
         self.palette_changed = true;
         self.recalc_color = true;
+    }
+
+    // --- Live palette editing (Custom Palette Editor window) ---
+
+    /// Flat colors of the currently-selected palette (empty if none).
+    pub fn selected_palette_colors(&self) -> Vec<[u8; 4]> {
+        self.color_palettes
+            .get(&self.selected_palette)
+            .map(|p| p.palette.clone())
+            .unwrap_or_default()
+    }
+
+    /// Display name of the currently-selected palette (empty if none).
+    pub fn selected_palette_display_name(&self) -> String {
+        self.color_palettes
+            .get(&self.selected_palette)
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace the currently-selected palette's colors in place and mark it dirty
+    /// so the next frame re-uploads and recolors (live editing). Colors are capped
+    /// to the GPU texture width; empty input is ignored.
+    pub fn set_selected_palette_colors(&mut self, mut colors: Vec<[u8; 4]>) {
+        if colors.is_empty() {
+            return;
+        }
+        let cap = self.max_palette_colors as usize;
+        if colors.len() > cap {
+            colors.truncate(cap);
+        }
+        if let Some(p) = self.color_palettes.get_mut(&self.selected_palette) {
+            p.palette = colors;
+            self.palette_changed = true;
+            self.recalc_color = true;
+        }
     }
 
     pub fn set_palette_cycles(&mut self, cycles: f32) {
@@ -1217,6 +1298,11 @@ impl Scene {
     
     pub fn set_palette_gamma(&mut self, gamma: f32) {
         self.uniform.palette_gamma = gamma;
+        self.recalc_color = true;
+    }
+
+    pub fn set_palette_interp_mode(&mut self, mode: u32) {
+        self.uniform.palette_interp_mode = mode;
         self.recalc_color = true;
     }
 
