@@ -378,13 +378,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         color = mix(color, trap_color, uni.stripe_trap_arg4);
     }
 
+    let scale = ldexp(uni.scale, uni.scale_exp);
+    d /= scale; // Glow and AO seem to work better with scale as a factor
+
     if ((uni.render_flags & USE_DE) != 0) {
         var diffuse = calculate_diffuse(d, N);
         color *= diffuse;
     }
-
-    let scale = ldexp(uni.scale, uni.scale_exp);
-    d /= scale; // Glow and AO seem to work better with scale as a factor
 
     if ((uni.render_flags & ENABLE_GLOW) != 0) {
         let glow = 1.0 / (1.0 + d * pow(2.0, uni.distance_multiplier));

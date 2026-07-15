@@ -13,6 +13,7 @@ use std::fs::File;
 use chrono::Local;
 use iced_wgpu::core::font;
 use iced_wgpu::core::text::Wrapping;
+use iced_widget::button::Status;
 use png::Compression;
 use rfd::FileDialog;
 use strum::IntoEnumIterator;
@@ -1207,7 +1208,6 @@ impl Controls {
         ]
         .align_y(Alignment::Start);
 
-
         let toggles_row = row![
             button(
                 text!("\u{1F6C8}")
@@ -1216,31 +1216,31 @@ impl Controls {
                 .style(button::text),
             button("Iters")
                 .on_press(Message::EditingItersChanged(!self.editing_iters))
-                .style(if self.editing_iters {button::primary} else {button::text}),
+                .style(if self.editing_iters {button::primary} else {main_panel_button_style}),
             space().width(Length::Fixed(20.0)),
             button("Loc")
                 .on_press(Message::EditingLocationChanged(!self.editing_location))
-                .style(if self.editing_location {button::primary} else {button::text}),
+                .style(if self.editing_location {button::primary} else {main_panel_button_style}),
             space().width(Length::Fixed(20.0)),
             button("Res")
                 .on_press(Message::EditingResolutionChanged(!self.editing_resolution))
-                .style(if self.editing_resolution {button::primary} else {button::text}),
+                .style(if self.editing_resolution {button::primary} else {main_panel_button_style}),
             space().width(Length::Fixed(20.0)),
             button("Color")
                 .on_press(Message::EditingColorChanged(!self.editing_color))
-                .style(if self.editing_color {button::primary} else {button::text}),
+                .style(if self.editing_color {button::primary} else {main_panel_button_style}),
             space().width(Length::Fixed(20.0)),
             button("Func")
                 .on_press(Message::EditingFuncChanged(!self.editing_func))
-                .style(if self.editing_func {button::primary} else {button::text}),
+                .style(if self.editing_func {button::primary} else {main_panel_button_style}),
             space().width(Length::Fixed(20.0)),
             button("Scout")
                 .on_press(Message::EditingScoutConfigChanged(!self.editing_scout))
-                .style(if self.editing_scout {button::primary} else {button::text}),
+                .style(if self.editing_scout {button::primary} else {main_panel_button_style}),
             space().width(Length::Fixed(20.0)),
             button("Save")
                 .on_press(Message::EditingExportChanged(!self.editing_export))
-                .style(if self.editing_export {button::primary} else {button::text}),
+                .style(if self.editing_export {button::primary} else {main_panel_button_style}),
         ]
         .align_y(Alignment::Start);
 
@@ -2169,13 +2169,6 @@ impl Controls {
     fn render_histogram_controls(&self) -> Column<'_, Message, Theme, Renderer> {
         column![
             row![
-                checkbox(self.hist_frozen)
-                    .on_toggle(Message::HistFrozenChanged),
-                space().width(Length::Fixed(5.0)),
-                text("Freeze histogram")
-                    .align_y(Alignment::Center),
-            ].padding(5),
-            row![
                 text("Equalization")
                     .width(Length::Fixed(110.0))
                     .align_y(Alignment::Center),
@@ -2184,6 +2177,17 @@ impl Controls {
                     .width(Length::Fixed(180.0)),
                 space().width(Length::Fixed(5.0)),
                 text(format!("{:<4.2}", self.hist_eq_amount))
+                    .width(Length::Fixed(40.0))
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(20.0)),
+                text("Temporal blend")
+                    .width(Length::Fixed(120.0))
+                    .align_y(Alignment::Center),
+                slider(0.02..=1.0, self.hist_temporal_alpha, Message::HistTemporalAlphaChanged)
+                    .step(0.005)
+                    .width(Length::Fixed(180.0)),
+                space().width(Length::Fixed(5.0)),
+                text(format!("{:<4.2}", self.hist_temporal_alpha))
                     .width(Length::Fixed(40.0))
                     .align_y(Alignment::Center),
             ].padding(5),
@@ -2198,28 +2202,15 @@ impl Controls {
                 text(format!("{:<4.2}", self.hist_black_pct))
                     .width(Length::Fixed(40.0))
                     .align_y(Alignment::Center),
-            ].padding(5),
-            row![
+                space().width(Length::Fixed(20.0)),
                 text("White point")
-                    .width(Length::Fixed(110.0))
+                    .width(Length::Fixed(120.0))
                     .align_y(Alignment::Center),
                 slider(0.1..=1.0, self.hist_white_pct, Message::HistWhitePctChanged)
                     .step(0.005)
                     .width(Length::Fixed(180.0)),
                 space().width(Length::Fixed(5.0)),
                 text(format!("{:<4.2}", self.hist_white_pct))
-                    .width(Length::Fixed(40.0))
-                    .align_y(Alignment::Center),
-            ].padding(5),
-            row![
-                text("Temporal blend")
-                    .width(Length::Fixed(110.0))
-                    .align_y(Alignment::Center),
-                slider(0.02..=1.0, self.hist_temporal_alpha, Message::HistTemporalAlphaChanged)
-                    .step(0.005)
-                    .width(Length::Fixed(180.0)),
-                space().width(Length::Fixed(5.0)),
-                text(format!("{:<4.2}", self.hist_temporal_alpha))
                     .width(Length::Fixed(40.0))
                     .align_y(Alignment::Center),
             ].padding(5),
@@ -2234,10 +2225,9 @@ impl Controls {
                 text(format!("{}", self.hist_bin_count))
                     .width(Length::Fixed(40.0))
                     .align_y(Alignment::Center),
-            ].padding(5),
-            row![
+                space().width(Length::Fixed(20.0)),
                 text("Bin blur")
-                    .width(Length::Fixed(110.0))
+                    .width(Length::Fixed(120.0))
                     .align_y(Alignment::Center),
                 slider(0_u32..=64_u32, self.hist_blur_radius, Message::HistBlurRadiusChanged)
                     .step(1_u32)
@@ -2258,6 +2248,12 @@ impl Controls {
                     .on_toggle(Message::HistIncludeInteriorChanged),
                 space().width(Length::Fixed(5.0)),
                 text("Include interior")
+                    .align_y(Alignment::Center),
+                space().width(Length::Fixed(20.0)),
+                checkbox(self.hist_frozen)
+                    .on_toggle(Message::HistFrozenChanged),
+                space().width(Length::Fixed(5.0)),
+                text("Freeze histogram")
                     .align_y(Alignment::Center),
             ].padding(5),
         ].spacing(2)
@@ -2539,6 +2535,29 @@ impl Controls {
         }
         
         de_controls
+    }
+}
+
+fn main_panel_button_style(theme: &Theme, status: Status) -> button::Style {
+    let palette = theme.extended_palette();
+
+    match status {
+        Status::Hovered => {
+            button::Style {
+                background: Some(palette.background.strong.color.scale_alpha(0.80).into()),
+                text_color: Color::WHITE,
+                border: border::rounded(5),
+                ..Default::default()
+            }
+        },
+        _ => {
+            button::Style {
+                background: Some(palette.background.neutral.color.scale_alpha(0.40).into()),
+                text_color: Color::WHITE,
+                border: border::rounded(5),
+                ..Default::default()
+            }
+        }
     }
 }
 
