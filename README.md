@@ -42,7 +42,7 @@ That being said, my foremost goal with the project has always been: Make it fast
    1. Use of FloatExp is IN
    2. Use of BLA and iteration skipping is IN
    3. More on these below!
-7. Julia sets & cubic Mandelbrot 
+7. Julia sets, Mandelbrot Power-of-X, Burning Ship, Manowar, Phoenix  
 
 I've been iterating with ChatGPT on the 'Scout Engine' concept for a while now, and sometimes, if I am being honest, I wonder what the heck I was thinking to trust the AI to help me with design. It took me down some frightenting over-enginering paths - and this probably happened because of my own lack of understanding of perturbance - which created a hot-soup of complexity that I should have questened earlier on. That being said, it did help me understand the math better, and was useful for pouring through 10,000+ line log output.
 
@@ -89,8 +89,32 @@ v3.3 now has a much-improved navigation system. While not perfect, left-click/to
          1) Choices are: Linear, Pow, Log, and Atan
       2) Mapping Strength allows the user to control the 'k' variable in the mapping functions - i.e `t = pow(t, k)` | `t = log(1.0 + k * t) / log(1.0 + k)` | `t = atan(k * t) / atan(k)`
          1) Note, the ranges of this value change depending on which mapping function is selected, allowing for the user to pick 'sane' values for functions, and affect the most aesthetically pleasing band of iteration counts with an appropriate change of color. 
-   6) Distance Estimation controls 
+   6) Palette Interpolation
+      1) How colors are blended in between texals when stretching the palette across fractal iterations
+         1) Even when palette cycles are set to greater than 1.0, iteration count almost always exceeds the number of colors in the palette (and since neither of these counts are likely ever the same, both are normalized). The difference between these color effects (interpolations) becomes more visible when there are less colors in the palette.
+      2) Choose one of Linear, Smoothstep, Gamma Correct, Cosine, OkLab
+   7) Distance Estimation controls 
       1) There are a LOT of additions here, and another complete overhaul of the UI. The best place to look for docs is in `settings.toml`
+   8) Histogram Coloring controls
+      1) Equalization
+         1) Blend between histogram coloring on and off
+      2) Temporal Blend
+         1) Blend between previously saved histogram calculation and the next - reduces 'shimmer' effect when panning.
+      3) Black Point
+         1) Percentage of iterations to skip when computing the histogram (upper end)
+      4) White Point
+         1) Percentage of iterations to skip when computing the histogram (lower end)
+      5) Bin Count
+         1) Number of bins to use when grouping iteration counts
+         2) More bins = less smoothing
+      6) Bin Blur
+         1) Mixes counts between bins, where the radius equals the number of bins.
+      7) Log Binning 
+         1) Log domain binning
+      8) Include Interior
+         1) Count interior pixes when binning
+      9) Freeze Histogram
+         1) Lock the array of CDFs (the cumulated average per bin) so the color distribution doesn't change, even if the fractal is panned/zoomed.
 3) Scout Controls
    1) "Reset Scout" button will delete from program memory all reference orbits, and stop perturbation mode
       1) i.e. Absolute iteration will resume, with no reference orbit being used.
@@ -258,6 +282,33 @@ Im Line Traps
 
 ![Golden Spiral traps](/screenshots/fractal_260628_110005.png)
 Golden Spiral Traps
+
+### Power-of-X Mandelbrot & alternative formulas
+Version 3.4 now supports alternative formulas! Perturbation is also supported, though for Manowar, Phoenix, and Spider, glitches cannot be (easily) corrected (mainly due to the stateful behavior of these formula, where the mandelbrot rebase semantics do not apply).
+
+![Power-3 Mandelbrot](/screenshots/fractal_260713_181536.png)
+Mandelbrot 3rd Power
+
+![Power-4 Mandelbrot](/screenshots/fractal_260713_184403.png)
+Mandelbrot 4th Power
+
+![Power-5 Mandelbrot](/screenshots/fractal_260713_192602.png)
+Mandelbrot 5th Power
+
+![Power-6 Mandelbrot](/screenshots/fractal_260714_145151.png)
+Mandelbrot 6th Power
+
+![Power-7 Mandelbrot](/screenshots/fractal_260714_172255.png)
+Mandelbrot 7th Power
+
+![Burning Ship](/screenshots/fractal_260714_174434.png)
+Burning Ship Mandelbrot
+
+![Manowar](/screenshots/fractal_260714_180134.png)
+Manowar Fractal
+
+![Phoenix](/screenshots/fractal_260714_181455.png)
+Phoenix Fractal
 
 ## 3.1 Update - Distance Estimation is working now!
 
